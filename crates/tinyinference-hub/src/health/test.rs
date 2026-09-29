@@ -46,7 +46,7 @@ fn run(steps: &[Step]) -> ProviderHealth {
                 );
             }
             Step::Turn(reason) => {
-                snapshot.record_turn(reason.map(|r| (r, None)), now);
+                snapshot.record_turn(reason.map(|r| (r, None)), None, now);
             }
         }
     }
@@ -317,6 +317,22 @@ fn health_the_fold_table() {
             ProviderHealth::Degraded(ReasonCode::Timeout),
         ),
         (
+            "rate-limited turns beside an older timed-out probe with nothing passing are throttling",
+            vec![
+                Probe(Catalog, Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::RateLimited)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
+            "but the same shape with a real outage on both lanes is down",
+            vec![
+                Probe(Catalog, Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Down(ReasonCode::Timeout),
+        ),
+        (
             "but not an exhausted account",
             vec![Turn(Some(ReasonCode::Quota)), Probe(KeyOnly, None)],
             ProviderHealth::Down(ReasonCode::Quota),
@@ -370,7 +386,7 @@ fn health_a_status_change_reports_true_and_a_repeat_reports_false() {
         snapshot.changed_at_ms, 10,
         "the change time is when the status changed"
     );
-    assert!(snapshot.record_turn(fail(ReasonCode::Auth), 30));
+    assert!(snapshot.record_turn(fail(ReasonCode::Auth), None, 30));
     assert_eq!(snapshot.changed_at_ms, 30);
     assert_eq!(snapshot.last_ok_ms, Some(20));
     let note = snapshot.last_failure.unwrap();
@@ -418,7 +434,7 @@ fn health_wire_forms_are_stable() {
     assert_eq!(json(ProviderHealth::SignedOut), r#"{"state":"signed_out"}"#);
     let mut snapshot = HealthSnapshot::default();
     snapshot.record_probe(Completion, fail(ReasonCode::Model), Some(9), true, 5);
-    snapshot.record_turn(None, 6);
+    snapshot.record_turn(None, None, 6);
     let back: HealthSnapshot =
         serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
     assert_eq!(back, snapshot);
@@ -707,7 +723,7 @@ mod health_props {
             0 => snapshot.record_probe(TestDepth::KeyOnly, failure, None, true, now),
             1 => snapshot.record_probe(TestDepth::Catalog, failure, None, false, now),
             2 => snapshot.record_probe(TestDepth::Completion, failure, None, true, now),
-            _ => snapshot.record_turn(failure, now),
+            _ => snapshot.record_turn(failure, None, now),
         };
     }
 
@@ -917,7 +933,7 @@ fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degr
 #[test]
 fn health_the_superseded_flag_survives_storage_and_is_absent_when_false() {
     let mut snapshot = HealthSnapshot::default();
-    snapshot.record_turn(Some((ReasonCode::Timeout, None)), 1);
+    snapshot.record_turn(Some((ReasonCode::Timeout, None)), None, 1);
     snapshot.record_probe(TestDepth::Completion, None, None, true, 2);
     let text = serde_json::to_string(&snapshot).unwrap();
     assert!(text.contains("\"superseded\":true"), "{text}");
@@ -944,7 +960,7 @@ async fn health_idle_locks_are_dropped_so_the_map_does_not_grow_with_every_provi
 #[test]
 fn health_an_authenticated_catalog_pass_that_proves_the_key_clears_a_rejected_key_everywhere() {
     let mut snapshot = HealthSnapshot::default();
-    snapshot.record_turn(Some((ReasonCode::Auth, None)), 1);
+    snapshot.record_turn(Some((ReasonCode::Auth, None)), None, 1);
     snapshot.record_probe(
         TestDepth::KeyOnly,
         Some((ReasonCode::Auth, None)),
@@ -959,4 +975,31 @@ fn health_an_authenticated_catalog_pass_that_proves_the_key_clears_a_rejected_ke
     snapshot.record_probe(TestDepth::Catalog, None, None, true, 4);
     assert_eq!(snapshot.health, ProviderHealth::Ok);
     assert_eq!(snapshot.consecutive_failures, 0);
+}
+
+#[tokio::test]
+async fn health_a_turns_latency_is_kept_in_the_snapshot() {
+    let bed = bed();
+    let (s, p) = (scope(), slug());
+    bed.tracker
+        .record_outcome(
+            &s,
+            &p,
+            &Outcome::Ok {
+                latency: Duration::from_millis(1234),
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = bed.tracker.snapshot(&s, &p).await.unwrap();
+    assert_eq!(snapshot.turn.unwrap().latency_ms, Some(1234));
+    let text = serde_json::to_string(&snapshot).unwrap();
+    assert!(text.contains("\"latency_ms\":1234"), "{text}");
+    // A failed turn has none, and none is not written.
+    bed.tracker
+        .record_outcome(&s, &p, &failure(ReasonCode::Timeout))
+        .await
+        .unwrap();
+    let after = serde_json::to_string(&bed.tracker.snapshot(&s, &p).await.unwrap().turn).unwrap();
+    assert!(!after.contains("latency_ms"), "{after}");
 }

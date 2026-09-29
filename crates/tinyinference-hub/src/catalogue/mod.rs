@@ -123,8 +123,11 @@ pub fn group_of(kind: &str) -> ProviderGroup {
 /// The catalog shape a provider's `GET {base}/models` answers in.
 ///
 /// The managed kind, or any endpoint whose path ends in
-/// [`MANAGED_PROXY_PATH`], answers in the paged envelope; everything else
-/// follows its descriptor and defaults to the OpenAI shape.
+/// [`MANAGED_PROXY_PATH`], answers in the paged envelope (OpenCompany's
+/// backend, the default); everything else follows its descriptor and defaults to
+/// the OpenAI shape. A host on the OpenAI-shaped managed backend registers
+/// `ManagedDriver::openai_shaped` and reads the shape from that driver's own
+/// descriptor instead, which it rewrites to say so.
 pub fn catalog_shape_for(kind: &str, base_url: &str) -> CatalogShape {
     let managed = descriptor(kind).is_some_and(|d| d.group == ProviderGroup::Managed);
     if managed

@@ -11,6 +11,7 @@ mod record;
 mod types;
 
 pub use capabilities::{CapSource, Capabilities, Sourced, Tri};
+pub(crate) use record::find_credential_field;
 pub use record::{ExtractedCredential, LegacyFields, ProviderRecord, RecordOrigin};
 pub use types::{ProviderDescriptor, Quirk};
 

@@ -556,7 +556,10 @@ async fn probe_a_catalog_too_large_to_read_is_unknown_and_noted() {
     let failure = report.failure.clone().unwrap();
     assert_eq!(failure.reason, ReasonCode::Unknown);
     assert!(failure.truncated && !failure.rolls_back(ProviderGroup::Custom));
-    assert!(report.notes.contains(&ProbeNote::CatalogTruncated));
+    assert!(
+        !report.notes.contains(&ProbeNote::CatalogTruncated),
+        "no models were read, so there is no prefix to warn about; the failure says it"
+    );
 }
 
 #[tokio::test]

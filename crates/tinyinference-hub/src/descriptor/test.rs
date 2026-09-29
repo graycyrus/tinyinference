@@ -461,3 +461,41 @@ fn extract_credentials_drops_null_and_empty_fields_instead_of_extracting_nothing
     assert_eq!(record.legacy.len(), 1);
     assert!(record.legacy.contains_key("note"));
 }
+
+#[test]
+fn a_legacy_field_named_like_one_of_the_records_own_is_refused_before_it_can_write_a_duplicate_key()
+{
+    for name in [
+        "id",
+        "slug",
+        "label",
+        "kind",
+        "base_url",
+        "model",
+        "enabled",
+        "auth_override",
+        "synthetic",
+        "origin",
+    ] {
+        let mut r = record();
+        r.legacy.insert(name.to_string(), json!("shadow"));
+        let error = r.validate().unwrap_err();
+        assert!(
+            matches!(error, crate::InvalidInput::Reserved { .. }),
+            "{name}: {error:?}"
+        );
+    }
+    let mut ok = record();
+    ok.legacy.insert("tiers".into(), json!({"chat-v1": "m"}));
+    assert!(ok.validate().is_ok());
+}
+
+#[test]
+fn extract_credentials_leaves_a_non_string_credential_in_place_so_the_load_still_fails() {
+    let (cleaned, extracted) = ProviderRecord::extract_credentials(json!({
+        "id": "p", "slug": "acme", "label": "A", "kind": "custom", "base_url": "https://a.test/v1",
+        "api_key": {"v": "sk-not-a-real-key"}
+    }));
+    assert!(extracted.is_empty());
+    assert!(serde_json::from_value::<ProviderRecord>(cleaned).is_err());
+}

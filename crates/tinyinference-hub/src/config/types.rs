@@ -182,8 +182,17 @@ impl HubConfig {
                 reason: "written by a newer version of the hub",
             });
         }
-        if let Some(name) = self.extra.keys().find(|name| is_credential_name(name)) {
-            return Err(InvalidInput::CredentialField { name: name.clone() });
+        // A credential is refused at any depth, exactly as a record's own
+        // fields are: nesting it under an unknown field must not get it saved.
+        for (name, value) in &self.extra {
+            let found = if is_credential_name(name) {
+                Some(name.clone())
+            } else {
+                crate::descriptor::find_credential_field(value, 0)
+            };
+            if let Some(name) = found {
+                return Err(InvalidInput::CredentialField { name });
+            }
         }
         let mut seen = std::collections::HashSet::new();
         for record in &self.providers {

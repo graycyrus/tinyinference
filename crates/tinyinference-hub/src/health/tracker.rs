@@ -191,9 +191,12 @@ impl HealthTracker {
         outcome: &Outcome,
     ) -> Result<ProviderHealth, HubError> {
         match outcome {
-            Outcome::Ok { .. } => {
-                self.update(scope, slug, |snapshot, now| snapshot.record_turn(None, now))
-                    .await
+            Outcome::Ok { latency } => {
+                let latency_ms = u64::try_from(latency.as_millis()).ok();
+                self.update(scope, slug, move |snapshot, now| {
+                    snapshot.record_turn(None, latency_ms, now)
+                })
+                .await
             }
             Outcome::Failed(failure) if failure.reason == ReasonCode::SignedOut => {
                 self.mark_signed_out(scope, slug).await
@@ -201,7 +204,7 @@ impl HealthTracker {
             Outcome::Failed(failure) => {
                 let note = (failure.reason, failure.status);
                 self.update(scope, slug, move |snapshot, now| {
-                    snapshot.record_turn(Some(note), now)
+                    snapshot.record_turn(Some(note), None, now)
                 })
                 .await
             }

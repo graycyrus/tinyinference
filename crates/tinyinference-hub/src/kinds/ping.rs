@@ -70,7 +70,11 @@ pub(super) async fn ping_by_protocol(
             "messages": [{"role": "user", "content": PING_PROMPT}],
         }),
     );
-    let request = cx.request(descriptor, target, request);
+    let request = cx.request(
+        descriptor,
+        target,
+        request.with_body_cap(cx.policy.answer_cap),
+    );
     let response = cx.call_with(classify, request).await?;
     require_answer(&response, "the completion")
 }

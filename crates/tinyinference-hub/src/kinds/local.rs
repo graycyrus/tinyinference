@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use crate::catalog::{Fetched, parse_lmstudio_v0, parse_ollama_tags, too_large};
 use crate::descriptor::ProviderDescriptor;
 use crate::error::{HubError, ProviderFailure, ReasonCode};
-use crate::ports::HubRequest;
 use crate::taxonomy::LocalRuntime;
 
 use super::openai_compat::read_listing;
@@ -87,15 +86,13 @@ impl KindDriver for LocalDriver {
     ) -> Result<Fetched, HubError> {
         let base = target.base();
         let origin = origin_of(base);
-        let read = |url: String| {
-            cx.request(
-                &self.descriptor,
-                target,
-                HubRequest::get(url).with_body_cap(cx.policy.catalog_cap),
-            )
-        };
+        let started = cx.clock.now();
+        let read = |url: String| cx.list_request(&self.descriptor, target, url, started);
         if self.runtime() == Some(LocalRuntime::LmStudio) {
-            match cx.call(self, read(format!("{origin}/api/v0/models"))).await {
+            match cx
+                .call(self, read(format!("{origin}/api/v0/models"))?)
+                .await
+            {
                 Ok(response) if !response.truncated => {
                     if let Ok(parsed) = parse_lmstudio_v0(&response.body) {
                         return Ok(Fetched::new(parsed.entries));
@@ -109,7 +106,7 @@ impl KindDriver for LocalDriver {
         // The OpenAI-compatible listing, read and parsed as one step so that a
         // body that is not a listing (an older build, a proxy's landing page)
         // can fall back exactly like a missing path.
-        let (openai, answered) = match cx.call(self, read(target.join("/models"))).await {
+        let (openai, answered) = match cx.call(self, read(target.join("/models"))?).await {
             Ok(response) => (read_listing(&response), true),
             Err(error) => (Err(error), false),
         };
@@ -118,7 +115,7 @@ impl KindDriver for LocalDriver {
                 if self.runtime() == Some(LocalRuntime::Ollama)
                     && (is_missing(&failure) || (answered && is_unreadable(&failure))) =>
             {
-                let response = cx.call(self, read(format!("{origin}/api/tags"))).await?;
+                let response = cx.call(self, read(format!("{origin}/api/tags"))?).await?;
                 if response.truncated {
                     return Err(HubError::Provider(too_large("the tags list")));
                 }

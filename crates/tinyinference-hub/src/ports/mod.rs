@@ -2,8 +2,9 @@
 //!
 //! A host implements the four required ports ([`CredentialStore`],
 //! [`ConfigStore`], [`Http`], [`Clock`]) and may replace the defaulted ones
-//! ([`HealthStore`], [`EventSink`], [`TokenSource`], [`Detector`],
-//! [`EnvSource`]). In-memory implementations live in [`memory`]; the no-socket
+//! ([`HealthStore`], [`EventSink`], [`EnvSource`], with in-memory or no-op
+//! defaults in [`memory`]) or supply the optional ones only when they apply
+//! ([`TokenSource`] for a rotating token, [`Detector`] for first-run detection). In-memory implementations live in [`memory`]; the no-socket
 //! test doubles live in `testkit` (feature `testing`).
 //!
 //! Every port is object-safe, `Send + Sync`, and has a redacting `Debug`, so

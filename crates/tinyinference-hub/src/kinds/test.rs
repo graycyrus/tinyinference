@@ -897,9 +897,13 @@ async fn kinds_a_2xx_that_is_not_a_json_answer_is_not_a_passing_ping_or_key_chec
 }
 
 #[tokio::test]
-async fn kinds_requests_without_a_size_of_their_own_take_the_policys_failure_cap() {
+async fn kinds_small_answers_have_their_own_cap_apart_from_the_failure_cap() {
     let mut bed = Bed::new();
-    bed.policy.fail_body_cap = 1234;
+    bed.policy.fail_body_cap = 100;
+    bed.http.route(
+        Match::post("https://a.test/v1/chat/completions"),
+        Scripted::json(200, &json!({"id": "x".repeat(5_000), "choices": []})),
+    );
     let (slug, kind, key) = (
         Slug::parse("acme").unwrap(),
         KindId::new("custom"),
@@ -912,21 +916,58 @@ async fn kinds_requests_without_a_size_of_their_own_take_the_policys_failure_cap
         &AuthStyle::Bearer,
         Some(&key),
     );
+    // A healthy 5 KB answer is not "cut off" because failure bodies are capped tiny.
+    OpenAiCompatDriver::custom()
+        .completion_ping(&bed.cx(), &t, &ModelId::parse("m").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(bed.policy.answer_cap, 256 * 1024);
+    // A request built for a listing keeps the cap it asked for.
     let d = OpenAiCompatDriver::custom();
-    let ping = bed.cx().request(
-        d.descriptor(),
-        &t,
-        HubRequest::post_json("https://a.test/v1/x", &json!({})),
-    );
-    assert_eq!(ping.body_cap, 1234);
     let listing = bed.cx().request(
         d.descriptor(),
         &t,
-        HubRequest::get("https://a.test/v1/models").with_body_cap(99_000_000),
+        HubRequest::get("https://a.test/v1/models").with_body_cap(64 * 1024),
     );
+    assert_eq!(listing.body_cap, 64 * 1024);
+    assert_eq!(listing.timeout, bed.policy.timeout);
+}
+
+#[tokio::test]
+async fn kinds_a_chain_of_fallbacks_shares_one_list_deadline() {
+    // OpenRouter's account listing takes 8 s and 404s; the public one would take
+    // 8 s more. With a 10 s deadline the second request gets 2 s and times out.
+    let mut bed = Bed::new();
+    bed.policy = EndpointPolicy::hosted().with_list_deadline(Duration::from_secs(10));
+    bed.http.route(
+        Match::prefix("https://openrouter.ai/api/v1/models/user"),
+        Scripted::text(404, "gone").after(Duration::from_secs(8)),
+    );
+    bed.http.route(
+        Match::prefix("https://openrouter.ai/api/v1/models?"),
+        Scripted::json(200, &json!({"data": [{"id": "pub/1"}]})).after(Duration::from_secs(8)),
+    );
+    let (slug, kind, key) = (
+        Slug::parse("openrouter").unwrap(),
+        KindId::new("openrouter"),
+        Secret::new("sk-or-fake"),
+    );
+    let t = target(
+        &slug,
+        &kind,
+        "https://openrouter.ai/api/v1",
+        &AuthStyle::Bearer,
+        Some(&key),
+    );
+    let started = crate::ports::Clock::now(&bed.clock);
+    let error = driver("openrouter")
+        .list_models(&bed.cx(), &t)
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Timeout);
     assert_eq!(
-        listing.body_cap, 99_000_000,
-        "a catalog read keeps the cap it asked for"
+        crate::ports::Clock::now(&bed.clock) - started,
+        Duration::from_secs(10),
+        "the whole read stopped at the deadline"
     );
-    assert_eq!(ping.timeout, bed.policy.timeout);
 }

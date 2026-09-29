@@ -232,3 +232,22 @@ fn config_a_document_from_a_newer_hub_is_refused_not_rewritten() {
     // The current version and older ones load.
     assert!(serde_json::from_str::<HubConfig>(r#"{"schema_version":0}"#).is_ok());
 }
+
+#[test]
+fn config_a_credential_nested_under_an_unknown_field_is_refused_too() {
+    for text in [
+        r#"{"telemetry":{"api_key":"sk-not-a-real-key"}}"#,
+        r#"{"a":[{"b":{"client_secret":"x"}}]}"#,
+        r#"{"a":{"b":{"c":{"password":"x"}}}}"#,
+    ] {
+        let error = serde_json::from_str::<HubConfig>(text)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("looks like a credential"), "{text}: {error}");
+        assert!(!error.contains("sk-not-a-real-key"));
+    }
+    assert!(
+        serde_json::from_str::<HubConfig>(r#"{"telemetry":{"page_token":"x","max_tokens":5}}"#)
+            .is_ok()
+    );
+}

@@ -22,6 +22,8 @@
 //! * [`catalogue`] and [`descriptor`]: every built-in kind as data.
 //! * [`policy`] and [`endpoint`]: the SSRF policy and endpoint credential
 //!   redaction.
+//! * [`config`]: the persisted [`HubConfig`](config::HubConfig) and
+//!   [`ProviderDraft`](config::ProviderDraft).
 //! * [`ports`]: the traits a host implements, and in-memory defaults.
 //! * [`credential`]: the ordered credential chain and its sources.
 //! * [`catalog`]: listing parsers, the safe model-list cache, metadata merge.

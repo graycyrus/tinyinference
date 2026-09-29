@@ -19,7 +19,9 @@ pub enum ProbeNote {
     /// Fireworks key sees no public models, so an empty list is expected there,
     /// not a fault (`Quirk::CatalogAccountScoped`).
     AccountScopedCatalogIsEmpty,
-    /// The catalog had more pages than one read follows.
+    /// A **successful** catalog read had more pages than one read follows, so
+    /// the models are a prefix. (A listing too large to read at all is a failure
+    /// with `truncated` set, not this note.)
     CatalogTruncated,
 }
 

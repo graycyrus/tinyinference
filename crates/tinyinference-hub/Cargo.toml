@@ -48,11 +48,12 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = []
-# Subprocess CLI-login readiness (a later milestone); off by default.
+# The `ProcessSpawner` port for CLI-login readiness (the readiness check itself
+# arrives with `Hub`); off by default.
 cli = []
 # Types only. No OAuth flow is ever enabled by this feature.
 oauth = []
-# The no-socket simulation harness (a later milestone).
+# The no-socket simulation kit: `FakeClock`, `ScriptedHttp`, the contract suite.
 testing = []
 # `From`/`TryFrom` bridges to `tinyinference-local`'s enums.
 local-bridge = ["dep:tinyinference-local"]

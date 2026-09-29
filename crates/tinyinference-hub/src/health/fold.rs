@@ -202,11 +202,18 @@ impl HealthSnapshot {
                 ProviderHealth::Down(turn_reason.unwrap_or(ReasonCode::Unknown))
             }
             Some(worst) if passing > 0 => ProviderHealth::Degraded(worst),
+            Some(worst) if worst == ReasonCode::Endpoint => ProviderHealth::Down(worst),
+            // With nothing passing, several lanes failing (or a run of failed
+            // turns) is an outage only if every failure that is counted is the
+            // kind that repeating makes an outage: a rate-limited turn beside an
+            // older timed-out probe is still just throttling.
             Some(worst)
-                if worst == ReasonCode::Endpoint
-                    || (repeats_mean_down(worst)
-                        && (self.consecutive_failures >= FAILURES_TO_DOWN
-                            || failing.len() >= 2)) =>
+                if repeats_mean_down(worst)
+                    && (failing.len() >= 2 || self.consecutive_failures >= FAILURES_TO_DOWN)
+                    && failing
+                        .iter()
+                        .filter_map(|lane| lane.reason)
+                        .all(repeats_mean_down) =>
             {
                 ProviderHealth::Down(worst)
             }
@@ -258,11 +265,17 @@ impl HealthSnapshot {
     }
 
     /// Records the result of a real turn. Returns whether the status changed.
-    pub fn record_turn(&mut self, failure: Option<(ReasonCode, Option<u16>)>, now_ms: u64) -> bool {
+    pub fn record_turn(
+        &mut self,
+        failure: Option<(ReasonCode, Option<u16>)>,
+        latency_ms: Option<u64>,
+        now_ms: u64,
+    ) -> bool {
         if failure.is_none() {
             self.supersede_chat_failures(false, true, |r| !is_terminal(r));
         }
         self.turn = Some(TurnSignal {
+            latency_ms,
             ok: failure.is_none(),
             superseded: false,
             reason: failure.map(|(reason, _)| reason),

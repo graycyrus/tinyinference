@@ -96,6 +96,11 @@ pub struct EndpointPolicy {
     pub timeout: Duration,
     /// Bytes of a **failure** body read before the rest is discarded.
     pub fail_body_cap: usize,
+    /// Bytes of a *successful* small answer (a completion ping, a key check)
+    /// kept before it is refused as not-an-answer. Separate from
+    /// [`fail_body_cap`](Self::fail_body_cap): shrinking the failure cap must not
+    /// make a healthy provider's answer look cut off.
+    pub answer_cap: usize,
     /// Bytes of a successful model-catalog body read before it is refused as
     /// too large.
     pub catalog_cap: usize,
@@ -117,6 +122,7 @@ impl EndpointPolicy {
             max_redirects: 3,
             timeout: Duration::from_secs(10),
             fail_body_cap: 64 * 1024,
+            answer_cap: 256 * 1024,
             catalog_cap: 16 * 1024 * 1024,
             page_cap: 4 * 1024 * 1024,
             list_deadline: Duration::from_secs(60),

@@ -73,6 +73,9 @@ pub struct ProbeSignal {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSignal {
+    /// How long the turn took, when the host reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
     /// Whether the turn succeeded.
     pub ok: bool,
     /// A later success in a lane that proves this failure is over cleared it.

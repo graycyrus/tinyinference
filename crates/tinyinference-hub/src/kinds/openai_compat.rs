@@ -57,7 +57,11 @@ impl KindDriver for OpenAiCompatDriver {
             });
         }
         let request = HubRequest::get(target.join("/key"));
-        let request = cx.request(&self.descriptor, target, request);
+        let request = cx.request(
+            &self.descriptor,
+            target,
+            request.with_body_cap(cx.policy.answer_cap),
+        );
         let response = cx.call(self, request).await?;
         super::ping::require_answer(&response, "the key check")
     }
@@ -68,13 +72,8 @@ impl KindDriver for OpenAiCompatDriver {
         target: &Target<'_>,
     ) -> Result<Fetched, HubError> {
         let base = target.base();
-        let read = |url: String| {
-            cx.request(
-                &self.descriptor,
-                target,
-                HubRequest::get(url).with_body_cap(cx.policy.catalog_cap),
-            )
-        };
+        let started = cx.clock.now();
+        let read = |url: String| cx.list_request(&self.descriptor, target, url, started);
         // The account-scoped listing first, where the host has one. A 404 is the
         // look-alike case (a gateway answering on OpenRouter's own host, or
         // OpenRouter withdrawing the path): degrade to the public listing rather
@@ -83,7 +82,7 @@ impl KindDriver for OpenAiCompatDriver {
         let mut scoped_attempted = false;
         if let Some(path) = scoped_catalog_path(base, target.key().is_some()) {
             scoped_attempted = true;
-            match cx.call(self, read(target.join(path))).await {
+            match cx.call(self, read(target.join(path))?).await {
                 Ok(response) => return read_listing(&response),
                 Err(HubError::Provider(failure)) if failure.status == Some(404) => {
                     tracing::warn!(
@@ -98,7 +97,7 @@ impl KindDriver for OpenAiCompatDriver {
         let response = cx
             .call(
                 self,
-                read(target.join(&format!("/models{}", catalog_query(base)))),
+                read(target.join(&format!("/models{}", catalog_query(base))))?,
             )
             .await?;
         let mut fetched = read_listing(&response)?;

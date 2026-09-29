@@ -134,7 +134,21 @@ impl TryFrom<ProviderRecordWire> for ProviderRecord {
 /// nested objects and arrays (a secret under `tiers` or `headers` is still a
 /// secret on the record). Depth-bounded so a hostile file cannot recurse
 /// without limit.
-fn find_credential_field(value: &serde_json::Value, depth: usize) -> Option<String> {
+/// The names of the record's own serialised fields.
+const KNOWN_FIELDS: &[&str] = &[
+    "id",
+    "slug",
+    "label",
+    "kind",
+    "base_url",
+    "model",
+    "enabled",
+    "auth_override",
+    "synthetic",
+    "origin",
+];
+
+pub(crate) fn find_credential_field(value: &serde_json::Value, depth: usize) -> Option<String> {
     // Fail closed: a structure nested deeper than the bound is refused rather
     // than assumed clean, so a credential cannot hide under nine levels.
     if depth > 8 {
@@ -197,6 +211,15 @@ impl ProviderRecord {
             });
         }
         for (name, value) in &self.legacy {
+            // The record's own fields are flattened beside these; a legacy entry
+            // of the same name would write a duplicate key that no later load
+            // can read.
+            if KNOWN_FIELDS.contains(&name.as_str()) {
+                return Err(InvalidInput::Reserved {
+                    field: InputField::Key,
+                    value: name.clone(),
+                });
+            }
             let found = if is_credential_name(name) {
                 Some(name.clone())
             } else {
@@ -231,9 +254,11 @@ impl ProviderRecord {
             .collect();
         let mut extracted = Vec::new();
         for name in names {
-            // A null, empty or non-string credential field carries nothing to
-            // move, so it is dropped rather than left to fail the load; a
-            // string is handed back so it can be written to the store.
+            // A non-empty string is handed back so it can be written to the
+            // store; a null or empty one carries nothing to move and is
+            // dropped. A credential of any other type is left in place on
+            // purpose, so deserialising the cleaned value still fails loudly
+            // rather than persisting it.
             match map.get(&name) {
                 Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
                     if let Some(serde_json::Value::String(text)) = map.remove(&name) {

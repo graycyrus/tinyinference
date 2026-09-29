@@ -55,10 +55,6 @@ pub struct HubRequest {
 }
 
 impl HubRequest {
-    /// The response bytes kept when the caller does not say (enough to classify
-    /// an error body; a catalog read asks for more).
-    pub const DEFAULT_BODY_CAP: usize = 64 * 1024;
-
     fn base(method: Method, url: impl Into<String>) -> Self {
         let policy = EndpointPolicy::hosted();
         Self {
@@ -67,7 +63,7 @@ impl HubRequest {
             headers: Vec::new(),
             body: None,
             timeout: policy.timeout,
-            body_cap: Self::DEFAULT_BODY_CAP,
+            body_cap: policy.fail_body_cap,
             credentialed: false,
         }
     }

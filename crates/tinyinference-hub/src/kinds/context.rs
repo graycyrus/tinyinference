@@ -246,13 +246,35 @@ impl DriverContext<'_> {
                 .strip_product_header_unless_first_party(&mut product, &request.url);
             request.headers.extend(product);
         }
-        // The policy is the authority on how long and how much: a request that
-        // was not given a body cap of its own keeps the policy's failure cap.
+        // The policy is the authority on how long. (How much is the caller's to
+        // say: a listing asks for the catalog cap, a ping for the answer cap.)
         request.timeout = self.policy.timeout;
-        if request.body_cap == HubRequest::DEFAULT_BODY_CAP {
-            request.body_cap = self.policy.fail_body_cap;
-        }
         request
+    }
+
+    /// A `GET` for one request of a model-list read that began at `started`:
+    /// the catalog size cap, and a timeout clamped to what the list deadline has
+    /// left, so a chain of fallbacks (scoped then public, native then
+    /// compatible) is bounded as a whole, not per request.
+    ///
+    /// # Errors
+    ///
+    /// A `timeout` failure once the deadline has passed.
+    pub(crate) fn list_request(
+        &self,
+        descriptor: &ProviderDescriptor,
+        target: &Target<'_>,
+        url: String,
+        started: std::time::Instant,
+    ) -> Result<HubRequest, HubError> {
+        let left = self.time_left(started)?;
+        let mut request = self.request(
+            descriptor,
+            target,
+            HubRequest::get(url).with_body_cap(self.policy.catalog_cap),
+        );
+        request.timeout = request.timeout.min(left);
+        Ok(request)
     }
 
     /// How much of the list deadline is left for a read that started at
