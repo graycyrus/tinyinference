@@ -1053,3 +1053,41 @@ fn any_credential_named_json_member_is_redacted_from_raw() {
     let _ = scrub_log_text(r#"{"token":"abc"#);
     let _ = scrub_log_text(r#"{"token"#);
 }
+
+#[test]
+fn stray_quotes_in_the_surrounding_text_do_not_hide_a_json_credential() {
+    // Regression (review round 5): pairing quotes from the start of the text
+    // let one odd quote shift every later member.
+    for text in [
+        r#"upstream said "bad {"api_key":"sk-LEAK1"}"#,
+        r#"the "model" x said "oops" then {"client_secret":"sk-LEAK2","ok":1}"#,
+        r#"unterminated " quote then {"token":"sk-LEAK3"}"#,
+        r#"{"a":"b","password":"sk-LEAK4"}"#,
+    ] {
+        let scrubbed = scrub_log_text(text);
+        assert!(!scrubbed.contains("sk-LEAK"), "{text} -> {scrubbed}");
+        assert!(scrubbed.contains("<redacted>"), "{scrubbed}");
+    }
+    let kept = scrub_log_text(r#"upstream said "bad {"note":"keep","n":5}"#);
+    assert!(kept.contains(r#""note":"keep""#), "{kept}");
+    // Two adjacent credential members are both redacted (the first
+    // implementation re-read the closing quote as an opening one).
+    let two = scrub_log_text(r#"{"client_secret":"a1","refresh_token":"b2","x":"y"}"#);
+    assert!(
+        !two.contains("a1") && !two.contains("b2") && two.contains(r#""x":"y""#),
+        "{two}"
+    );
+}
+
+proptest! {
+    #[test]
+    fn a_credential_member_is_always_redacted_whatever_surrounds_it(
+        // A prefix with no quote or backslash cannot open a string, so the
+        // member is well formed; the suffix is unconstrained.
+        prefix in "[ !#-\\[\\]-~]{0,40}", suffix in "[ -~]{0,40}", value in "sk-[A-Za-z0-9]{8,16}",
+    ) {
+        let text = format!("{prefix}{{\"api_key\":\"{value}\"}}{suffix}");
+        let scrubbed = scrub_log_text(&text);
+        prop_assert!(!scrubbed.contains(&value), "{scrubbed}");
+    }
+}

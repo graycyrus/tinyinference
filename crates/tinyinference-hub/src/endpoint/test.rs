@@ -546,10 +546,6 @@ fn redacting_an_endpoint_masks_credential_query_values_too() {
         "https://h.test/v1?a=1&api_key=***&Signature=***&limit=5#frag"
     );
     assert_eq!(
-        redact_endpoint("https://h.test/v1?code=abc"),
-        "https://h.test/v1?code=***"
-    );
-    assert_eq!(
         redact_endpoint("https://u:pw@h.test/v1?subscription-key=abc"),
         "https://***@h.test/v1?subscription-key=***"
     );
@@ -567,7 +563,6 @@ fn azure_and_cookie_style_query_names_count_as_credentials() {
         "https://h.test/v1?subscription-key=a",
         "https://h.test/v1?Ocp-Apim-Subscription-Key=a",
         "https://h.test/v1?x-functions-key=a",
-        "https://h.test/v1?code=a",
         "https://h.test/v1?cookie=a",
         "https://h.test/v1?app_key=a",
         "https://h.test/v1?X-Amz-Signature=a",
@@ -576,6 +571,10 @@ fn azure_and_cookie_style_query_names_count_as_credentials() {
         assert!(endpoint_query_has_credential(url), "{url}");
     }
     for url in [
+        // A bare `code` is a routing parameter as often as a secret.
+        "https://h.test/v1?code=eu",
+        "https://h.test/v1?public_key=a",
+        "https://h.test/v1?page_token=a",
         "https://h.test/v1?secretary=a",
         "https://h.test/v1?monkey=a",
         "https://h.test/v1?max_tokens=5",
@@ -613,4 +612,38 @@ fn an_absolute_host_name_is_the_same_host() {
         endpoint_host("api.groq.com./x").as_deref(),
         Some("api.groq.com")
     );
+}
+
+// ---- round 5 review regressions ----------------------------------------------------------
+
+#[test]
+fn a_percent_encoded_credential_name_is_masked_as_well_as_detected() {
+    // Regression (review round 5): detection decoded names, masking did not.
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?%6Bey=SECRET1&a=b"),
+        "https://h.test/v1?%6Bey=***&a=b"
+    );
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?api%5Fkey=SECRET2"),
+        "https://h.test/v1?api%5Fkey=***"
+    );
+    assert!(endpoint_query_has_credential(
+        "https://h.test/v1?%6Bey=SECRET1"
+    ));
+    assert!(endpoint_query_has_credential(
+        "https://h.test/v1?api%5Fkey=S"
+    ));
+}
+
+#[test]
+fn run_together_credential_names_in_a_query_are_caught() {
+    for name in ["openaiapikey", "dbpassword", "clientsecret", "APITOKEN"] {
+        let url = format!("https://h.test/v1?{name}=S5");
+        assert!(endpoint_query_has_credential(&url), "{name}");
+        assert_eq!(
+            redact_endpoint(&url),
+            format!("https://h.test/v1?{name}=***"),
+            "{name}"
+        );
+    }
 }

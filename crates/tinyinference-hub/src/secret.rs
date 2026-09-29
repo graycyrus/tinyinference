@@ -117,10 +117,13 @@ impl<T> fmt::Display for LogOnly<T> {
 /// ignored. The name is judged by its **last word** so `api_key`,
 /// `subscription-key`, `clientSecret` and `db_passwd` are caught while
 /// `secretary`, `max_tokens`, `tokenizer` and `keywords` are not: the last word
-/// is one of `key`, `token`, `secret`, `password`, `passwd`, `passphrase`,
-/// `credential(s)`, `signature`, `sig`, `cookie`, `pwd`, `authorization`,
-/// `bearer` or `apikey`; the whole name is `auth`; or it contains `api_key`,
-/// `access_key`, `private_key`, `authorization` or `bearer`.
+/// is one of `secret`, `password`, `passwd`, `passphrase`, `credential(s)`,
+/// `signature`, `sig`, `cookie`, `pwd`, `authorization`, `bearer` or `apikey`;
+/// or `key`/`token` unless a word in the name is plainly benign (`public_key`,
+/// `cache_key`, `page_token`); the whole name is `auth`; it contains `api_key`,
+/// `access_key`, `private_key`, `authorization` or `bearer`; or it ends in a
+/// run-together `apikey`, `secret`, `password`, `passwd`, `passphrase` or
+/// `apitoken` (`openaiapikey`, `clientsecret`).
 pub(crate) fn is_credential_name(name: &str) -> bool {
     let mut lower = String::with_capacity(name.len() + 4);
     let mut previous: Option<char> = None;
@@ -137,9 +140,8 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         });
         previous = Some(c);
     }
-    const LAST_WORD: &[&str] = &[
-        "key",
-        "token",
+    // Last words that always mark a credential.
+    const ALWAYS: &[&str] = &[
         "secret",
         "password",
         "passwd",
@@ -154,6 +156,28 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         "bearer",
         "apikey",
     ];
+    // `key` and `token` are ambiguous (`public_key`, `page_token`), so a name
+    // ending in one is a credential unless a word in it says otherwise.
+    const AMBIGUOUS: &[&str] = &["key", "token"];
+    const BENIGN_WORDS: &[&str] = &[
+        "public",
+        "cache",
+        "sort",
+        "primary",
+        "foreign",
+        "page",
+        "pagination",
+        "next",
+        "continuation",
+        "partition",
+        "row",
+        "idempotency",
+        "shard",
+        "order",
+        "group",
+        "index",
+        "lookup",
+    ];
     const CONTAINS: &[&str] = &[
         "api_key",
         "access_key",
@@ -161,8 +185,24 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         "authorization",
         "bearer",
     ];
+    // Run-together spellings (`openaiapikey`, `clientsecret`, `dbpassword`) are
+    // caught by suffix, which still leaves `secretary` and `keywords` alone.
+    const SUFFIXES: &[&str] = &[
+        "apikey",
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "apitoken",
+    ];
     let last = lower.rsplit('_').next().unwrap_or("");
-    LAST_WORD.contains(&last) || lower == "auth" || CONTAINS.iter().any(|c| lower.contains(c))
+    let ambiguous =
+        AMBIGUOUS.contains(&last) && !lower.split('_').any(|word| BENIGN_WORDS.contains(&word));
+    ALWAYS.contains(&last)
+        || ambiguous
+        || lower == "auth"
+        || CONTAINS.iter().any(|c| lower.contains(c))
+        || SUFFIXES.iter().any(|suffix| lower.ends_with(suffix))
 }
 
 #[cfg(test)]

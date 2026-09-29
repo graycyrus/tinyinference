@@ -226,10 +226,15 @@ fn redact_query_credentials(url: &str) -> String {
     format!("{head}{}{fragment}", redacted.join("&"))
 }
 
-/// A query-parameter name that carries a credential: the general credential
-/// names plus `code` (Azure Functions' `?code=`).
+/// A query-parameter name that carries a credential. The name is
+/// percent-decoded first (`%6Bey` is `key`), exactly as `Url::query_pairs`
+/// would hand it to a check.
 pub(crate) fn is_credential_query_param(name: &str) -> bool {
-    crate::secret::is_credential_name(name) || name.trim().eq_ignore_ascii_case("code")
+    let decoded = url::form_urlencoded::parse(format!("{name}=").as_bytes())
+        .next()
+        .map(|(decoded, _)| decoded.into_owned())
+        .unwrap_or_default();
+    crate::secret::is_credential_name(&decoded)
 }
 
 /// `text` with every credential removed that a request to `endpoint` carried

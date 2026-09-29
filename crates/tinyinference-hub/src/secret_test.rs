@@ -167,3 +167,41 @@ fn credential_names_are_judged_by_their_last_word() {
         assert!(!is_credential_name(name), "{name}");
     }
 }
+
+#[test]
+fn run_together_names_are_credentials_and_benign_key_and_token_names_are_not() {
+    // Regression (review round 5): the last-word rule dropped the substring
+    // cases and made every `*_key` / `*_token` a credential.
+    for name in [
+        "openaiapikey",
+        "OPENAIAPIKEY",
+        "dbpassword",
+        "clientsecret",
+        "APITOKEN",
+        "myapikey",
+        "key",
+        "token",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+    for name in [
+        "public_key",
+        "ssh_public_key",
+        "cache_key",
+        "sort_key",
+        "primary_key",
+        "partition_key",
+        "idempotency_key",
+        "page_token",
+        "next_page_token",
+        "continuation_token",
+        "publicKey",
+        "pageToken",
+    ] {
+        assert!(!is_credential_name(name), "{name}");
+    }
+    // A benign word does not excuse a name that is a credential on other grounds.
+    assert!(is_credential_name("public_api_key"));
+    assert!(is_credential_name("cache_secret"));
+    assert!(is_credential_name("page_password"));
+}

@@ -168,35 +168,31 @@ pub fn scrub_log_text(text: &str) -> String {
 fn redact_json_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'"' {
-            i += 1;
+    // Every `"` followed by `:` closes a candidate member name. Looking
+    // backwards from it (instead of pairing quotes from the start) keeps a stray
+    // quote in the surrounding prose from shifting every later pairing.
+    for (close, _) in text.match_indices('"') {
+        if close < at {
             continue;
         }
-        let Some(name_end) = json_string_end(text, i + 1) else {
-            break;
+        let Some(open) = text[at..close].rfind('"').map(|i| at + i) else {
+            continue;
         };
-        let name = &text[i + 1..name_end];
-        let after = text[name_end + 1..].trim_start();
-        let value = after
+        let name = &text[open + 1..close];
+        let value = text[close + 1..]
+            .trim_start()
             .strip_prefix(':')
             .map(str::trim_start)
             .and_then(|v| v.strip_prefix('"'));
-        match value {
-            Some(body) if crate::secret::is_credential_name(name) => {
-                let value_start = text.len() - body.len();
-                let close = json_string_end(text, value_start).unwrap_or(text.len());
-                out.push_str(&text[at..value_start]);
-                out.push_str("<redacted>");
-                at = close;
-                // Step over the value's closing quote so it is not read as the
-                // opening quote of the next string.
-                i = close + 1;
-            }
-            _ => i = name_end + 1,
+        let Some(body) = value else { continue };
+        if !crate::secret::is_credential_name(name) {
+            continue;
         }
+        let value_start = text.len() - body.len();
+        let end = json_string_end(text, value_start).unwrap_or(text.len());
+        out.push_str(&text[at..value_start]);
+        out.push_str("<redacted>");
+        at = end;
     }
     out.push_str(&text[at..]);
     out
