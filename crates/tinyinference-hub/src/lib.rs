@@ -62,17 +62,27 @@
 
 pub mod catalog;
 pub mod catalogue;
+#[cfg(feature = "cli")]
+pub mod cli;
+pub mod client;
 pub mod config;
 pub mod credential;
 pub mod descriptor;
+pub mod detect;
 pub mod endpoint;
 pub mod error;
 pub mod health;
+pub mod hub;
 pub mod ids;
+pub mod import;
 pub mod kinds;
+#[cfg(feature = "oauth")]
+pub mod oauth;
+mod ops;
 pub mod policy;
 pub mod ports;
 pub mod probe;
+pub mod route;
 mod secret;
 pub mod taxonomy;
 #[cfg(any(test, feature = "testing"))]

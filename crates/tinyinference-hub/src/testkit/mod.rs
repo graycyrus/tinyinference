@@ -12,11 +12,13 @@
 mod clock;
 mod contract;
 mod http;
+mod rig;
 mod script;
 
 pub use clock::FakeClock;
 pub use contract::{ContractFixture, ListingBody, run_contract};
 pub use http::{RecordedRequest, ScriptedHttp};
+pub use rig::MemoryPorts;
 pub use script::{Match, Script, Scripted};
 
 #[cfg(test)]
