@@ -36,6 +36,7 @@ pub mod memory;
 mod process;
 mod redirect;
 mod token;
+mod usage;
 
 pub use clock::{Clock, SystemClock};
 pub use config::{ConfigStore, Version};
@@ -50,6 +51,7 @@ pub use http::{Http, HttpError, HubRequest, HubResponse, Method};
 pub use process::{CliCommand, CliOutput, ProcessSpawner};
 pub use redirect::follow_redirects;
 pub use token::TokenSource;
+pub use usage::UsageQuery;
 
 #[cfg(test)]
 #[path = "test.rs"]

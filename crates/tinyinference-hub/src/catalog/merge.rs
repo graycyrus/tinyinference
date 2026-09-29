@@ -33,6 +33,10 @@ pub struct ModelOverride {
     pub temperature: Option<Tri>,
     /// Structured output.
     pub structured_output: Option<Tri>,
+    /// Price per million input tokens.
+    pub input_per_1m: Option<f64>,
+    /// Price per million output tokens.
+    pub output_per_1m: Option<f64>,
 }
 
 impl ModelOverride {
@@ -48,6 +52,8 @@ impl ModelOverride {
             reasoning: None,
             temperature: None,
             structured_output: None,
+            input_per_1m: None,
+            output_per_1m: None,
         }
     }
 }
@@ -86,6 +92,12 @@ fn apply_override(entry: &mut ModelEntry, over: &ModelOverride) {
     }
     if let Some(max) = over.max_output {
         entry.capabilities.max_output = Sourced::new(Some(max), user);
+    }
+    if over.input_per_1m.is_some() {
+        entry.input_per_1m = over.input_per_1m;
+    }
+    if over.output_per_1m.is_some() {
+        entry.output_per_1m = over.output_per_1m;
     }
     for (slot, value) in [
         (&mut entry.capabilities.tools, over.tools),

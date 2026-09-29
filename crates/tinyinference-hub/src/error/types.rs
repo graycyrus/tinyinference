@@ -303,6 +303,14 @@ pub enum Unresolved {
     /// The chosen provider needs a key and has none.
     #[error("provider `{0}` has no key")]
     NoKey(Slug),
+    /// The chosen provider has no model: none was named on the route, the pin
+    /// or the default, and the record has none.
+    #[error("provider `{0}` has no model chosen")]
+    NoModel(Slug),
+    /// A route names a category (the managed provider, a local runtime) that no
+    /// enabled record answers to.
+    #[error("no enabled {0} is configured")]
+    NoTarget(&'static str),
 }
 
 /// What references a provider, for the in-use guard.
