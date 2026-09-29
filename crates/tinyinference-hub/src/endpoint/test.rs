@@ -691,3 +691,13 @@ fn a_double_encoded_query_name_is_judged_by_what_the_server_receives() {
     );
     assert!(endpoint_query_has_credential("https://h.test/v1?%6Bey=1"));
 }
+
+#[test]
+fn an_absolute_azure_host_is_still_an_azure_host_for_the_code_parameter() {
+    // Regression (review round 7): `host_str()` kept the trailing dot, so the
+    // refusal missed what redaction masked.
+    let url = "https://f.azurewebsites.net./api/x?code=SECRET";
+    assert!(endpoint_query_has_credential(url));
+    assert_eq!(normalize_local_endpoint(url), None);
+    assert!(redact_endpoint(url).ends_with("code=***"));
+}

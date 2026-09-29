@@ -194,7 +194,7 @@ fn redact_json_credentials(text: &str, quote: &str) -> String {
         let end = if quote == "\"" {
             json_string_end(text, value_start)
         } else {
-            text[value_start..].find(quote).map(|i| value_start + i)
+            escaped_quote_end(text, value_start)
         }
         .unwrap_or(text.len());
         out.push_str(&text[at..value_start]);
@@ -203,6 +203,28 @@ fn redact_json_credentials(text: &str, quote: &str) -> String {
     }
     out.push_str(&text[at..]);
     out
+}
+
+/// The index of the `\"` that closes a string inside a JSON document carried as
+/// a string value: the first `\"` preceded by exactly one backslash (three
+/// backslashes before a quote is an escaped quote *inside* the value).
+fn escaped_quote_end(text: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let backslashes = bytes[from..i]
+                .iter()
+                .rev()
+                .take_while(|b| **b == b'\\')
+                .count();
+            if backslashes == 1 {
+                return Some(i - 1);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The index of the closing `"` of the JSON string that starts at `from` (the

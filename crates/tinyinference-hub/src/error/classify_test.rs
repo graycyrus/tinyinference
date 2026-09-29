@@ -1103,3 +1103,16 @@ fn a_credential_inside_a_json_document_carried_as_a_string_is_redacted() {
     let both = scrub_log_text(r#"{"token":"sk-LEAK2","echo":"{\"password\":\"sk-LEAK3\"}"}"#);
     assert!(!both.contains("sk-LEAK"), "{both}");
 }
+
+#[test]
+fn a_secret_containing_an_escaped_quote_inside_an_escaped_json_string_is_redacted_whole() {
+    // Regression (review round 7): the escaped-quote pass ended the value at
+    // the first `\"`, leaving the tail of the secret in the log text.
+    let text = r#"{"error":"{\"token\":\"a\\\"b\"}"}"#;
+    let scrubbed = scrub_log_text(text);
+    assert!(
+        !scrubbed.contains("a\\\"b") && !scrubbed.contains("\"b\\\""),
+        "{scrubbed}"
+    );
+    assert_eq!(scrubbed, r#"{"error":"{\"token\":\"<redacted>\"}"}"#);
+}

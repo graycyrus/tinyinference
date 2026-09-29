@@ -114,10 +114,10 @@ impl<T> fmt::Display for LogOnly<T> {
 /// credential.
 ///
 /// camelCase is split (`accessToken` is `access_token`), and `-` and case are
-/// ignored. Three rules, on the name's words and on the name with its
-/// separators removed:
+/// ignored. Three rules, on the name's words:
 ///
-/// * it contains a compound that is a credential wherever it appears:
+/// * a word contains, or two adjacent words join into, a compound that is a
+///   credential:
 ///   `apikey`, `accesskey`, `privatekey`, `masterkey`, `subscriptionkey`,
 ///   `authorization`, `bearer`, `password`, `passwd`, `passphrase`,
 ///   `credential`, `accesstoken`, `authtoken`, `refreshtoken`, `sessiontoken`,
@@ -145,7 +145,6 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         });
         previous = Some(c);
     }
-    let collapsed: String = words.chars().filter(|c| *c != '_').collect();
     const COMPOUNDS: &[&str] = &[
         "apikey",
         "accesskey",
@@ -181,9 +180,18 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         "pagination",
         "continuation",
     ];
-    if COMPOUNDS.iter().any(|c| collapsed.contains(c))
-        || (collapsed.contains("secret") && !collapsed.contains("secretar"))
-    {
+    let parts: Vec<&str> = words.split('_').collect();
+    // A compound counts inside one word (`secretkey`, `accesstoken`) or as two
+    // adjacent whole words joined (`access_token`, `api_key`); it does not count
+    // when it merely spans a word boundary (`valid_tokens` is not `idtoken`).
+    let in_word = parts.iter().any(|w| {
+        COMPOUNDS.iter().any(|c| w.contains(c)) || (w.contains("secret") && !w.contains("secretar"))
+    });
+    let joined = parts.windows(2).any(|pair| {
+        let both = format!("{}{}", pair[0], pair[1]);
+        COMPOUNDS.contains(&both.as_str())
+    });
+    if in_word || joined {
         return true;
     }
     let last = words.rsplit('_').next().unwrap_or("");

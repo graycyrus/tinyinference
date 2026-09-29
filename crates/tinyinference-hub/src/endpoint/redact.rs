@@ -346,7 +346,9 @@ pub fn endpoint_query_has_credential(endpoint: &str) -> bool {
 
 /// Whether a parsed URL carries a credential in its query string.
 pub(crate) fn url_query_has_credential(url: &url::Url) -> bool {
-    let host = url.host_str().map(str::to_ascii_lowercase);
+    let host = url
+        .host_str()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase());
     url.query_pairs()
         .any(|(name, _)| query_name_is_credential(&name, host.as_deref()))
 }

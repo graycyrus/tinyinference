@@ -244,3 +244,29 @@ fn concatenated_and_prefixed_credential_names_are_caught_and_benign_words_do_not
         assert!(!is_credential_name(name), "{name}");
     }
 }
+
+#[test]
+fn a_compound_spanning_a_word_boundary_is_not_a_credential() {
+    // Regression (review round 7): `valid_tokens` collapsed to contain `idtoken`.
+    for name in [
+        "valid_tokens",
+        "max_id_tokens",
+        "paid_tokens",
+        "no_key_words",
+    ] {
+        assert!(!is_credential_name(name), "{name}");
+    }
+    // Adjacent whole words that join into a compound still count.
+    for name in [
+        "access_token",
+        "api_key",
+        "refresh_token",
+        "id_token",
+        "master_key",
+        "subscription_key",
+        "api-key",
+        "accessToken",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+}
