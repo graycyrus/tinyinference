@@ -986,9 +986,8 @@ fn drivers_managed_openai_shaped_normalises_the_query_and_the_descriptor_shape()
         ("?", ""),
     ] {
         let d = ManagedDriver::openai_shaped(descriptor("tinyhumans").unwrap().clone(), given);
-        assert_eq!(
+        assert!(
             format!("{d:?}").contains(&format!("query: {expected:?}")),
-            true,
             "{given:?} -> {d:?}"
         );
         assert_eq!(
