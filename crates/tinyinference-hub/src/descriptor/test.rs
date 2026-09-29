@@ -164,3 +164,25 @@ fn quirks_serialise_snake_case() {
         json!("responses_api")
     );
 }
+
+proptest::proptest! {
+    #[test]
+    fn a_record_round_trips_through_json(
+        id in "[a-z0-9_]{1,20}",
+        slug in "[a-z0-9][a-z0-9_-]{0,20}",
+        label in "\\PC{1,30}",
+        kind in "[A-Za-z-]{1,15}",
+        url in "https://[a-z]{3,10}\\.test(/[a-z0-9]{1,6}){0,2}",
+        enabled in proptest::bool::ANY,
+        synthetic in proptest::bool::ANY,
+        extra_key in "x_[a-z]{1,8}",
+        extra_val in 0i64..1000,
+    ) {
+        let mut r = ProviderRecord::new(id, Slug::parse(&slug).unwrap(), label, KindId::new(kind), url);
+        r.enabled = enabled;
+        r.synthetic = synthetic;
+        r.legacy.insert(extra_key, json!(extra_val));
+        let back: ProviderRecord = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+        proptest::prop_assert_eq!(back, r);
+    }
+}

@@ -635,3 +635,33 @@ proptest! {
         prop_assert_eq!(check_address(v6, &server_side()), Err(EndpointRefusal::Loopback));
     }
 }
+
+proptest! {
+    #[test]
+    fn desktop_allows_everything_hosted_allows_and_local_only_allows_nothing_more(
+        a in 0u8..=255, b in 0u8..=255, c in 0u8..=255, d in 0u8..=255,
+        host in prop::sample::select(vec!["localhost", "api.acme.test", "ollama.localhost"]),
+        use_ip in proptest::bool::ANY,
+    ) {
+        let url = if use_ip {
+            format!("http://{a}.{b}.{c}.{d}/v1")
+        } else {
+            format!("https://{host}/v1")
+        };
+        let hosted = check_endpoint(&url, &EndpointPolicy::hosted());
+        let desktop = check_endpoint(&url, &EndpointPolicy::desktop());
+        let offline = check_endpoint(&url, &EndpointPolicy::local_only());
+        if hosted.is_ok() {
+            prop_assert!(desktop.is_ok(), "{url}");
+        }
+        if offline.is_ok() {
+            prop_assert!(desktop.is_ok(), "{url}");
+        }
+        // Link-local is refused everywhere, however the policy is tuned.
+        if a == 169 && b == 254 {
+            for policy in [EndpointPolicy::hosted(), EndpointPolicy::desktop().with_private(true)] {
+                prop_assert_eq!(check_endpoint(&url, &policy), Err(EndpointRefusal::LinkLocal));
+            }
+        }
+    }
+}

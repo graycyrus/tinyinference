@@ -634,6 +634,19 @@ proptest! {
     }
 
     #[test]
+    fn appending_a_url_never_changes_the_class(status in 100u16..600, text in "[ -~]{0,100}") {
+        prop_assume!(!text.to_ascii_lowercase().contains("http"));
+        let plain = classify(status, &[], &text);
+        let with_url = classify(
+            status,
+            &[],
+            &format!("{text} see https://docs.test/models/404/invalid-api-key/insufficient_quota"),
+        );
+        prop_assert_eq!(plain.reason, with_url.reason);
+        prop_assert_eq!(plain.retry, with_url.retry);
+    }
+
+    #[test]
     fn strip_urls_never_panics_and_removes_every_scheme(text in "[ -~]{0,120}") {
         let out = strip_urls(&text);
         prop_assert!(!out.to_ascii_lowercase().contains("http://"));
