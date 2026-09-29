@@ -35,6 +35,8 @@ pub mod memory;
 #[cfg(feature = "cli")]
 mod process;
 mod redirect;
+#[cfg(feature = "http-reqwest")]
+mod reqwest_http;
 mod token;
 mod usage;
 
@@ -50,6 +52,11 @@ pub use http::{Http, HttpError, HubRequest, HubResponse, Method};
 #[cfg(feature = "cli")]
 pub use process::{CliCommand, CliOutput, ProcessSpawner};
 pub use redirect::follow_redirects;
+#[cfg(feature = "http-reqwest")]
+pub use reqwest_http::{
+    Executor, Pin, ReqwestExecutor, ReqwestHttp, Resolver, SystemResolver, build_client,
+    build_request, map_error_parts, pin_addresses, read_response,
+};
 pub use token::TokenSource;
 pub use usage::UsageQuery;
 
