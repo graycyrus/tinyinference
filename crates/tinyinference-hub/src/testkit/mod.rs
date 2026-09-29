@@ -10,10 +10,12 @@
 //! refusal a real transport would give.
 
 mod clock;
+mod contract;
 mod http;
 mod script;
 
 pub use clock::FakeClock;
+pub use contract::{ContractFixture, ListingBody, run_contract};
 pub use http::{RecordedRequest, ScriptedHttp};
 pub use script::{Match, Script, Scripted};
 

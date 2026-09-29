@@ -59,3 +59,8 @@ http-reqwest = []
 
 [lints]
 workspace = true
+
+# The contract suite drives the public testkit, so it only builds with it.
+[[test]]
+name = "contract_kinds"
+required-features = ["testing"]
