@@ -1,0 +1,691 @@
+//! Classifier tests. The branch-order corpus is ported from OpenCompany's
+//! `probe_tests_classify.rs`; the vendor-body fixtures are the shapes named in
+//! the plan (all keys and ids are obviously fake).
+
+use std::time::Duration;
+
+use proptest::prelude::*;
+
+use super::*;
+use crate::error::HubError;
+
+fn raw(text: &str) -> ReasonCode {
+    classify_text(None, None, text, false).reason
+}
+
+fn body(status: u16, text: &str) -> ProviderFailure {
+    classify(status, &[], text)
+}
+
+// ---- the branch-order cases ----------------------------------------------
+
+#[test]
+fn a_407_proxy_challenge_is_unknown_not_auth() {
+    assert_eq!(
+        raw("HTTP 407 Proxy Authentication Required"),
+        ReasonCode::Unknown
+    );
+    assert!(!ReasonCode::Unknown.destroys_credential());
+}
+
+#[test]
+fn a_bare_waf_403_is_unknown_not_auth() {
+    assert_eq!(raw("error from cloudflare: 403"), ReasonCode::Unknown);
+    assert_eq!(raw("502 Bad Gateway"), ReasonCode::Unknown);
+    assert_eq!(raw("504 Gateway Timeout"), ReasonCode::Unknown);
+}
+
+#[test]
+fn a_403_that_names_no_credential_refusal_keeps_the_key() {
+    for text in [
+        "403: Input token count + max_tokens must be less than the context length of the model being queried",
+        "403: Forbidden (insufficient permissions, guardrail block, or moderation flag)",
+        "403: Country, region, or territory not supported",
+        "403: Your API key does not have permission to use the specified resource.",
+        "403: PERMISSION_DENIED",
+        "403: not allowed due to permission restrictions",
+        "403: Ask your team admin for permission.",
+        "403: PermissionDeniedError",
+        "403: FireRouter is not available for Fireworks accounts with data residency enabled",
+    ] {
+        assert!(
+            !raw(text).destroys_credential(),
+            "this 403 must not delete the key: {text:?}"
+        );
+        assert!(!body(403, text).reason.destroys_credential(), "{text:?}");
+    }
+}
+
+#[test]
+fn a_403_that_does_name_a_credential_refusal_is_still_auth() {
+    assert_eq!(
+        raw("403: The API key you provided is invalid"),
+        ReasonCode::Auth
+    );
+    assert_eq!(raw("403: You must provide an API key"), ReasonCode::Auth);
+    assert_eq!(body(403, "invalid credential").reason, ReasonCode::Auth);
+    assert_eq!(
+        body(
+            403,
+            "Google: API key not valid. Please pass a valid API key."
+        )
+        .reason,
+        ReasonCode::Auth
+    );
+}
+
+#[test]
+fn the_reason_phrase_is_not_part_of_what_is_classified() {
+    // A 403 with a body that says nothing about the credential must not become
+    // auth just because the status is 403; and a 401 with an empty body is
+    // auth because the status alone is the signal.
+    let failure = body(403, r#"{"error":"context length exceeded"}"#);
+    assert!(!failure.reason.destroys_credential());
+    let failure = body(401, "");
+    assert_eq!(failure.reason, ReasonCode::Auth);
+    assert_eq!(failure.retry, Retry::Never);
+    assert_eq!(failure.status, Some(401));
+}
+
+#[test]
+fn a_400_about_our_request_shape_does_not_delete_the_key() {
+    assert!(
+        !raw("400: Bearer authentication is not supported, use x-api-key").destroys_credential()
+    );
+    assert!(
+        !raw("424: dependent request failed (Remote MCP authentication)").destroys_credential()
+    );
+    assert_eq!(raw("401: authentication_error"), ReasonCode::Auth);
+    assert_eq!(
+        raw("400: Authentication Fails (no such user)"),
+        ReasonCode::Auth
+    );
+}
+
+#[test]
+fn a_status_code_inside_an_id_does_not_match() {
+    assert_eq!(raw("request id req_1403 failed"), ReasonCode::Unknown);
+    assert_eq!(raw("trace 4032 aborted"), ReasonCode::Unknown);
+    assert_eq!(raw("model gpt-4010 is odd"), ReasonCode::Unknown);
+    assert_eq!(raw("request id req_4291 failed"), ReasonCode::Unknown);
+}
+
+// ---- every class ------------------------------------------------------------
+
+#[test]
+fn every_class_has_a_real_error_string_that_reaches_it() {
+    let cases: &[(&str, ReasonCode)] = &[
+        ("401 Unauthorized", ReasonCode::Auth),
+        ("Incorrect API key provided", ReasonCode::Auth),
+        ("invalid_api_key", ReasonCode::Auth),
+        (
+            "The model `gpt-5.6-sol-pro` does not exist",
+            ReasonCode::Model,
+        ),
+        ("model_not_found", ReasonCode::Model),
+        (
+            "Model 'anthropic/claude-sonnet-5' is not available",
+            ReasonCode::Model,
+        ),
+        ("You exceeded your current quota", ReasonCode::Quota),
+        ("insufficient credits", ReasonCode::Quota),
+        ("429 Too Many Requests", ReasonCode::RateLimited),
+        ("404 Not Found", ReasonCode::Endpoint),
+        ("dns error: not found", ReasonCode::Endpoint),
+        ("operation timed out", ReasonCode::Timeout),
+        ("request timeout after 10s", ReasonCode::Timeout),
+        ("something nobody has seen before", ReasonCode::Unknown),
+        ("", ReasonCode::Unknown),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(raw(text), *expected, "classifying {text:?}");
+    }
+}
+
+#[test]
+fn a_missing_model_is_not_read_as_a_missing_endpoint() {
+    assert_eq!(raw("The model `acme-1` was not found"), ReasonCode::Model);
+    assert_eq!(raw("404 page not found"), ReasonCode::Endpoint);
+}
+
+#[test]
+fn dns_and_refusal_are_endpoint_facts_not_unknowns() {
+    for text in [
+        "connection refused",
+        "no such host",
+        "could not resolve host",
+        "temporary failure in name resolution",
+        "dns error",
+        "network is unreachable",
+        "connection reset by peer",
+    ] {
+        assert_eq!(raw(text), ReasonCode::Endpoint, "{text}");
+    }
+}
+
+#[test]
+fn classification_is_case_insensitive_and_ignores_surrounding_noise() {
+    assert_eq!(raw("  \n401 UNAUTHORIZED\n "), ReasonCode::Auth);
+}
+
+// ---- D12: quota vs rate limit ----------------------------------------------------
+
+#[test]
+fn an_anthropic_spend_cap_is_quota_and_never_retried() {
+    let text = r#"{"type":"error","error":{"type":"rate_limit_error","message":"You have reached your specified API usage limits. You will regain access on 2026-10-01 at 00:00 UTC."}}"#;
+    let failure = body(429, text);
+    assert_eq!(failure.reason, ReasonCode::Quota);
+    assert_eq!(failure.retry, Retry::Never);
+    assert_eq!(failure.status, Some(429));
+    // The same phrase as a 400 (Anthropic's other spelling of the same cap).
+    assert_eq!(
+        body(400, "You have reached your specified API usage limits.").reason,
+        ReasonCode::Quota
+    );
+}
+
+#[test]
+fn an_enforced_spend_limit_code_is_quota() {
+    let failure = body(
+        429,
+        r#"{"error":{"code":"enforced_spend_limit_reached","message":"Monthly spend limit hit"}}"#,
+    );
+    assert_eq!(failure.reason, ReasonCode::Quota);
+    assert_eq!(failure.retry, Retry::Never);
+    assert_eq!(
+        failure.provider_code.as_deref(),
+        Some("enforced_spend_limit_reached")
+    );
+}
+
+#[test]
+fn a_402_is_quota_whatever_the_body_says() {
+    let failure = body(402, "");
+    assert_eq!(failure.reason, ReasonCode::Quota);
+    assert_eq!(failure.retry, Retry::Never);
+    let failure = body(
+        402,
+        "This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 1000",
+    );
+    assert_eq!(failure.reason, ReasonCode::Quota);
+}
+
+#[test]
+fn an_openai_insufficient_quota_429_is_quota_not_a_cooldown() {
+    let failure = body(
+        429,
+        r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#,
+    );
+    assert_eq!(failure.reason, ReasonCode::Quota);
+    assert_eq!(failure.retry, Retry::Never);
+    assert_eq!(failure.provider_code.as_deref(), Some("insufficient_quota"));
+}
+
+#[test]
+fn an_openai_slow_down_429_is_rate_limited_and_retryable() {
+    let failure = body(
+        429,
+        r#"{"error":{"message":"Slow down","type":"requests","code":"slow_down"}}"#,
+    );
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+    assert_eq!(failure.retry, Retry::Later(None));
+    assert_eq!(failure.provider_code.as_deref(), Some("slow_down"));
+}
+
+#[test]
+fn an_openai_tokens_per_minute_429_carries_the_go_style_delay() {
+    let text = "Rate limit reached for gpt-4 in organization org-fake on tokens per min (TPM): Limit 10000, Used 9000. Please try again in 6m0s.";
+    let failure = body(429, text);
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::from_secs(360))));
+}
+
+#[test]
+fn a_google_per_minute_quota_message_is_a_rate_limit_not_a_spend_cap() {
+    let failure = body(
+        429,
+        "Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContent request limit per minute'",
+    );
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+    assert_eq!(failure.retry, Retry::Later(None));
+}
+
+#[test]
+fn a_plain_429_honours_retry_after_headers() {
+    let failure = classify(429, &[("Retry-After", "30")], "");
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::from_secs(30))));
+    let failure = classify(429, &[("retry-after-ms", "1500")], "");
+    assert_eq!(
+        failure.retry,
+        Retry::Later(Some(Duration::from_millis(1500)))
+    );
+    // ms header wins over the seconds header.
+    let failure = classify(429, &[("retry-after", "30"), ("retry-after-ms", "250")], "");
+    assert_eq!(
+        failure.retry,
+        Retry::Later(Some(Duration::from_millis(250)))
+    );
+    // A body-only hint is found too.
+    let failure = classify(429, &[], "Retry-After: 7");
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::from_secs(7))));
+    let failure = classify(429, &[], "please try again in 250ms");
+    assert_eq!(
+        failure.retry,
+        Retry::Later(Some(Duration::from_millis(250)))
+    );
+}
+
+#[test]
+fn a_retry_after_is_capped_so_a_hostile_header_cannot_park_a_caller() {
+    let failure = classify(429, &[("retry-after", "99999999999")], "");
+    assert_eq!(failure.retry, Retry::Later(Some(MAX_RETRY_AFTER)));
+    let failure = classify(429, &[("retry-after-ms", "-5")], "");
+    assert_eq!(failure.retry, Retry::Later(None));
+    let failure = classify(429, &[("retry-after-ms", "NaN")], "");
+    assert_eq!(failure.retry, Retry::Later(None));
+}
+
+#[test]
+fn a_soft_quota_word_is_trusted_only_when_nothing_says_pace() {
+    // Generic "billing" wording with no rate marker: out of credit.
+    assert_eq!(
+        body(403, "Please check your billing details").reason,
+        ReasonCode::Quota
+    );
+    // The same wording with a retry-after is a pace problem.
+    let failure = classify(429, &[("retry-after", "10")], "quota window resets soon");
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::from_secs(10))));
+    // "insufficient permissions" is an access problem, never a credit one.
+    assert_eq!(
+        body(403, "insufficient permissions for this route").reason,
+        ReasonCode::Unknown
+    );
+    assert_eq!(body(403, "insufficient scope").reason, ReasonCode::Unknown);
+}
+
+#[test]
+fn the_openhuman_credit_and_quota_predicates_are_covered() {
+    for text in [
+        "requires more credits",
+        "You can only afford 10",
+        "insufficient balance",
+        "insufficient funds",
+        "payment required",
+        "monthly_request_count exceeded",
+        "monthly limit reached",
+        "monthly quota exhausted",
+        "usage_limit_reached",
+        "usage limit has been reached",
+        "Your credit balance is too low to access the API",
+        "billing_hard_limit_reached",
+    ] {
+        let failure = body(400, text);
+        assert_eq!(failure.reason, ReasonCode::Quota, "{text}");
+        assert_eq!(failure.retry, Retry::Never, "{text}");
+    }
+}
+
+// ---- OpenHuman predicates ---------------------------------------------------------
+
+#[test]
+fn a_context_window_overflow_is_a_model_failure_not_an_auth_failure() {
+    for text in [
+        "This model's maximum context length is 8192 tokens",
+        "context_length_exceeded",
+        "prompt is too long: 210000 tokens",
+        "Input is too long for requested model",
+        "the request exceeds the context window of this model",
+        "n_keep (5000) >= n_ctx (4096)",
+        "too many tokens in the prompt",
+    ] {
+        let failure = body(400, text);
+        assert_eq!(failure.reason, ReasonCode::Model, "{text}");
+        assert_eq!(failure.retry, Retry::Never);
+        assert_eq!(
+            failure.provider_code.as_deref(),
+            Some("context_length_exceeded"),
+            "{text}"
+        );
+    }
+    // "too many tokens per minute" is pace, not size.
+    assert_eq!(
+        body(429, "too many tokens per minute").reason,
+        ReasonCode::RateLimited
+    );
+}
+
+#[test]
+fn a_local_runtime_with_no_model_loaded_says_so() {
+    let failure = body(
+        400,
+        "No models loaded. Please load a model in the developer page.",
+    );
+    assert_eq!(failure.reason, ReasonCode::Model);
+    assert_eq!(failure.provider_code.as_deref(), Some("no_model_loaded"));
+    // Only a 400 counts; the phrase elsewhere is just a missing model.
+    assert_ne!(
+        body(500, "no models loaded").provider_code.as_deref(),
+        Some("no_model_loaded")
+    );
+}
+
+#[test]
+fn ollama_clouds_internal_500_is_retryable_and_keeps_the_key() {
+    let failure = body(500, "Internal Server Error (ref: 0b8a9f2c-1234)");
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    assert_eq!(failure.retry, Retry::Later(None));
+    assert_eq!(
+        failure.provider_code.as_deref(),
+        Some("provider_internal_error")
+    );
+}
+
+#[test]
+fn moderation_and_access_policy_rejections_keep_the_key() {
+    let failure = body(
+        400,
+        r#"{"error":"Message rejected by moderation","score":0.98}"#,
+    );
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    assert_eq!(failure.retry, Retry::Never);
+    assert_eq!(failure.provider_code.as_deref(), Some("content_moderation"));
+    let failure = body(
+        403,
+        r#"{"error":{"type":"access_terminated_error","message":"nope"}}"#,
+    );
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    assert_eq!(failure.provider_code.as_deref(), Some("access_policy"));
+    let failure = body(
+        403,
+        "This model is currently only available for coding agents",
+    );
+    assert_eq!(failure.provider_code.as_deref(), Some("access_policy"));
+}
+
+#[test]
+fn openrouters_user_not_found_is_a_bad_key_only_on_openrouter() {
+    let text = r#"{"error":{"message":"User not found.","code":401}}"#;
+    assert_eq!(
+        classify_for(Some("openrouter"), 403, &[], text).reason,
+        ReasonCode::Auth
+    );
+    assert_ne!(
+        classify_for(Some("groq"), 403, &[], "User not found.").reason,
+        ReasonCode::Auth
+    );
+    assert_ne!(
+        classify(403, &[], "User not found.").reason,
+        ReasonCode::Auth
+    );
+}
+
+#[test]
+fn the_openhuman_auth_markers_are_recognised() {
+    for text in [
+        "Invalid or missing API key",
+        "No API key supplied",
+        "invalid authentication",
+    ] {
+        assert_eq!(body(403, text).reason, ReasonCode::Auth, "{text}");
+    }
+}
+
+// ---- 5xx and unknowns -------------------------------------------------------------
+
+#[test]
+fn a_gateway_5xx_is_unknown_but_retryable_and_never_destroys_the_key() {
+    for status in [500, 502, 503, 504, 529, 408] {
+        let failure = body(status, "upstream connect error");
+        assert!(!failure.reason.destroys_credential(), "{status}");
+        assert!(
+            matches!(failure.retry, Retry::Later(_)),
+            "{status}: {:?}",
+            failure.retry
+        );
+    }
+    // A 4xx nobody recognises is not retried.
+    let failure = body(418, "teapot");
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    assert_eq!(failure.retry, Retry::Never);
+}
+
+#[test]
+fn transport_conditions_classify_without_reading_the_error_text() {
+    let cases = [
+        (
+            TransportCondition::Timeout,
+            ReasonCode::Timeout,
+            Retry::Later(None),
+        ),
+        (
+            TransportCondition::ConnectFailed,
+            ReasonCode::Endpoint,
+            Retry::Later(None),
+        ),
+        (
+            TransportCondition::RedirectRefused,
+            ReasonCode::Endpoint,
+            Retry::Never,
+        ),
+        (TransportCondition::Other, ReasonCode::Unknown, Retry::Never),
+    ];
+    for (condition, reason, retry) in cases {
+        // The detail text mentions /models; it must not steer the class.
+        let failure = classify_transport(
+            condition,
+            "error sending request for url (https://x.test/v1/models)",
+        );
+        assert_eq!(failure.reason, reason);
+        assert_eq!(failure.retry, retry);
+        assert!(
+            failure.raw.expose().contains("/models"),
+            "the URL is still worth having in a log"
+        );
+        assert_eq!(failure.status, None);
+    }
+}
+
+#[test]
+fn the_request_url_never_reaches_the_classifier() {
+    // Without URL stripping, "models" + "not found" reads as a missing model.
+    let text = "404 not found for https://api.acme.test/v1/models";
+    assert_eq!(body(404, text).reason, ReasonCode::Endpoint);
+    assert_eq!(
+        body(
+            200,
+            "error sending request for url (https://x.test/v1/models)"
+        )
+        .reason,
+        ReasonCode::Unknown
+    );
+    // A URL that contains a status-looking or phrase-looking path is inert.
+    assert_eq!(
+        body(400, "see https://docs.test/401/invalid-api-key for help").reason,
+        ReasonCode::Unknown
+    );
+}
+
+#[test]
+fn strip_urls_replaces_every_url_token() {
+    assert_eq!(
+        strip_urls("see https://a.test/x?y=1, then http://b.test."),
+        "see <url>, then <url>."
+    );
+    assert_eq!(strip_urls("no urls here"), "no urls here");
+    assert_eq!(strip_urls("HTTPS://UPPER.test/x end"), "<url> end");
+    assert_eq!(strip_urls("(http://a.test/x)"), "(<url>)");
+    assert_eq!(strip_urls(""), "");
+    assert_eq!(strip_urls("http://only.test"), "<url>");
+}
+
+// ---- metadata extraction --------------------------------------------------------------
+
+#[test]
+fn provider_code_prefers_error_code_then_type_then_top_level() {
+    let f = body(400, r#"{"error":{"code":"invalid_thing","type":"t"}}"#);
+    assert_eq!(f.provider_code.as_deref(), Some("invalid_thing"));
+    let f = body(400, r#"{"error":{"type":"overloaded_error"}}"#);
+    assert_eq!(f.provider_code.as_deref(), Some("overloaded_error"));
+    let f = body(400, r#"{"code":"top_level","type":"other"}"#);
+    assert_eq!(f.provider_code.as_deref(), Some("top_level"));
+    let f = body(400, r#"{"type":"error_only"}"#);
+    assert_eq!(f.provider_code.as_deref(), Some("error_only"));
+    let f = body(400, r#"{"error":{"code":429}}"#);
+    assert_eq!(f.provider_code.as_deref(), Some("429"));
+    // Unsafe or oversize codes are dropped, not displayed.
+    assert_eq!(
+        body(400, r#"{"error":{"code":"has space <script>"}}"#).provider_code,
+        None
+    );
+    assert_eq!(
+        body(
+            400,
+            &format!(r#"{{"error":{{"code":"{}"}}}}"#, "x".repeat(200))
+        )
+        .provider_code,
+        None
+    );
+    assert_eq!(
+        body(400, r#"{"error":{"code":{"nested":1}}}"#).provider_code,
+        None
+    );
+    assert_eq!(body(400, "not json").provider_code, None);
+    assert_eq!(body(400, r#"{"error":{"code":""}}"#).provider_code, None);
+}
+
+#[test]
+fn request_ids_come_from_headers_first_then_the_body() {
+    let f = classify(500, &[("X-Request-Id", "req_abc123")], "boom");
+    assert_eq!(f.request_id.as_deref(), Some("req_abc123"));
+    let f = classify(500, &[("request-id", "req_anthropic")], "boom");
+    assert_eq!(f.request_id.as_deref(), Some("req_anthropic"));
+    let f = classify(500, &[("openai-request-id", "req_openai")], "boom");
+    assert_eq!(f.request_id.as_deref(), Some("req_openai"));
+    let f = classify(500, &[], r#"{"request_id":"req_body"}"#);
+    assert_eq!(f.request_id.as_deref(), Some("req_body"));
+    let f = classify(500, &[], r#"{"error":{"request_id":"req_nested"}}"#);
+    assert_eq!(f.request_id.as_deref(), Some("req_nested"));
+    // A hostile id is dropped and the next source is tried.
+    let f = classify(
+        500,
+        &[("x-request-id", "bad id\r\nSet-Cookie: x")],
+        r#"{"request_id":"ok_1"}"#,
+    );
+    assert_eq!(f.request_id.as_deref(), Some("ok_1"));
+    assert_eq!(classify(500, &[], "boom").request_id, None);
+}
+
+#[test]
+fn the_raw_body_is_kept_log_only_and_never_displayed() {
+    let secretish = "Authorization: Bearer sk-not-a-real-key rejected";
+    let failure = body(401, secretish);
+    assert_eq!(failure.raw.expose(), secretish);
+    assert!(!format!("{failure}").contains("sk-not"));
+    assert!(!format!("{failure:?}").contains("sk-not"));
+    let error = HubError::Provider(failure);
+    assert!(!error.to_string().contains("sk-not"));
+    assert!(!format!("{error:?}").contains("sk-not"));
+}
+
+// ---- properties ---------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn classify_is_total_and_never_leaks_its_input(
+        status in 0u16..1000,
+        text in "\\PC{0,200}",
+        header in "\\PC{0,20}",
+    ) {
+        let failure = classify(status, &[("retry-after", &header), ("x-request-id", &header)], &text);
+        // Display and Debug never contain the raw text (unless it is trivially
+        // a substring of our own fixed words).
+        let shown = format!("{failure}{failure:?}");
+        if text.chars().count() >= 12 && !shown.contains("provider_code") {
+            prop_assert!(!shown.contains(&text), "{shown}");
+        }
+        prop_assert_eq!(failure.status, Some(status));
+    }
+
+    #[test]
+    fn quota_auth_and_model_are_never_retried(status in 100u16..600, text in "\\PC{0,120}") {
+        let failure = classify(status, &[], &text);
+        if matches!(failure.reason, ReasonCode::Quota | ReasonCode::Auth | ReasonCode::Model) {
+            prop_assert_eq!(failure.retry, Retry::Never);
+        }
+    }
+
+    #[test]
+    fn only_a_rejected_credential_ever_rolls_back_a_cloud_add(status in 100u16..600, text in "\\PC{0,120}") {
+        let failure = classify(status, &[], &text);
+        prop_assert_eq!(
+            failure.rolls_back(crate::taxonomy::ProviderGroup::Cloud),
+            failure.reason == ReasonCode::Auth
+        );
+    }
+
+    #[test]
+    fn a_status_code_embedded_in_a_longer_number_never_reads_as_auth(
+        prefix in "[1-9][0-9]{0,3}", suffix in "[0-9]{1,3}",
+    ) {
+        let text = format!("request id {prefix}401{suffix} failed");
+        prop_assert_ne!(raw(&text), ReasonCode::Auth);
+    }
+
+    #[test]
+    fn strip_urls_never_panics_and_removes_every_scheme(text in "[ -~]{0,120}") {
+        let out = strip_urls(&text);
+        prop_assert!(!out.to_ascii_lowercase().contains("http://"));
+        prop_assert!(!out.to_ascii_lowercase().contains("https://"));
+    }
+}
+
+// ---- regressions found while writing the suite --------------------------------------
+
+#[test]
+fn a_provider_cooldown_longer_than_thirty_seconds_is_reported_whole() {
+    // core's `parse_retry_after_ms` is a backoff bound (30 s); using it for the
+    // provider's own delay misreported a six-minute cooldown as thirty seconds.
+    let failure = classify(429, &[("retry-after", "360")], "");
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::from_secs(360))));
+    let failure = classify(429, &[("retry-after", "1.5")], "");
+    assert_eq!(
+        failure.retry,
+        Retry::Later(Some(Duration::from_millis(1500)))
+    );
+    // The capped date form still goes through core.
+    let failure = classify(429, &[("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT")], "");
+    assert_eq!(failure.retry, Retry::Later(Some(Duration::ZERO)));
+}
+
+#[test]
+fn a_sentence_ending_period_after_a_duration_is_not_a_number() {
+    // `parse_try_again_in` once collected the trailing "." as a digit run and
+    // gave up on the whole delay.
+    let f = classify(429, &[], "Rate limit hit. Please try again in 2s.");
+    assert_eq!(f.retry, Retry::Later(Some(Duration::from_secs(2))));
+    let f = classify(429, &[], "try again in 1h2m3s");
+    assert_eq!(f.retry, Retry::Later(Some(Duration::from_secs(3723))));
+    let f = classify(429, &[], "try again in 1.5s...");
+    assert_eq!(f.retry, Retry::Later(Some(Duration::from_millis(1500))));
+    // No unit, or no number, is no delay.
+    assert_eq!(
+        classify(429, &[], "try again in 5 parsecs").retry,
+        Retry::Later(None)
+    );
+    assert_eq!(
+        classify(429, &[], "try again in a while").retry,
+        Retry::Later(None)
+    );
+    assert_eq!(
+        classify(429, &[], "try again in ...").retry,
+        Retry::Later(None)
+    );
+}
+
+#[test]
+fn trailing_punctuation_is_not_part_of_a_stripped_url() {
+    assert_eq!(strip_urls("failed: https://a.test/x."), "failed: <url>.");
+    assert_eq!(strip_urls("see https://a.test/x; then"), "see <url>; then");
+}
