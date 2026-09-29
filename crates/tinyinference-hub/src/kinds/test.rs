@@ -705,3 +705,114 @@ async fn kinds_anthropic_protocol_pings_always_use_max_tokens_even_on_an_azure_h
     assert_eq!(body["max_tokens"], 16);
     assert!(body.get("max_completion_tokens").is_none());
 }
+
+// ---- joining a path onto an endpoint that has its own query -----------------
+
+#[test]
+fn kinds_a_path_is_joined_before_the_endpoints_own_query() {
+    let (slug, kind) = (Slug::parse("azure").unwrap(), KindId::new("custom"));
+    let join =
+        |base: &str, path: &str| target(&slug, &kind, base, &AuthStyle::Bearer, None).join(path);
+    assert_eq!(
+        join("https://x.test/v1", "/models"),
+        "https://x.test/v1/models"
+    );
+    assert_eq!(
+        join("https://x.test/v1/", "/models"),
+        "https://x.test/v1/models"
+    );
+    assert_eq!(
+        join("https://x.test/v1?api-version=preview", "/models"),
+        "https://x.test/v1/models?api-version=preview"
+    );
+    assert_eq!(
+        join("https://x.test/v1?api-version=preview", "/models?limit=5"),
+        "https://x.test/v1/models?limit=5&api-version=preview"
+    );
+    assert_eq!(
+        join("https://x.test/v1?", "/models"),
+        "https://x.test/v1/models"
+    );
+    assert_eq!(
+        join("https://x.test/v1#frag", "/models"),
+        "https://x.test/v1/models",
+        "a fragment is never sent"
+    );
+    assert_eq!(
+        join("https://x.test/v1/?a=b#frag", "/key"),
+        "https://x.test/v1/key?a=b"
+    );
+    let t = target(
+        &slug,
+        &kind,
+        " https://x.test/v1/?a=b ",
+        &AuthStyle::Bearer,
+        None,
+    );
+    assert_eq!(t.base(), "https://x.test/v1");
+}
+
+#[tokio::test]
+async fn kinds_an_endpoint_with_a_query_lists_and_pings_at_the_right_url() {
+    let bed = Bed::new();
+    let base = "https://res.openai.azure.com/openai/v1?api-version=preview";
+    bed.http.route(
+        Match::get("https://res.openai.azure.com/openai/v1/models?api-version=preview"),
+        Scripted::json(200, &json!({"data": [{"id": "dep-1"}]})),
+    );
+    bed.http.route(
+        Match::post("https://res.openai.azure.com/openai/v1/chat/completions?api-version=preview"),
+        Scripted::json(200, &json!({})),
+    );
+    let (slug, kind) = (Slug::parse("azure").unwrap(), KindId::new("custom"));
+    let auth = AuthStyle::Custom("api-key".into());
+    let t = target(&slug, &kind, base, &auth, None);
+    let d = OpenAiCompatDriver::custom();
+    assert_eq!(d.list_models(&bed.cx(), &t).await.unwrap().models.len(), 1);
+    d.completion_ping(&bed.cx(), &t, &ModelId::parse("dep-1").unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn kinds_openrouters_fallback_to_the_public_list_is_reported_and_does_not_prove_the_key() {
+    let bed = Bed::new();
+    bed.http.route(
+        Match::prefix("https://openrouter.ai/api/v1/models/user"),
+        Scripted::text(404, "gone"),
+    );
+    bed.http.route(
+        Match::prefix("https://openrouter.ai/api/v1/models?"),
+        Scripted::json(200, &json!({"data": [{"id": "pub/1"}]})),
+    );
+    let (slug, kind, key) = (
+        Slug::parse("openrouter").unwrap(),
+        KindId::new("openrouter"),
+        Secret::new("sk-or-revoked"),
+    );
+    let t = target(
+        &slug,
+        &kind,
+        "https://openrouter.ai/api/v1",
+        &AuthStyle::Bearer,
+        Some(&key),
+    );
+    let fetched = driver("openrouter")
+        .list_models(&bed.cx(), &t)
+        .await
+        .unwrap();
+    assert!(fetched.public_fallback);
+    let report = crate::probe::run_probe(&bed.cx(), &driver("openrouter"), &t, TestDepth::Catalog)
+        .await
+        .unwrap();
+    assert!(report.ok(), "the list is real");
+    assert!(
+        !report.proves_key,
+        "but a public list says nothing about a key"
+    );
+    assert!(
+        report
+            .notes
+            .contains(&crate::probe::ProbeNote::CatalogDoesNotProveKey)
+    );
+}

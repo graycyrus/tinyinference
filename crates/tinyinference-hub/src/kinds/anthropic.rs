@@ -48,15 +48,16 @@ impl KindDriver for AnthropicDriver {
         cx: &DriverContext<'_>,
         target: &Target<'_>,
     ) -> Result<Fetched, HubError> {
-        let base = target.base();
         let mut models: Vec<ModelEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut after: Option<String> = None;
         for page in 0..MAX_PAGES {
-            let mut url = format!("{base}/models?limit={PAGE_SIZE}");
+            let mut path = format!("/models?limit={PAGE_SIZE}");
             if let Some(cursor) = &after {
-                url.push_str("&after_id=");
-                url.push_str(&urlencode(cursor));
+                path.push_str("&after_id=");
+                path.push_str(&urlencode(cursor));
             }
+            let url = target.join(&path);
             let request = cx.request(
                 &self.descriptor,
                 target,
@@ -70,7 +71,7 @@ impl KindDriver for AnthropicDriver {
                 .map_err(|_| HubError::Provider(unreadable("the model list was not JSON")))?;
             let parsed = parse_openai_value(&envelope).map_err(HubError::Provider)?;
             for entry in parsed.entries {
-                if !models.iter().any(|m| m.id == entry.id) {
+                if seen.insert(entry.id.clone()) {
                     models.push(entry);
                 }
             }
@@ -84,16 +85,16 @@ impl KindDriver for AnthropicDriver {
                 (true, Some(cursor)) if page + 1 < MAX_PAGES => after = Some(cursor),
                 (true, Some(_)) => {
                     return Ok(Fetched {
-                        models,
                         truncated: true,
+                        ..Fetched::new(models)
                     });
                 }
                 // `has_more` with no cursor cannot be followed: stop rather than
                 // ask for the first page again, and say the list is a prefix.
                 (true, None) => {
                     return Ok(Fetched {
-                        models,
                         truncated: true,
+                        ..Fetched::new(models)
                     });
                 }
                 (false, _) => break,

@@ -172,6 +172,16 @@ impl HubConfig {
     /// [`InvalidInput::CredentialField`] for a credential-shaped field, or the
     /// record's own refusal.
     pub fn validate(&self) -> Result<(), InvalidInput> {
+        // A document from a newer hub may mean something different by fields
+        // this build reads; editing and saving it back would relabel that
+        // reinterpretation as valid. Refusing to load it also stops the store
+        // overwriting it: an unreadable document is never treated as empty.
+        if self.schema_version > CONFIG_SCHEMA_VERSION {
+            return Err(InvalidInput::Malformed {
+                field: InputField::Config,
+                reason: "written by a newer version of the hub",
+            });
+        }
         if let Some(name) = self.extra.keys().find(|name| is_credential_name(name)) {
             return Err(InvalidInput::CredentialField { name: name.clone() });
         }

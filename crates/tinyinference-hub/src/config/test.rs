@@ -71,12 +71,11 @@ fn config_wire_shape_of_the_default_choice_is_tagged() {
 
 #[test]
 fn config_fields_a_newer_hub_added_survive_a_load_and_save() {
-    let text = r#"{"schema_version":2,"providers":[],"future_feature":{"a":[1,2,3]}}"#;
+    let text = r#"{"schema_version":1,"providers":[],"future_feature":{"a":[1,2,3]}}"#;
     let config: HubConfig = serde_json::from_str(text).unwrap();
-    assert_eq!(config.schema_version, 2);
     let value = serde_json::to_value(&config).unwrap();
     assert_eq!(value["future_feature"], json!({"a": [1, 2, 3]}));
-    assert_eq!(value["schema_version"], json!(2));
+    assert_eq!(value["schema_version"], json!(1));
 }
 
 #[test]
@@ -215,4 +214,21 @@ fn config_an_extra_field_can_never_shadow_a_known_one_on_the_way_out() {
     assert_eq!(value["providers"], json!([]));
     assert_eq!(value["schema_version"], json!(1));
     assert_eq!(value["kept"], json!(1));
+}
+
+#[test]
+fn config_a_document_from_a_newer_hub_is_refused_not_rewritten() {
+    let text = format!(
+        r#"{{"schema_version":{},"providers":[]}}"#,
+        CONFIG_SCHEMA_VERSION + 1
+    );
+    let error = serde_json::from_str::<HubConfig>(&text)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("newer version"), "{error}");
+    let mut config = HubConfig::new();
+    config.schema_version = CONFIG_SCHEMA_VERSION + 1;
+    assert!(config.validate().is_err());
+    // The current version and older ones load.
+    assert!(serde_json::from_str::<HubConfig>(r#"{"schema_version":0}"#).is_ok());
 }

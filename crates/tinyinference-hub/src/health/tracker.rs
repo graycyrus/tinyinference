@@ -229,28 +229,15 @@ impl HealthTracker {
     /// [`HubError::StoreUnreadable`] when the health store fails.
     pub async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), HubError> {
         let lock = self.lock_for(scope, slug);
-        let _serial = lock.lock().await;
-        let forgotten = self
-            .store
-            .forget(scope, slug)
-            .await
-            .map_err(|e| e.into_hub(PortName::Health));
-        // The provider is gone; its lock need not outlive it, but only if nobody
-        // else holds or waits on it: dropping the entry under a waiter would
-        // hand the next caller a fresh lock and let two updates run at once.
-        // (`lock` and the map's own copy are the two references when idle.)
-        drop(_serial);
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (scope.clone(), slug.clone());
-        if locks
-            .get(&key)
-            .is_some_and(|held| Arc::strong_count(held) <= 2)
-        {
-            locks.remove(&key);
-        }
+        let forgotten = {
+            let _serial = lock.lock().await;
+            self.store
+                .forget(scope, slug)
+                .await
+                .map_err(|e| e.into_hub(PortName::Health))
+        };
+        // The provider is gone; its lock goes too, if nobody else holds it.
+        self.release_lock(scope, slug, lock);
         forgotten
     }
 }

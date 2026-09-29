@@ -130,6 +130,10 @@ impl HealthSnapshot {
             && signal.reason.is_some_and(&matches)
         {
             signal.superseded = true;
+            // The run of failed turns is over: without this the counter would
+            // survive the recovery and one later blip would read as the next
+            // failure in a row.
+            self.consecutive_failures = 0;
         }
         if completion
             && let Some(signal) = self.probes.get_mut(&TestDepth::Completion)
@@ -201,15 +205,22 @@ impl HealthSnapshot {
         latency_ms: Option<u64>,
         now_ms: u64,
     ) -> bool {
-        // A passing completion shows chat works again, so an earlier run of
-        // failed turns is over: without this the counter would survive the
-        // recovery and one later blip would read as the fourth in a row.
-        if depth == TestDepth::Completion && failure.is_none() {
-            self.consecutive_failures = 0;
-        }
         if failure.is_none() {
             match depth {
-                TestDepth::Completion => self.supersede_chat_failures(true, false, |_| true),
+                TestDepth::Completion => {
+                    self.supersede_chat_failures(true, false, |_| true);
+                    // A working completion also proves the key to the read-only
+                    // lanes: a key that can complete but was refused by the
+                    // listing is not a rejected key.
+                    for lane in [TestDepth::KeyOnly, TestDepth::Catalog] {
+                        if let Some(signal) = self.probes.get_mut(&lane)
+                            && !signal.ok
+                            && signal.reason == Some(ReasonCode::Auth)
+                        {
+                            signal.superseded = true;
+                        }
+                    }
+                }
                 TestDepth::KeyOnly => {
                     self.supersede_chat_failures(true, true, |r| r == ReasonCode::Auth);
                 }

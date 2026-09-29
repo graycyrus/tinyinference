@@ -56,7 +56,7 @@ impl KindDriver for OpenAiCompatDriver {
                 kind: self.descriptor.kind.clone(),
             });
         }
-        let request = HubRequest::get(format!("{}/key", target.base()));
+        let request = HubRequest::get(target.join("/key"));
         let request = cx.request(&self.descriptor, target, request);
         cx.call(self, request).await.map(|_| ())
     }
@@ -79,8 +79,10 @@ impl KindDriver for OpenAiCompatDriver {
         // OpenRouter withdrawing the path): degrade to the public listing rather
         // than report the account has no models, but loudly, because the picker
         // is then offering models the account may not be able to reach.
+        let mut scoped_attempted = false;
         if let Some(path) = scoped_catalog_path(base, target.key().is_some()) {
-            match cx.call(self, read(format!("{base}{path}"))).await {
+            scoped_attempted = true;
+            match cx.call(self, read(target.join(path))).await {
                 Ok(response) => return read_listing(&response),
                 Err(HubError::Provider(failure)) if failure.status == Some(404) => {
                     tracing::warn!(
@@ -93,8 +95,14 @@ impl KindDriver for OpenAiCompatDriver {
             }
         }
         let response = cx
-            .call(self, read(format!("{base}/models{}", catalog_query(base))))
+            .call(
+                self,
+                read(target.join(&format!("/models{}", catalog_query(base)))),
+            )
             .await?;
-        read_listing(&response)
+        let mut fetched = read_listing(&response)?;
+        // Reached only after the account-scoped listing was tried and refused.
+        fetched.public_fallback = scoped_attempted;
+        Ok(fetched)
     }
 }

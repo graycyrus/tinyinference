@@ -102,9 +102,20 @@ impl CredentialChain {
         Ok(None)
     }
 
-    /// Tells every source the credential was rejected.
+    /// Tells every source the credential was rejected. Prefer
+    /// [`CredentialChain::invalidate_origin`] when the origin that answered is
+    /// known: a rejected pasted key is no reason to refresh a healthy rotating
+    /// token.
     pub fn invalidate(&self, scope: &ScopeKey) {
         for source in &self.sources {
+            source.invalidate(scope);
+        }
+    }
+
+    /// Tells only the sources reporting `origin` that the credential they
+    /// supplied was rejected (the origin [`CredentialChain::resolve`] returned).
+    pub fn invalidate_origin(&self, scope: &ScopeKey, origin: &CredentialOrigin) {
+        for source in self.sources.iter().filter(|s| &s.origin() == origin) {
             source.invalidate(scope);
         }
     }

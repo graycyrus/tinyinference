@@ -669,3 +669,15 @@ mod contract_mutations {
 fn testkit_a_fixture_with_a_bad_slug_says_which() {
     let _ = crate::testkit::ContractFixture::openai_shaped("Not A Slug", "https://a.test/v1");
 }
+
+#[test]
+fn testkit_sub_millisecond_advances_accumulate_instead_of_vanishing() {
+    let clock = FakeClock::new();
+    let start = clock.now();
+    for _ in 0..1000 {
+        clock.advance(Duration::from_micros(400));
+    }
+    assert_eq!(clock.now() - start, Duration::from_millis(400));
+    assert_eq!(clock.elapsed(), Duration::from_millis(400));
+    assert_eq!(clock.wall_ms() - FakeClock::START_WALL_MS, 400);
+}

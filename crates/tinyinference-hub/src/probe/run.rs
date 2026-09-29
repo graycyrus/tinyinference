@@ -97,6 +97,7 @@ pub async fn run_probe(
         return Ok(report);
     }
 
+    let mut public_fallback = false;
     let started = cx.clock.now();
     let outcome: Result<Vec<ModelEntry>, HubError> = match step {
         Step::KeyOnly => driver.key_check(cx, target).await.map(|()| Vec::new()),
@@ -104,6 +105,7 @@ pub async fn run_probe(
             if fetched.truncated {
                 report.notes.push(ProbeNote::CatalogTruncated);
             }
+            public_fallback = fetched.public_fallback;
             fetched.models
         }),
         Step::Completion(model) => driver
@@ -118,10 +120,14 @@ pub async fn run_probe(
             report.proves_key = credentialed
                 && match depth {
                     TestDepth::KeyOnly | TestDepth::Completion => true,
-                    TestDepth::Catalog => !descriptor.has_quirk(Quirk::CatalogUnauthenticated),
+                    TestDepth::Catalog => {
+                        !descriptor.has_quirk(Quirk::CatalogUnauthenticated) && !public_fallback
+                    }
                 };
             if depth == TestDepth::Catalog {
-                if credentialed && descriptor.has_quirk(Quirk::CatalogUnauthenticated) {
+                if credentialed
+                    && (public_fallback || descriptor.has_quirk(Quirk::CatalogUnauthenticated))
+                {
                     report.notes.push(ProbeNote::CatalogDoesNotProveKey);
                 }
                 if models.is_empty() && descriptor.has_quirk(Quirk::CatalogAccountScoped) {

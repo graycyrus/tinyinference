@@ -109,7 +109,7 @@ impl KindDriver for LocalDriver {
         // The OpenAI-compatible listing, read and parsed as one step so that a
         // body that is not a listing (an older build, a proxy's landing page)
         // can fall back exactly like a missing path.
-        let (openai, answered) = match cx.call(self, read(format!("{base}/models"))).await {
+        let (openai, answered) = match cx.call(self, read(target.join("/models"))).await {
             Ok(response) => (read_listing(&response), true),
             Err(error) => (Err(error), false),
         };

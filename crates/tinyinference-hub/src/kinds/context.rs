@@ -134,9 +134,46 @@ impl<'a> Target<'a> {
 }
 
 impl Target<'_> {
-    /// The endpoint without a trailing slash.
+    /// The endpoint without a trailing slash, a query or a fragment.
     pub fn base(&self) -> &str {
-        self.base_url.trim().trim_end_matches('/')
+        let base = self.base_url.trim();
+        let end = base.find(['?', '#']).unwrap_or(base.len());
+        base[..end].trim_end_matches('/')
+    }
+
+    /// The endpoint's own query string (`api-version=preview` on an Azure
+    /// resource), without the `?`.
+    fn base_query(&self) -> Option<&str> {
+        let base = self.base_url.trim();
+        let start = base.find('?')? + 1;
+        let end = base
+            .find('#')
+            .filter(|hash| *hash >= start)
+            .unwrap_or(base.len());
+        Some(&base[start..end]).filter(|query| !query.is_empty())
+    }
+
+    /// `path` (with an optional `?query`) appended to the endpoint, keeping the
+    /// endpoint's own query: `https://x/v1?api-version=preview` plus
+    /// `/models?limit=5` is `https://x/v1/models?limit=5&api-version=preview`.
+    /// String concatenation would put the path after the query and produce a
+    /// URL the server cannot route.
+    pub fn join(&self, path: &str) -> String {
+        let (path, path_query) = match path.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (path, None),
+        };
+        let mut url = format!("{}{path}", self.base());
+        let query: Vec<&str> = path_query
+            .into_iter()
+            .chain(self.base_query())
+            .filter(|part| !part.is_empty())
+            .collect();
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query.join("&"));
+        }
+        url
     }
 
     /// The credential, trimmed, when it is non-empty.

@@ -633,3 +633,35 @@ mod chain_props {
         }
     }
 }
+
+#[tokio::test]
+async fn credential_invalidating_an_origin_reaches_only_the_sources_that_answered_as_it() {
+    let clock = FakeClock::new();
+    let token = rotating(&clock);
+    let creds = store();
+    let chain = CredentialChain::new()
+        .with(StoreSource::provider_key(creds.clone()))
+        .with(TokenSourceAdapter::new(
+            token.clone(),
+            CredentialOrigin::InstanceIdentity,
+        ));
+    creds
+        .set(
+            &scope(),
+            &slug("tinyhumans").key_slot(),
+            Secret::new("sk-pasted"),
+        )
+        .await
+        .unwrap();
+    let (_, origin) = chain
+        .resolve(&scope(), &slug("tinyhumans"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(origin, CredentialOrigin::ProviderKey);
+    // The pasted key was rejected: the healthy rotating token is left alone.
+    chain.invalidate_origin(&scope(), &origin);
+    assert!(token.invalidated.lock().unwrap().is_empty());
+    chain.invalidate_origin(&scope(), &CredentialOrigin::InstanceIdentity);
+    assert_eq!(token.invalidated.lock().unwrap().len(), 1);
+}

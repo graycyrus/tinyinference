@@ -114,11 +114,13 @@ fn paged_the_collector_walks_to_total_and_stops() {
 }
 
 #[test]
-fn paged_no_total_or_an_empty_page_ends_the_read() {
+fn paged_only_an_empty_page_ends_a_read_with_no_total() {
     assert_eq!(
         Collector::default().push(page(&["a"], None)),
-        NextPage::Done
+        NextPage::At(1),
+        "no total: ask again"
     );
+    assert_eq!(Collector::default().push(page(&[], None)), NextPage::Done);
     let mut collector = Collector::default();
     assert_eq!(collector.push(page(&[], Some(100))), NextPage::Done);
 }
@@ -178,38 +180,35 @@ fn paged_a_total_that_is_not_a_number_is_no_total() {
     assert_eq!(parse_page(&negative).unwrap().total, None);
 }
 
-fn full_page(prefix: &str, n: usize) -> Page {
-    let ids: Vec<String> = (0..PAGE_LIMIT)
-        .map(|i| format!("{prefix}{n}-{i}"))
-        .collect();
-    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    page(&refs, None)
-}
-
 #[test]
-fn paged_a_full_page_with_no_total_keeps_reading_until_a_short_page() {
+fn paged_no_total_keeps_reading_whatever_the_page_size_until_an_empty_page() {
+    // The server clamped `limit` to 100 and never sends a total.
     let mut collector = Collector::default();
-    assert_eq!(collector.push(full_page("a", 0)), NextPage::At(PAGE_LIMIT));
-    assert_eq!(
-        collector.push(full_page("a", 1)),
-        NextPage::At(2 * PAGE_LIMIT)
-    );
-    assert_eq!(collector.push(page(&["last"], None)), NextPage::Done);
-    assert_eq!(collector.finish().len(), 2 * PAGE_LIMIT + 1);
+    for n in 0..3 {
+        let ids: Vec<String> = (0..100).map(|i| format!("m{n}-{i}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            collector.push(page(&refs, None)),
+            NextPage::At((n + 1) * 100)
+        );
+    }
+    assert_eq!(collector.push(page(&[], None)), NextPage::Done);
+    assert_eq!(collector.finish().len(), 300);
 }
 
 #[test]
-fn paged_full_pages_with_no_total_stop_at_the_page_cap_and_say_so() {
+fn paged_no_total_and_pages_that_never_end_stop_at_the_page_cap_and_say_so() {
     let mut collector = Collector::default();
     let mut last = NextPage::Done;
     for n in 0..MAX_PAGES {
-        last = collector.push(full_page("b", n));
+        let id = format!("m{n}");
+        last = collector.push(page(&[id.as_str()], None));
     }
     assert_eq!(
         last,
         NextPage::Truncated {
-            read: MAX_PAGES * PAGE_LIMIT,
-            total: MAX_PAGES * PAGE_LIMIT
+            read: MAX_PAGES,
+            total: MAX_PAGES
         }
     );
 }

@@ -10,9 +10,10 @@ use crate::taxonomy::TestDepth;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeNote {
-    /// The catalog was readable but the kind's listing is public, so it says
-    /// nothing about the key (`Quirk::CatalogUnauthenticated`). Only a
-    /// completion can fail a bad key there.
+    /// The catalog was readable but says nothing about the key: the kind's
+    /// listing is public (`Quirk::CatalogUnauthenticated`), or the driver fell
+    /// back from an account-scoped listing to the public one (OpenRouter's
+    /// `/models/user` answering 404). Only a completion can fail a bad key.
     CatalogDoesNotProveKey,
     /// The listing is scoped to the account and came back empty: a fresh
     /// Fireworks key sees no public models, so an empty list is expected there,

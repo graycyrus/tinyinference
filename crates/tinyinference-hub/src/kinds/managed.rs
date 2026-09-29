@@ -77,12 +77,11 @@ impl KindDriver for ManagedDriver {
         target: &Target<'_>,
     ) -> Result<Fetched, HubError> {
         Self::signed_out(target)?;
-        let base = target.base();
         if self.shape != CatalogShape::PagedEnvelope {
             let request = cx.request(
                 &self.descriptor,
                 target,
-                HubRequest::get(format!("{base}/models{}", self.query))
+                HubRequest::get(target.join(&format!("/models{}", self.query)))
                     .with_body_cap(cx.policy.catalog_cap),
             );
             let response = cx.call(self, request).await?;
@@ -94,7 +93,7 @@ impl KindDriver for ManagedDriver {
             let request = cx.request(
                 &self.descriptor,
                 target,
-                HubRequest::get(format!("{base}{}", page_path(collector.offset())))
+                HubRequest::get(target.join(&page_path(collector.offset())))
                     .with_body_cap(cx.policy.page_cap),
             );
             let response = cx.call(self, request).await?;
@@ -119,8 +118,8 @@ impl KindDriver for ManagedDriver {
             }
         }
         Ok(Fetched {
-            models: collector.finish(),
             truncated,
+            ..Fetched::new(collector.finish())
         })
     }
 

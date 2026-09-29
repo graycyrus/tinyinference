@@ -133,6 +133,10 @@ pub struct Fetched {
     pub models: Vec<ModelEntry>,
     /// The listing had more pages than one read follows.
     pub truncated: bool,
+    /// The credential-scoped listing was unavailable and the public one was read
+    /// instead (OpenRouter's `/models/user` answering 404). The list is real but
+    /// says nothing about the key, and is not filtered by its permissions.
+    pub public_fallback: bool,
 }
 
 impl Fetched {
@@ -141,6 +145,7 @@ impl Fetched {
         Self {
             models,
             truncated: false,
+            public_fallback: false,
         }
     }
 }

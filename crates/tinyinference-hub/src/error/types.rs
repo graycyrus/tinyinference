@@ -149,6 +149,8 @@ pub enum InputField {
     Kind,
     /// A scope, agent or workload key.
     Key,
+    /// A stored configuration document.
+    Config,
 }
 
 impl fmt::Display for InputField {
@@ -160,6 +162,7 @@ impl fmt::Display for InputField {
             Self::Endpoint => "an endpoint",
             Self::Kind => "a provider kind",
             Self::Key => "a key",
+            Self::Config => "the configuration",
         })
     }
 }

@@ -273,6 +273,33 @@ fn health_the_fold_table() {
             ok,
         ),
         (
+            "a key-only re-test also ends the run of failed turns",
+            vec![
+                Turn(Some(ReasonCode::Auth)),
+                Turn(Some(ReasonCode::Auth)),
+                Turn(Some(ReasonCode::Auth)),
+                Probe(KeyOnly, None),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
+            "a working completion clears a rejected key on the catalog lane",
+            vec![
+                Probe(Catalog, Some(ReasonCode::Auth)),
+                Probe(Completion, None),
+            ],
+            ok,
+        ),
+        (
+            "but a working completion does not hide a catalog outage",
+            vec![
+                Probe(Catalog, Some(ReasonCode::Timeout)),
+                Probe(Completion, None),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
             "but not an exhausted account",
             vec![Turn(Some(ReasonCode::Quota)), Probe(KeyOnly, None)],
             ProviderHealth::Down(ReasonCode::Quota),

@@ -62,7 +62,7 @@ pub(super) async fn ping_by_protocol(
         "max_tokens"
     };
     let request = HubRequest::post_json(
-        format!("{}{path}", target.base()),
+        target.join(path),
         &json!({
             "model": model.as_str(),
             limit_field: PING_MAX_TOKENS,

@@ -15,7 +15,7 @@ use crate::ports::Clock;
 #[derive(Clone)]
 pub struct FakeClock {
     anchor: Instant,
-    offset_ms: Arc<AtomicU64>,
+    offset_ns: Arc<AtomicU64>,
     wall_start_ms: u64,
 }
 
@@ -27,20 +27,22 @@ impl FakeClock {
     pub fn new() -> Self {
         Self {
             anchor: Instant::now(),
-            offset_ms: Arc::new(AtomicU64::new(0)),
+            offset_ns: Arc::new(AtomicU64::new(0)),
             wall_start_ms: Self::START_WALL_MS,
         }
     }
 
     /// Moves time forward. There is no way to move it back.
     pub fn advance(&self, by: Duration) {
-        let ms = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
-        self.offset_ms.fetch_add(ms, Ordering::SeqCst);
+        // Nanoseconds, so sub-millisecond latencies accumulate instead of
+        // vanishing.
+        let ns = u64::try_from(by.as_nanos()).unwrap_or(u64::MAX);
+        self.offset_ns.fetch_add(ns, Ordering::SeqCst);
     }
 
     /// How far the clock has moved since construction.
     pub fn elapsed(&self) -> Duration {
-        Duration::from_millis(self.offset_ms.load(Ordering::SeqCst))
+        Duration::from_nanos(self.offset_ns.load(Ordering::SeqCst))
     }
 }
 
@@ -64,6 +66,6 @@ impl Clock for FakeClock {
     }
 
     fn wall_ms(&self) -> u64 {
-        self.wall_start_ms + self.offset_ms.load(Ordering::SeqCst)
+        self.wall_start_ms + self.offset_ns.load(Ordering::SeqCst) / 1_000_000
     }
 }
