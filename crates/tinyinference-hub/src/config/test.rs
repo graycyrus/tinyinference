@@ -166,3 +166,40 @@ fn draft_builders_set_fields_and_the_debug_never_prints_the_key() {
     let bare = ProviderDraft::new("ollama");
     assert!(bare.key.is_none() && bare.base_url.is_none() && bare.model.is_none());
 }
+
+mod config_props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// A configuration always survives a save and a load, whatever slugs and
+        /// models it holds, and what is written never contains a credential-shaped name.
+        #[test]
+        fn config_prop_round_trips_and_never_grows_a_credential_field(
+            slugs in proptest::collection::btree_set("[a-z0-9][a-z0-9_-]{0,20}", 0..6),
+            model in "[a-zA-Z0-9./:_-]{1,30}",
+            pick in 0usize..7,
+            pins in proptest::collection::vec("[a-z:]{1,12}", 0..4),
+        ) {
+            let mut config = HubConfig::new();
+            for s in &slugs {
+                config.providers.push(record(s));
+            }
+            let all: Vec<_> = slugs.iter().collect();
+            if let Some(chosen) = all.get(pick % all.len().max(1)) {
+                config.default = DefaultChoice::Full { provider: slug(chosen), model: ModelId::parse(&model).unwrap() };
+                for pin in &pins {
+                    config.agent_pins.insert(AgentKey::new(pin.clone()), ModelChoice::new(slug(chosen), ModelId::parse(&model).unwrap()));
+                }
+            }
+            let text = serde_json::to_string(&config).unwrap();
+            let back: HubConfig = serde_json::from_str(&text).unwrap();
+            prop_assert_eq!(&back, &config);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            for key in value.as_object().unwrap().keys() {
+                prop_assert!(!crate::secret::is_credential_name(key), "{key}");
+            }
+        }
+    }
+}

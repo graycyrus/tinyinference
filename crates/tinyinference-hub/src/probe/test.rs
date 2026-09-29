@@ -585,3 +585,35 @@ async fn probe_the_report_and_its_target_never_print_the_key() {
     );
     let _ = custom_descriptor();
 }
+
+/// A driver whose listing fails with an error that is not a provider's.
+#[derive(Debug)]
+struct Broken(crate::ProviderDescriptor);
+
+#[async_trait::async_trait]
+impl crate::kinds::KindDriver for Broken {
+    fn descriptor(&self) -> &crate::ProviderDescriptor {
+        &self.0
+    }
+    async fn list_models(
+        &self,
+        _cx: &DriverContext<'_>,
+        _target: &Target<'_>,
+    ) -> Result<crate::catalog::Fetched, HubError> {
+        Err(HubError::Conflict)
+    }
+}
+
+#[tokio::test]
+async fn probe_an_error_that_is_not_the_providers_stops_the_probe_instead_of_reporting_a_failure() {
+    let bed = Bed::new();
+    let s = Subject {
+        group: ProviderGroup::Custom,
+        ..Subject::cloud("custom", "https://a.test/v1", None)
+    };
+    let driver = Broken(custom_descriptor());
+    let error = run_probe(&bed.cx(), &driver, &s.target(), TestDepth::Catalog)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HubError::Conflict), "{error:?}");
+}

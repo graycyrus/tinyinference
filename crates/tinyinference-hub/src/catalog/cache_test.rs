@@ -810,3 +810,134 @@ fn cache_debug_never_prints_a_credential_bearing_url() {
     let (cache, _) = cache();
     assert!(format!("{cache:?}").contains("slots"));
 }
+
+#[tokio::test]
+async fn cache_an_older_empty_list_is_not_served_as_a_stale_answer() {
+    // "No models, as of an hour ago" beside a warning hides the failure that
+    // matters; the failure is returned instead.
+    let (cache, _) = cache();
+    cache
+        .read(key("a", false), false, || async {
+            Ok(Fetched::new(Vec::new()))
+        })
+        .await
+        .unwrap();
+    let error = cache
+        .read(key("a", false), true, || async {
+            Err(failure(ReasonCode::Timeout, None))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Timeout);
+    // A non-empty older list is still served.
+    let other = || {
+        CatalogKey::new(
+            &scope("a"),
+            false,
+            "https://other.test/v1",
+            CatalogShape::OpenAi,
+        )
+    };
+    cache
+        .read(other(), false, || async {
+            Ok(Fetched::new(models(&["m"])))
+        })
+        .await
+        .unwrap();
+    let list = cache
+        .read(other(), true, || async {
+            Err(failure(ReasonCode::Timeout, None))
+        })
+        .await
+        .unwrap();
+    assert!(list.is_stale());
+}
+
+mod cache_props {
+    use std::sync::Mutex;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Read {
+            scope: u8,
+            credentialed: bool,
+            refresh: bool,
+            outcome: u8,
+        },
+        Advance(u16),
+        EvictScope(u8),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0u8..3, any::<bool>(), any::<bool>(), 0u8..4).prop_map(
+                |(scope, credentialed, refresh, outcome)| Op::Read {
+                    scope,
+                    credentialed,
+                    refresh,
+                    outcome
+                }
+            ),
+            (0u16..4000).prop_map(Op::Advance),
+            (0u8..3).prop_map(Op::EvictScope),
+        ]
+    }
+
+    proptest! {
+        /// A tenant never reads another tenant's authenticated list; a fresh
+        /// answer means a fetch happened in this very call; a rejected
+        /// credential is never remembered (the next read fetches again).
+        #[test]
+        fn cache_prop_scopes_never_mix_and_rejections_are_never_remembered(ops in proptest::collection::vec(op(), 1..60)) {
+            let (cache, clock) = cache();
+            let fetches = Arc::new(Mutex::new(0usize));
+            for op in ops {
+                match op {
+                    Op::Advance(secs) => clock.advance(Duration::from_secs(u64::from(secs))),
+                    Op::EvictScope(s) => cache.evict_scope(&scope(&format!("s{s}"))),
+                    Op::Read { scope: s, credentialed, refresh, outcome } => {
+                        let name = format!("s{s}");
+                        let before = *fetches.lock().unwrap();
+                        let counter = fetches.clone();
+                        let label = format!("{name}-{credentialed}");
+                        let result = futures::executor::block_on(cache.read(
+                            CatalogKey::new(&scope(&name), credentialed, ENDPOINT, CatalogShape::OpenAi),
+                            refresh,
+                            || async move {
+                                *counter.lock().unwrap() += 1;
+                                match outcome {
+                                    0 | 1 => Ok(Fetched::new(vec![entry(&format!("{label}-model"))])),
+                                    2 => Err(failure(ReasonCode::Auth, Some(401))),
+                                    _ => Err(failure(ReasonCode::Timeout, None)),
+                                }
+                            },
+                        ));
+                        let fetched_now = *fetches.lock().unwrap() > before;
+                        if let Ok(list) = &result {
+                            for model in &list.models {
+                                let id = model.id.as_str();
+                                if credentialed {
+                                    prop_assert!(id.starts_with(&format!("{name}-true")), "{name} read {id}");
+                                } else {
+                                    prop_assert!(id.ends_with("-false-model"), "{name} read {id}");
+                                }
+                            }
+                            if list.freshness == Freshness::Fresh {
+                                prop_assert!(fetched_now, "Fresh without a fetch");
+                            }
+                        }
+                        if let Err(error) = &result
+                            && error.reason() == ReasonCode::Auth
+                        {
+                            prop_assert!(fetched_now, "an Auth error must come from a fetch, never a memo");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

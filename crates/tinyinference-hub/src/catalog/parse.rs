@@ -67,15 +67,28 @@ fn finish(entries: impl IntoIterator<Item = Option<ModelEntry>>) -> ParsedCatalo
 /// A [`ProviderFailure`] (`unknown`, never retried) when the body is not JSON
 /// or is not a listing.
 pub fn parse_openai(body: &[u8]) -> Result<ParsedCatalog, ProviderFailure> {
-    let value = json(body)?;
-    let value = match value {
-        Value::Array(items) => serde_json::json!({ "data": items }),
-        other => other,
+    parse_openai_value(&json(body)?)
+}
+
+/// [`parse_openai`] for a body that is already parsed JSON (a driver that also
+/// needs the envelope's paging fields parses once and reads both).
+///
+/// # Errors
+///
+/// A [`ProviderFailure`] (`unknown`, never retried) when the value is not a
+/// listing.
+pub fn parse_openai_value(value: &Value) -> Result<ParsedCatalog, ProviderFailure> {
+    let wrapped;
+    let value = if let Value::Array(items) = value {
+        wrapped = serde_json::json!({ "data": items });
+        &wrapped
+    } else {
+        value
     };
     // The rows llm's parser drops (no id) are invisible to it; count them from
     // the envelope so `skipped` is honest.
-    let raw_rows = row_count(&value);
-    let infos = tinyinference_llm::catalog::parse_models_response(&value)
+    let raw_rows = row_count(value);
+    let infos = tinyinference_llm::catalog::parse_models_response(value)
         .map_err(|error| unreadable(error.to_string()))?;
     let dropped_by_llm = raw_rows.saturating_sub(infos.len());
     let mut parsed = finish(

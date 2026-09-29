@@ -72,7 +72,14 @@ pub trait KindDriver: Send + Sync + Debug {
     ) -> Result<(), HubError> {
         match self.descriptor().protocol {
             Protocol::OpenAiChat | Protocol::OpenAiResponses | Protocol::AnthropicMessages => {
-                ping_by_protocol(self, cx, target, model).await
+                ping_by_protocol(
+                    cx,
+                    self.descriptor(),
+                    &|status, headers, body| self.classify(status, headers, body),
+                    target,
+                    model,
+                )
+                .await
             }
             _ => Err(HubError::Unsupported {
                 op: Operation::Test(TestDepth::Completion),

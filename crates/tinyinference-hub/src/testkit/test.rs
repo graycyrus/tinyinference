@@ -449,3 +449,27 @@ async fn testkit_clear_rules_keeps_the_log() {
     http.clear_rules();
     assert_eq!(http.request_count(), 1);
 }
+
+#[tokio::test]
+#[should_panic(expected = "no rule answers")]
+async fn testkit_a_rule_that_requires_a_header_does_not_answer_a_request_without_it() {
+    let (http, _) = http();
+    http.route(
+        Match::get("https://a.test/x").with_header_present("x-token"),
+        Scripted::text(200, "ok"),
+    );
+    http.route(
+        Match::get("https://a.test/y").with_header("x-token", "expected"),
+        Scripted::text(200, "ok"),
+    );
+    let policy = hosted();
+    // The wrong value does not match either.
+    let wrong = HubRequest::get("https://a.test/y").with_header("x-token", "other");
+    let unmatched = std::panic::AssertUnwindSafe(http.send(wrong, &policy));
+    let caught = futures::FutureExt::catch_unwind(unmatched).await;
+    assert!(caught.is_err(), "a different value must not match");
+    // And a missing header does not match: this one panics the test.
+    let _ = http
+        .send(HubRequest::get("https://a.test/x"), &policy)
+        .await;
+}

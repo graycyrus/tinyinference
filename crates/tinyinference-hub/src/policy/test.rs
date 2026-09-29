@@ -961,3 +961,11 @@ fn a_double_encoded_query_name_is_not_a_credential_and_azure_code_is() {
         Ok(())
     );
 }
+
+#[test]
+fn headers_the_product_header_is_never_allowed_to_an_unreadable_url() {
+    let policy = HeaderPolicy::builtin();
+    for url in ["", "not a url", "http://", "://x"] {
+        assert!(!policy.allows_product_header_to(url), "{url:?}");
+    }
+}

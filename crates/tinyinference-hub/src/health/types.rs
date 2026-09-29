@@ -77,8 +77,12 @@ pub struct TurnSignal {
 }
 
 /// Everything remembered about one provider's health.
+///
+/// Every field has a default, so a snapshot written by an older or newer build
+/// (a host persists these) still loads.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HealthSnapshot {
     /// The folded status.
     pub health: ProviderHealth,

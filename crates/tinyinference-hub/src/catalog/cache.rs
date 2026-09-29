@@ -171,9 +171,16 @@ impl Slot {
     }
 
     /// The remembered list (however old) as a stale answer, or the failure.
+    ///
+    /// An **empty** remembered list is not an answer worth serving: "no models
+    /// (as of some time ago)" beside a warning hides the failure that matters.
     fn stale_or(&self, failure: ProviderFailure) -> Result<ModelList, HubError> {
         let state = self.state();
-        match state.entry.as_ref() {
+        match state
+            .entry
+            .as_ref()
+            .filter(|entry| !entry.models.is_empty())
+        {
             Some(entry) => Ok(ModelList {
                 models: entry.models.clone(),
                 freshness: Freshness::Stale { failure },
@@ -325,11 +332,6 @@ impl CatalogCache {
             }
             if let Some(failure) = slot.fresh_failure(now) {
                 return slot.stale_or(failure);
-            }
-        } else if !refresh {
-            let now = self.clock.now();
-            if let Some(list) = slot.fresh(now) {
-                return Ok(list);
             }
         }
         let outcome = fetch().await;

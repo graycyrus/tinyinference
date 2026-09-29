@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::catalog::{Fetched, ModelEntry, parse_openai};
+use crate::catalog::{Fetched, ModelEntry, parse_openai_value};
 use crate::descriptor::ProviderDescriptor;
 use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
 use crate::ports::HubRequest;
@@ -74,9 +74,9 @@ impl KindDriver for AnthropicDriver {
                         .with_raw("the model list is larger than the size cap"),
                 ));
             }
-            let parsed = parse_openai(&response.body).map_err(HubError::Provider)?;
             let envelope: Value = serde_json::from_slice(&response.body)
                 .map_err(|_| unreadable("the model list was not JSON"))?;
+            let parsed = parse_openai_value(&envelope).map_err(HubError::Provider)?;
             for entry in parsed.entries {
                 if !models.iter().any(|m| m.id == entry.id) {
                     models.push(entry);

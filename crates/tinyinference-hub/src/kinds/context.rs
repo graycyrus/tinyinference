@@ -98,6 +98,41 @@ impl fmt::Debug for Target<'_> {
     }
 }
 
+impl<'a> Target<'a> {
+    /// A target with no credential and no model.
+    pub fn new(
+        slug: &'a Slug,
+        kind: &'a KindId,
+        group: ProviderGroup,
+        base_url: &'a str,
+        auth: &'a AuthStyle,
+    ) -> Self {
+        Self {
+            slug,
+            kind,
+            group,
+            base_url,
+            auth,
+            credential: None,
+            model: None,
+        }
+    }
+
+    /// This target presenting `credential`.
+    #[must_use]
+    pub fn with_credential(mut self, credential: &'a Secret) -> Self {
+        self.credential = Some(credential);
+        self
+    }
+
+    /// This target with a model for a completion ping.
+    #[must_use]
+    pub fn with_model(mut self, model: &'a ModelId) -> Self {
+        self.model = Some(model);
+        self
+    }
+}
+
 impl Target<'_> {
     /// The endpoint without a trailing slash.
     pub fn base(&self) -> &str {
@@ -190,6 +225,20 @@ impl DriverContext<'_> {
         driver: &D,
         request: HubRequest,
     ) -> Result<HubResponse, HubError> {
+        self.call_with(
+            &|status, headers, body| driver.classify(status, headers, body),
+            request,
+        )
+        .await
+    }
+
+    /// [`DriverContext::call`] with the classifier passed as a function, so the
+    /// body is compiled once rather than once per driver type.
+    pub(crate) async fn call_with(
+        &self,
+        classify: &Classifier<'_>,
+        request: HubRequest,
+    ) -> Result<HubResponse, HubError> {
         let response = self
             .http
             .send(request, self.policy)
@@ -209,10 +258,13 @@ impl DriverContext<'_> {
         }
         let cap = self.policy.fail_body_cap.min(response.body.len());
         let body = String::from_utf8_lossy(&response.body[..cap]).into_owned();
-        let failure: ProviderFailure =
-            driver.classify(response.status, &response.header_pairs(), &body);
+        let failure: ProviderFailure = classify(response.status, &response.header_pairs(), &body);
         Err(HubError::Provider(failure.with_truncated(
             response.truncated || cap < response.body.len(),
         )))
     }
 }
+
+/// A failure classifier: `(status, headers, body)` to a [`ProviderFailure`].
+pub(crate) type Classifier<'a> =
+    dyn Fn(u16, &[(&str, &str)], &str) -> ProviderFailure + Send + Sync + 'a;

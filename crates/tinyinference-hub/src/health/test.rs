@@ -489,3 +489,125 @@ async fn health_concurrent_outcomes_do_not_lose_each_other() {
     assert_eq!(snapshot.health, ProviderHealth::Down(ReasonCode::Timeout));
     assert!(format!("{:?}", bed.tracker).contains("HealthTracker"));
 }
+
+#[tokio::test]
+async fn health_a_probe_report_feeds_the_tracker_including_its_failure_and_latency() {
+    use crate::probe::ProbeReport;
+    let bed = bed();
+    let (s, p) = (scope(), slug());
+    let mut report = ProbeReport {
+        depth: TestDepth::Catalog,
+        failure: None,
+        refusal: None,
+        latency: Duration::from_millis(120),
+        models: Vec::new(),
+        proves_key: true,
+        notes: Vec::new(),
+    };
+    assert_eq!(
+        bed.tracker.record_probe(&s, &p, &report).await.unwrap(),
+        ProviderHealth::Ok
+    );
+    let snapshot = bed.tracker.snapshot(&s, &p).await.unwrap();
+    assert_eq!(snapshot.probes[&TestDepth::Catalog].latency_ms, Some(120));
+    report.failure = Some(ProviderFailure::new(ReasonCode::Auth, Retry::Never).with_status(401));
+    assert_eq!(
+        bed.tracker.record_probe(&s, &p, &report).await.unwrap(),
+        ProviderHealth::Down(ReasonCode::Auth)
+    );
+    let snapshot = bed.tracker.snapshot(&s, &p).await.unwrap();
+    assert_eq!(snapshot.last_failure.unwrap().status, Some(401));
+    assert!(!snapshot.probes[&TestDepth::Catalog].ok);
+    assert_eq!(bed.events.events().len(), 2);
+}
+
+#[test]
+fn health_a_stored_failure_with_no_reason_is_degraded_not_ok() {
+    // Data written by another build can carry a failed signal with no reason.
+    let json = r#"{"health":{"state":"unknown"},"changed_at_ms":0,
+        "probes":{"catalog":{"ok":false,"reason":null,"at_ms":1,"latency_ms":null}}}"#;
+    let mut snapshot: HealthSnapshot = serde_json::from_str(json).unwrap();
+    snapshot.record_probe(TestDepth::KeyOnly, None, None, 2);
+    assert_eq!(
+        snapshot.health,
+        ProviderHealth::Degraded(ReasonCode::Unknown)
+    );
+}
+
+mod health_props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn step() -> impl Strategy<Value = (u8, Option<u8>)> {
+        (0u8..4, prop::option::of(0u8..6))
+    }
+
+    fn reason(n: u8) -> ReasonCode {
+        [
+            ReasonCode::Auth,
+            ReasonCode::Quota,
+            ReasonCode::Endpoint,
+            ReasonCode::Timeout,
+            ReasonCode::Model,
+            ReasonCode::RateLimited,
+        ][usize::from(n) % 6]
+    }
+
+    fn apply(snapshot: &mut HealthSnapshot, lane: u8, outcome: Option<u8>, now: u64) {
+        let failure = outcome.map(|r| (reason(r), None));
+        match lane {
+            0 => snapshot.record_probe(TestDepth::KeyOnly, failure, None, now),
+            1 => snapshot.record_probe(TestDepth::Catalog, failure, None, now),
+            2 => snapshot.record_probe(TestDepth::Completion, failure, None, now),
+            _ => snapshot.record_turn(failure, now),
+        };
+    }
+
+    proptest! {
+        /// Whatever came before, one success in every lane is `Ok`, and an
+        /// account-level failure heard last is `Down`.
+        #[test]
+        fn health_prop_all_lanes_passing_is_ok_and_a_terminal_failure_heard_last_is_down(
+            steps in proptest::collection::vec(step(), 0..40),
+            terminal in 0u8..2,
+            lane in 0u8..4,
+        ) {
+            let mut snapshot = HealthSnapshot::default();
+            let mut now = 1;
+            for (l, outcome) in &steps {
+                apply(&mut snapshot, *l, *outcome, now);
+                now += 1;
+            }
+            let mut healed = snapshot.clone();
+            for l in 0..4 {
+                apply(&mut healed, l, None, now);
+                now += 1;
+            }
+            prop_assert_eq!(healed.health, ProviderHealth::Ok);
+            prop_assert_eq!(healed.consecutive_failures, 0);
+
+            apply(&mut snapshot, lane, Some(terminal), now);
+            // Auth outranks Quota, so an older unresolved rejection elsewhere wins
+            // over a newer quota failure; either way it is Down for an account reason.
+            match (terminal, snapshot.health) {
+                (0, health) => prop_assert_eq!(health, ProviderHealth::Down(ReasonCode::Auth)),
+                (_, ProviderHealth::Down(ReasonCode::Auth | ReasonCode::Quota)) => {}
+                (_, other) => prop_assert!(false, "{other:?}"),
+            }
+            // The snapshot always survives a JSON round trip.
+            let back: HealthSnapshot = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+            prop_assert_eq!(back, snapshot);
+        }
+
+        /// `Unknown` only ever describes a provider nobody has heard from.
+        #[test]
+        fn health_prop_a_heard_provider_is_never_unknown(steps in proptest::collection::vec(step(), 1..30)) {
+            let mut snapshot = HealthSnapshot::default();
+            for (n, (l, outcome)) in steps.iter().enumerate() {
+                apply(&mut snapshot, *l, *outcome, n as u64 + 1);
+            }
+            prop_assert_ne!(snapshot.health, ProviderHealth::Unknown);
+        }
+    }
+}

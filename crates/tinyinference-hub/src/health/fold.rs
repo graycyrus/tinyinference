@@ -92,13 +92,10 @@ impl HealthSnapshot {
 
     /// Recomputes [`HealthSnapshot::health`] from the signals.
     ///
-    /// Returns whether the status changed. With no signals the status is left
-    /// alone (so `SignedOut` survives until something new is heard).
+    /// Returns whether the status changed. Only called after a signal was
+    /// recorded, so there is always at least one lane.
     fn refold(&mut self, now_ms: u64) -> bool {
         let lanes = self.lanes();
-        if lanes.is_empty() {
-            return false;
-        }
         let failing: Vec<&Lane> = lanes
             .iter()
             .filter(|lane| !lane.ok)

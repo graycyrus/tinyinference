@@ -152,6 +152,13 @@ impl KindDriver for ManagedDriver {
         model: &crate::ids::ModelId,
     ) -> Result<(), HubError> {
         Self::signed_out(target)?;
-        super::ping::ping_by_protocol(self, cx, target, model).await
+        super::ping::ping_by_protocol(
+            cx,
+            &self.descriptor,
+            &|status, headers, body| self.classify(status, headers, body),
+            target,
+            model,
+        )
+        .await
     }
 }

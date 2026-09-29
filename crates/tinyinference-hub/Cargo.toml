@@ -64,3 +64,7 @@ workspace = true
 [[test]]
 name = "contract_kinds"
 required-features = ["testing"]
+
+[[test]]
+name = "sim_engine"
+required-features = ["testing"]

@@ -29,6 +29,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// A document that cannot be stored is reported as an unavailable store: the
+/// hub never writes what it cannot read back.
+fn not_storable<E>(_: E) -> PortError {
+    PortError::unavailable("the configuration is not storable")
+}
+
 /// Which credential-store operations an injected outage breaks.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,11 +215,8 @@ impl ConfigStore for MemoryConfig {
         {
             return Err(PortError::Conflict);
         }
-        config
-            .validate()
-            .map_err(|_| PortError::unavailable("the configuration is not storable"))?;
-        let json = serde_json::to_string(config)
-            .map_err(|_| PortError::unavailable("the configuration is not serialisable"))?;
+        config.validate().map_err(not_storable)?;
+        let json = serde_json::to_string(config).map_err(not_storable)?;
         let mut docs = lock(&self.docs);
         let current = docs.get(scope).map(|(_, v)| Version::new(*v));
         if current != expect {

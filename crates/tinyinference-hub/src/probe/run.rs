@@ -6,11 +6,19 @@ use crate::error::{
     HubError, InputField, InvalidInput, Operation, PolicyViolation, ProviderFailure, ReasonCode,
     Retry,
 };
+use crate::ids::ModelId;
 use crate::kinds::{DriverContext, KindDriver, Target};
 use crate::policy::check_endpoint_with_credential;
 use crate::taxonomy::{ProviderGroup, TestDepth};
 
 use super::types::{ProbeNote, ProbeReport};
+
+/// What a probe does, with what it needs already in hand.
+enum Step<'a> {
+    KeyOnly,
+    Catalog,
+    Completion(&'a ModelId),
+}
 
 /// A failure that stands for "the endpoint policy said no". It is an
 /// `endpoint` failure so the add flow keeps the key (only `auth` rolls one
@@ -61,14 +69,15 @@ pub async fn run_probe(
             return Err(HubError::Invalid(InvalidInput::Empty(InputField::Key)));
         }
     }
-    let model = match depth {
-        TestDepth::Completion => Some(target.model.ok_or(HubError::Invalid(
+    let step = match depth {
+        TestDepth::KeyOnly => Step::KeyOnly,
+        TestDepth::Catalog => Step::Catalog,
+        TestDepth::Completion => Step::Completion(target.model.ok_or(HubError::Invalid(
             InvalidInput::Malformed {
                 field: InputField::ModelId,
                 reason: "a model id is required for a completion test",
             },
         ))?),
-        _ => None,
     };
 
     let mut report = ProbeReport {
@@ -89,21 +98,18 @@ pub async fn run_probe(
     }
 
     let started = cx.clock.now();
-    let outcome: Result<Vec<ModelEntry>, HubError> = match depth {
-        TestDepth::KeyOnly => driver.key_check(cx, target).await.map(|()| Vec::new()),
-        TestDepth::Catalog => driver.list_models(cx, target).await.map(|f| {
-            if f.truncated {
+    let outcome: Result<Vec<ModelEntry>, HubError> = match step {
+        Step::KeyOnly => driver.key_check(cx, target).await.map(|()| Vec::new()),
+        Step::Catalog => driver.list_models(cx, target).await.map(|fetched| {
+            if fetched.truncated {
                 report.notes.push(ProbeNote::CatalogTruncated);
             }
-            f.models
+            fetched.models
         }),
-        TestDepth::Completion => match model {
-            Some(model) => driver
-                .completion_ping(cx, target, model)
-                .await
-                .map(|()| Vec::new()),
-            None => Ok(Vec::new()),
-        },
+        Step::Completion(model) => driver
+            .completion_ping(cx, target, model)
+            .await
+            .map(|()| Vec::new()),
     };
     report.latency = cx.clock.now().saturating_duration_since(started);
 

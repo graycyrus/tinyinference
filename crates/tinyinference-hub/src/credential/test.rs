@@ -493,3 +493,143 @@ fn credential_origins_have_stable_wire_forms_and_user_copy() {
         "Signed in with a browser login"
     );
 }
+
+/// A token source that does not override `invalidate`.
+#[derive(Debug)]
+struct PlainToken;
+
+#[async_trait]
+impl TokenSource for PlainToken {
+    async fn token(&self, _scope: &ScopeKey) -> Result<Option<Secret>, PortError> {
+        Ok(Some(Secret::new("plain")))
+    }
+}
+
+#[test]
+fn credential_the_default_invalidation_is_a_no_op() {
+    let chain = CredentialChain::new().with(TokenSourceAdapter::new(
+        Arc::new(PlainToken),
+        CredentialOrigin::OAuth,
+    ));
+    chain.invalidate(&scope());
+    PlainToken.invalidate(&scope());
+}
+
+#[tokio::test]
+async fn credential_boxed_sources_join_the_chain_in_order() {
+    let boxed: Box<dyn CredentialSource> = Box::new(StaticSource::new(Secret::new("sk-boxed")));
+    let chain = CredentialChain::new().with_boxed(boxed);
+    let (secret, origin) = chain.resolve(&scope(), &slug("x")).await.unwrap().unwrap();
+    assert_eq!(
+        (secret.expose(), origin),
+        ("sk-boxed", CredentialOrigin::Static)
+    );
+}
+
+#[test]
+fn credential_every_source_has_a_debug_form_that_names_it_and_hides_values() {
+    let creds = store();
+    let env = Arc::new(MapEnv::new().with("K", "sk-env-fake"));
+    let clock = FakeClock::new();
+    let forms = [
+        format!("{:?}", StoreSource::provider_key(creds.clone())),
+        format!(
+            "{:?}",
+            StoreSource::fixed_slot(creds.clone(), "company/key", CredentialOrigin::AccountKey)
+        ),
+        format!("{:?}", EnvVarSource::new(env, "K")),
+        format!("{:?}", StaticSource::new(Secret::new("sk-static-fake"))),
+        format!(
+            "{:?}",
+            TokenSourceAdapter::new(rotating(&clock), CredentialOrigin::SessionJwt)
+        ),
+        format!(
+            "{:?}",
+            LegacyFlatSlot::new(creds, "inference/key", |_, _| true)
+        ),
+    ];
+    let names = [
+        "StoreSource",
+        "StoreSource",
+        "EnvVarSource",
+        "StaticSource",
+        "TokenSourceAdapter",
+        "LegacyFlatSlot",
+    ];
+    for (form, name) in forms.iter().zip(names) {
+        assert!(form.starts_with(name), "{form}");
+        assert!(
+            !form.contains("sk-env-fake") && !form.contains("sk-static-fake"),
+            "{form}"
+        );
+    }
+    assert!(forms[1].contains("company/key") && forms[5].contains("inference/key"));
+}
+
+mod chain_props {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Answer {
+        Nothing,
+        Blank,
+        Key(u8),
+        Down,
+    }
+
+    fn answer() -> impl Strategy<Value = Answer> {
+        prop_oneof![
+            Just(Answer::Nothing),
+            Just(Answer::Blank),
+            (0u8..9).prop_map(Answer::Key),
+            Just(Answer::Down),
+        ]
+    }
+
+    #[derive(Debug)]
+    struct Scripted(Answer, u8);
+
+    #[async_trait]
+    impl CredentialSource for Scripted {
+        fn origin(&self) -> CredentialOrigin {
+            CredentialOrigin::Env(format!("SOURCE_{}", self.1))
+        }
+        async fn resolve(&self, _s: &ScopeKey, _p: &Slug) -> Result<Option<Secret>, PortError> {
+            match self.0 {
+                Answer::Nothing => Ok(None),
+                Answer::Blank => Ok(Some(Secret::new("  "))),
+                Answer::Key(n) => Ok(Some(Secret::new(format!("sk-fake-{n}")))),
+                Answer::Down => Err(PortError::unavailable("down")),
+            }
+        }
+    }
+
+    proptest! {
+        /// The chain's answer is exactly: the first non-blank key, unless a
+        /// source before it errored, in which case the error and no key.
+        #[test]
+        fn credential_prop_the_chain_is_first_key_or_first_error(answers in proptest::collection::vec(answer(), 0..8)) {
+            let mut chain = CredentialChain::new();
+            for (i, a) in answers.iter().enumerate() {
+                chain = chain.with(Scripted(*a, u8::try_from(i).unwrap()));
+            }
+            let got = futures::executor::block_on(chain.resolve(&scope(), &slug("x")));
+            let expected = answers.iter().enumerate().find_map(|(i, a)| match a {
+                Answer::Key(n) => Some(Ok((format!("sk-fake-{n}"), format!("SOURCE_{i}")))),
+                Answer::Down => Some(Err(())),
+                _ => None,
+            });
+            match (got, expected) {
+                (Ok(Some((secret, CredentialOrigin::Env(name)))), Some(Ok((key, source)))) => {
+                    prop_assert_eq!(secret.expose(), key);
+                    prop_assert_eq!(name, source);
+                }
+                (Ok(None), None) => {}
+                (Err(HubError::StoreUnreadable { .. }), Some(Err(()))) => {}
+                (got, expected) => prop_assert!(false, "got {got:?}, expected {expected:?}"),
+            }
+        }
+    }
+}

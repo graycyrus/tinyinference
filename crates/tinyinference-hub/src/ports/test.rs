@@ -610,3 +610,107 @@ async fn ports_a_send_error_from_the_transport_is_passed_through() {
     .await;
     assert_eq!(result.unwrap_err(), HttpError::Timeout);
 }
+
+#[tokio::test]
+async fn ports_a_configuration_that_cannot_be_read_back_is_not_stored() {
+    let store = MemoryConfig::new();
+    let mut config = HubConfig::new();
+    config.extra.insert(
+        "api_key".to_string(),
+        serde_json::json!("sk-not-a-real-key"),
+    );
+    let saved = store.save(&scope("a"), &config, None).await;
+    assert!(matches!(saved, Err(PortError::Unavailable(_))), "{saved:?}");
+    assert_eq!(store.raw(&scope("a")), None, "nothing was written");
+    assert!(format!("{store:?}").contains("MemoryConfig"));
+}
+
+mod redirect_props {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::policy::check_endpoint;
+
+    /// Targets a hostile or careless server might name, public and not.
+    const TARGETS: &[&str] = &[
+        "https://a.test/x",
+        "https://b.test/y",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/x",
+        "http://127.0.0.1:8080/x",
+        "http://[::1]/x",
+        "http://[::ffff:169.254.169.254]/x",
+        "/relative",
+        "ftp://a.test/x",
+        "https://user:pw@a.test/x",
+    ];
+
+    fn policy_for(pick: u8) -> EndpointPolicy {
+        match pick % 3 {
+            0 => EndpointPolicy::hosted(),
+            1 => EndpointPolicy::desktop(),
+            _ => EndpointPolicy::local_only(),
+        }
+    }
+
+    proptest! {
+        /// Invariant 5 of the test plan: every request that leaves the hub, at
+        /// every hop, passed the endpoint policy; a chain never runs past the
+        /// redirect limit; and a credentialed request never leaves its origin.
+        #[test]
+        fn ports_prop_every_hop_that_is_sent_passed_the_policy(
+            picks in proptest::collection::vec(0..TARGETS.len(), 0..8),
+            credentialed in any::<bool>(),
+            policy_pick in any::<u8>(),
+            max_redirects in 0usize..5,
+        ) {
+            let policy = policy_for(policy_pick).with_max_redirects(max_redirects);
+            let mut request = HubRequest::get("https://a.test/start");
+            if credentialed {
+                request = request
+                    .with_header("authorization", "Bearer sk-not-a-real-key")
+                    .with_credentialed(true);
+            }
+            let sent = Mutex::new(Vec::<HubRequest>::new());
+            let cursor = Mutex::new(0usize);
+            let result = futures::executor::block_on(follow_redirects(
+                request,
+                &policy,
+                &HeaderPolicy::builtin(),
+                |hop| {
+                    sent.lock().unwrap().push(hop.clone());
+                    let mut i = cursor.lock().unwrap();
+                    let response = match picks.get(*i) {
+                        Some(pick) => {
+                            let mut r = HubResponse::new(302, "", hop.url.clone());
+                            r.headers.push(("location".into(), TARGETS[*pick].into()));
+                            r
+                        }
+                        None => HubResponse::new(200, "", hop.url.clone()),
+                    };
+                    *i += 1;
+                    async move { Ok(response) }
+                },
+            ));
+            let sent = sent.into_inner().unwrap();
+            prop_assert!(sent.len() <= max_redirects + 1, "{} requests for a limit of {max_redirects}", sent.len());
+            for hop in &sent {
+                prop_assert!(
+                    check_endpoint(&hop.url, &policy).is_ok(),
+                    "a request was sent to {} which the policy refuses",
+                    hop.url
+                );
+                if credentialed {
+                    prop_assert_eq!(
+                        hop.url.split('/').nth(2),
+                        Some("a.test"),
+                        "a credentialed request left its origin: {}", hop.url
+                    );
+                }
+            }
+            if let Ok(response) = result {
+                prop_assert!(response.status == 200 || sent.len() <= max_redirects + 1);
+            }
+        }
+    }
+}
