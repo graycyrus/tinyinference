@@ -619,7 +619,11 @@ proptest! {
             || ip.is_loopback()
             || ip.is_link_local()
             || (a == 100 && (64..128).contains(&b))
-            || ip.is_multicast();
+            || ip.is_multicast()
+            || a >= 240
+            || (a == 192 && b == 0 && (c == 0 || c == 2))
+            || (a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)))
+            || (a == 203 && b == 0 && c == 113);
         prop_assume!(!special);
         prop_assert_eq!(check_address(IpAddr::V4(ip), &server_side()), Ok(()));
         prop_assert_eq!(
