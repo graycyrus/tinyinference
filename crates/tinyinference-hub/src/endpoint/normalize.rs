@@ -24,7 +24,12 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
         return url.host().map(|host| match host {
             // Without the brackets `Host`'s `Display` adds for IPv6.
             Host::Ipv6(address) => address.to_string(),
-            other => other.to_string().to_ascii_lowercase(),
+            // An absolute name (`api.groq.com.`) is the same host.
+            other => other
+                .to_string()
+                .to_ascii_lowercase()
+                .trim_end_matches('.')
+                .to_string(),
         });
     }
     let after_scheme = trimmed
@@ -48,7 +53,8 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
             .unwrap_or(host_port)
     };
     let host = host.trim().to_ascii_lowercase();
-    (!host.is_empty()).then_some(host)
+    let host = host.trim_end_matches('.');
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 /// The endpoint an operator typed for a **local runtime**, normalised.
@@ -72,21 +78,32 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
 /// to give the operator ask [`endpoint_has_credentials`] first; this refusal is
 /// the backstop for the ones that do not.
 pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_end_matches('/');
-    if endpoint_has_credentials(trimmed) || endpoint_query_has_credential(trimmed) {
+    let raw = raw.trim();
+    if endpoint_has_credentials(raw) || endpoint_query_has_credential(raw) {
         return None;
     }
-    let (scheme, rest) = trimmed.split_once("://")?;
+    let (scheme, rest) = raw.split_once("://")?;
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
     }
-    // No path segment at all, so the operator gave a bare origin. The query
-    // and fragment are not path: `host?next=/a` has no path, and `/v1` goes
-    // before a query, not after it.
+    // Only the path is normalised: the query and fragment are kept exactly as
+    // typed (a trailing `/` inside `?a=b/` is the operator's value), and `/v1`
+    // goes before them, not after.
     let cut = rest.find(['?', '#']).unwrap_or(rest.len());
-    let head = rest[..cut].trim_end_matches('/');
-    if !head.contains('/') {
-        return Some(format!("{scheme}://{head}/v1{}", &rest[cut..]));
+    let (head, tail) = rest.split_at(cut);
+    let head = head.trim_end_matches('/');
+    // No host, or a `\` (which WHATWG reads as `/` and other parsers do not),
+    // is not an endpoint.
+    if head.is_empty() || head.contains('\\') {
+        return None;
     }
-    Some(trimmed.to_string())
+    let head = if head.contains('/') {
+        head.to_string()
+    } else {
+        format!("{head}/v1")
+    };
+    let out = format!("{scheme}://{head}{tail}");
+    // The result must be a URL a client can actually read a host out of.
+    Url::parse(&out).ok().filter(|url| url.host().is_some())?;
+    Some(out)
 }

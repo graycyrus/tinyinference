@@ -8,6 +8,7 @@ mod normalize;
 mod redact;
 
 pub use normalize::{endpoint_host, normalize_local_endpoint};
+pub(crate) use redact::is_credential_query_param;
 pub use redact::{
     REDACTED_USERINFO, endpoint_has_credentials, endpoint_query_has_credential, redact_endpoint,
     scrub_endpoint_credential,

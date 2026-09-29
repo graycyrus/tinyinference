@@ -177,6 +177,19 @@ impl ProviderRecord {
                 reason: "the endpoint carries a username or password",
             });
         }
+        // A record's endpoint is empty (a subprocess kind) or an http(s) URL
+        // with a host; anything else is refused at load, not left for the
+        // policy layer to catch at request time.
+        if !self.base_url.trim().is_empty() {
+            let usable = url::Url::parse(self.base_url.trim())
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some());
+            if !usable {
+                return Err(InvalidInput::Malformed {
+                    field: InputField::Endpoint,
+                    reason: "the endpoint must be an http or https URL with a host",
+                });
+            }
+        }
         if endpoint_query_has_credential(&self.base_url) {
             return Err(InvalidInput::Malformed {
                 field: InputField::Endpoint,
@@ -201,8 +214,9 @@ impl ProviderRecord {
     /// `value` and returns it beside the cleaned value, so an import reader can
     /// move each one into the credential store and then deserialise the rest.
     ///
-    /// Only top-level string fields are extracted. A credential nested deeper
-    /// (or a userinfo endpoint) is left in place, so deserialising the cleaned
+    /// Only top-level string fields are extracted (a null or empty one is just
+    /// dropped, so it cannot overwrite a real key with nothing). A credential
+    /// of another type, one nested deeper, or a userinfo endpoint is left in place, so deserialising the cleaned
     /// value still fails loudly rather than persisting it.
     pub fn extract_credentials(
         value: serde_json::Value,
@@ -211,17 +225,28 @@ impl ProviderRecord {
             return (value, Vec::new());
         };
         let names: Vec<String> = map
-            .iter()
-            .filter(|(name, inner)| is_credential_name(name) && inner.is_string())
-            .map(|(name, _)| name.clone())
+            .keys()
+            .filter(|name| is_credential_name(name))
+            .cloned()
             .collect();
         let mut extracted = Vec::new();
         for name in names {
-            if let Some(serde_json::Value::String(text)) = map.remove(&name) {
-                extracted.push(ExtractedCredential {
-                    field: name,
-                    value: Secret::new(text),
-                });
+            // A null, empty or non-string credential field carries nothing to
+            // move, so it is dropped rather than left to fail the load; a
+            // string is handed back so it can be written to the store.
+            match map.get(&name) {
+                Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+                    if let Some(serde_json::Value::String(text)) = map.remove(&name) {
+                        extracted.push(ExtractedCredential {
+                            field: name,
+                            value: Secret::new(text),
+                        });
+                    }
+                }
+                Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    map.remove(&name);
+                }
+                _ => {}
             }
         }
         (serde_json::Value::Object(map), extracted)

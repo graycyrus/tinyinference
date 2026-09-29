@@ -353,3 +353,35 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn check_slug_enforces_the_slug_alphabet_too() {
+    // Regression (review round 4): `check_slug` accepted `../x`, which
+    // `Slug::parse` refuses, and the slug addresses a secret.
+    for bad in ["../x", "A B/c", "a/b", "a b", "UPPER", "-lead", "é", "a.b"] {
+        assert_eq!(
+            check_slug(Vec::<&str>::new(), bad, |_| false),
+            Err(SlugError::Invalid),
+            "{bad}"
+        );
+    }
+    assert!(SlugError::Invalid.to_string().contains("lowercase"));
+    assert!(matches!(
+        SlugError::Invalid.into_hub_error("../x"),
+        HubError::Invalid(InvalidInput::BadCharacters(InputField::Slug))
+    ));
+    // The order is empty, too long, invalid, taken, reserved.
+    assert_eq!(
+        check_slug(["a/b"], "a/b", |_| true),
+        Err(SlugError::Invalid)
+    );
+    assert_eq!(check_slug(["ok"], "ok", |_| true), Err(SlugError::Taken));
+}
+
+proptest! {
+    #[test]
+    fn check_slug_agrees_with_slug_parse(raw in "\\PC{0,40}") {
+        let ok = check_slug(Vec::<&str>::new(), &raw, |_| false).is_ok();
+        prop_assert_eq!(ok, Slug::parse(&raw).is_ok());
+    }
+}

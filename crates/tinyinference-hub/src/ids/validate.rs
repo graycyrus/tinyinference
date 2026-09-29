@@ -31,6 +31,10 @@ pub enum SlugError {
     Reserved,
     /// Past [`MAX_PROVIDER_NAME_CHARS`].
     TooLong,
+    /// Not made of lowercase letters, digits, `-` and `_` (the alphabet a
+    /// [`Slug`](super::Slug) accepts). The slug is the address of a secret, so a
+    /// path separator or space is refused here, not just by `Slug::parse`.
+    Invalid,
 }
 
 impl fmt::Display for SlugError {
@@ -42,6 +46,10 @@ impl fmt::Display for SlugError {
             Self::TooLong => write!(
                 f,
                 "a provider name may be at most {MAX_PROVIDER_NAME_CHARS} characters"
+            ),
+            Self::Invalid => write!(
+                f,
+                "a provider slug can only use lowercase letters, digits, - and _"
             ),
         }
     }
@@ -58,6 +66,7 @@ impl SlugError {
                 field: InputField::Slug,
                 max: MAX_PROVIDER_NAME_CHARS,
             }),
+            Self::Invalid => HubError::Invalid(InvalidInput::BadCharacters(InputField::Slug)),
             Self::Reserved => HubError::Invalid(InvalidInput::Reserved {
                 field: InputField::Slug,
                 value: slug.trim().to_string(),
@@ -127,8 +136,8 @@ pub fn check_provider_name(label: &str) -> Result<(), SlugError> {
 ///
 /// # Errors
 ///
-/// [`SlugError::Empty`], [`SlugError::TooLong`], [`SlugError::Taken`] or
-/// [`SlugError::Reserved`], checked in that order.
+/// [`SlugError::Empty`], [`SlugError::TooLong`], [`SlugError::Invalid`],
+/// [`SlugError::Taken`] or [`SlugError::Reserved`], checked in that order.
 pub fn check_slug<I, S>(
     existing: I,
     slug: &str,
@@ -144,6 +153,9 @@ where
     }
     if slug.chars().count() > MAX_PROVIDER_NAME_CHARS {
         return Err(SlugError::TooLong);
+    }
+    if Slug::parse(slug).is_err() {
+        return Err(SlugError::Invalid);
     }
     if existing.into_iter().any(|p| p.as_ref() == slug) {
         return Err(SlugError::Taken);

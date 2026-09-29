@@ -175,7 +175,7 @@ proptest::proptest! {
         url in "https://[a-z]{3,10}\\.test(/[a-z0-9]{1,6}){0,2}",
         enabled in proptest::bool::ANY,
         synthetic in proptest::bool::ANY,
-        extra_key in "note_[a-z]{1,4}",
+        extra_key in "meta[0-9]{1,4}",
         extra_val in 0i64..1000,
     ) {
         let mut r = ProviderRecord::new(id, Slug::parse(&slug).unwrap(), label, KindId::new(kind), url);
@@ -416,4 +416,44 @@ fn extract_credentials_is_the_migration_path_for_an_old_record() {
     // A non-object value passes through untouched.
     let (same, none) = ProviderRecord::extract_credentials(json!(7));
     assert_eq!((same, none.len()), (json!(7), 0));
+}
+
+#[test]
+fn a_record_endpoint_must_be_empty_or_an_http_url_with_a_host() {
+    // Regression (review round 4): `file:///etc/passwd` loaded.
+    for bad in [
+        "file:///etc/passwd",
+        "ftp://h.test/x",
+        "javascript:alert(1)",
+        "not a url",
+        "http://",
+    ] {
+        let error = serde_json::from_value::<ProviderRecord>(stored(json!({"base_url": bad})))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("http or https"), "{bad}: {error}");
+    }
+    // A subprocess kind has no endpoint.
+    assert!(serde_json::from_value::<ProviderRecord>(stored(json!({"base_url": ""}))).is_ok());
+    assert!(
+        serde_json::from_value::<ProviderRecord>(stored(
+            json!({"base_url": "http://[::1]:11434/v1"})
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn extract_credentials_drops_null_and_empty_fields_instead_of_extracting_nothing() {
+    // Regression (review round 4): a null left the record unloadable and an
+    // empty string became a credential that could overwrite a real key.
+    let old = stored(
+        json!({"api_key": null, "token": "", "access_token": "   ", "auth": "real", "note": 1}),
+    );
+    let (clean, extracted) = ProviderRecord::extract_credentials(old);
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].field, "auth");
+    let record: ProviderRecord = serde_json::from_value(clean).unwrap();
+    assert_eq!(record.legacy.len(), 1);
+    assert!(record.legacy.contains_key("note"));
 }

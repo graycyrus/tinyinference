@@ -236,7 +236,7 @@ pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), Endpoint
         || parsed.password().is_some()
         || parsed
             .query_pairs()
-            .any(|(name, _)| crate::secret::is_credential_name(&name))
+            .any(|(name, _)| crate::endpoint::is_credential_query_param(&name))
     {
         return Err(EndpointRefusal::CredentialInUrl);
     }
@@ -250,7 +250,7 @@ pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), Endpoint
 /// `http://localhost:11434` and there is no certificate to have there, so the
 /// scheme cannot simply be narrowed to `https`. What separates the two cases is
 /// the destination: loopback never leaves this host, and anything else with a
-/// credential attached does. Loopback counts by **name** as well as by literal.
+/// credential attached does. Loopback counts by the exact name `localhost` as well as by literal.
 ///
 /// # Errors
 ///
@@ -269,7 +269,10 @@ pub fn check_endpoint_with_credential(
         return Ok(());
     }
     let on_this_host = match parsed.host().ok_or(EndpointRefusal::Unparseable)? {
-        Host::Domain(name) => is_loopback_name(name),
+        // Only the exact name `localhost`: a `*.localhost` subdomain is loopback
+        // by RFC 6761 but only some resolvers pin it there, so a key must not
+        // be sent to it in the clear.
+        Host::Domain(name) => name.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
         Host::Ipv4(v4) => v4.is_loopback(),
         // Only an IPv4-mapped loopback stays on this machine; NAT64, 6to4 and
         // IPv4-compatible forms leave it through a gateway or relay.
@@ -313,7 +316,8 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 /// The IPv4 address an IPv6 address embeds, if it is one of the forms that is
 /// "the same machine wearing a longer name": IPv4-mapped (`::ffff:a.b.c.d`),
 /// the well-known NAT64 prefix (`64:ff9b::a.b.c.d`), 6to4
-/// (`2002:aabb:ccdd::/48`, which embeds the address in bits 16..48), or the
+/// (`2002:aabb:ccdd::/48`, which embeds the address in bits 16..48), IPv4-translated
+/// SIIT (`::ffff:0:a.b.c.d`), or the
 /// deprecated IPv4-compatible form (`::a.b.c.d`, excluding `::` and `::1`).
 fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(mapped) = ip.to_ipv4_mapped() {
@@ -321,6 +325,15 @@ fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     }
     let s = ip.segments();
     if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            s[6] as u8,
+            (s[7] >> 8) as u8,
+            s[7] as u8,
+        ));
+    }
+    // IPv4-translated (SIIT) `::ffff:0:a.b.c.d`.
+    if s[..4] == [0, 0, 0, 0] && s[4] == 0xffff && s[5] == 0 {
         return Some(Ipv4Addr::new(
             (s[6] >> 8) as u8,
             s[6] as u8,

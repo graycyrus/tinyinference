@@ -114,11 +114,13 @@ impl<T> fmt::Display for LogOnly<T> {
 /// credential.
 ///
 /// camelCase is split (`accessToken` is `access_token`) and `-` and case are
-/// ignored. Deliberately narrow so ordinary names (`max_tokens`, `tokenizer`,
-/// `tiers`) are not caught: the substrings `api_key`, `apikey`, `access_key`,
-/// `private_key`, `secret`, `password`, `passwd`, `passphrase`,
-/// `authorization` and `bearer`, the suffix `_token`, and the exact names
-/// `key`, `token`, `auth`, `credential`, `credentials`, `sig` and `signature`.
+/// ignored. The name is judged by its **last word** so `api_key`,
+/// `subscription-key`, `clientSecret` and `db_passwd` are caught while
+/// `secretary`, `max_tokens`, `tokenizer` and `keywords` are not: the last word
+/// is one of `key`, `token`, `secret`, `password`, `passwd`, `passphrase`,
+/// `credential(s)`, `signature`, `sig`, `cookie`, `pwd`, `authorization`,
+/// `bearer` or `apikey`; the whole name is `auth`; or it contains `api_key`,
+/// `access_key`, `private_key`, `authorization` or `bearer`.
 pub(crate) fn is_credential_name(name: &str) -> bool {
     let mut lower = String::with_capacity(name.len() + 4);
     let mut previous: Option<char> = None;
@@ -135,30 +137,32 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         });
         previous = Some(c);
     }
-    const SUBSTRINGS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "access_key",
-        "private_key",
+    const LAST_WORD: &[&str] = &[
+        "key",
+        "token",
         "secret",
         "password",
         "passwd",
         "passphrase",
+        "credential",
+        "credentials",
+        "signature",
+        "sig",
+        "cookie",
+        "pwd",
+        "authorization",
+        "bearer",
+        "apikey",
+    ];
+    const CONTAINS: &[&str] = &[
+        "api_key",
+        "access_key",
+        "private_key",
         "authorization",
         "bearer",
     ];
-    const EXACT: &[&str] = &[
-        "key",
-        "token",
-        "auth",
-        "credential",
-        "credentials",
-        "sig",
-        "signature",
-    ];
-    SUBSTRINGS.iter().any(|s| lower.contains(s))
-        || lower.ends_with("_token")
-        || EXACT.contains(&lower.as_str())
+    let last = lower.rsplit('_').next().unwrap_or("");
+    LAST_WORD.contains(&last) || lower == "auth" || CONTAINS.iter().any(|c| lower.contains(c))
 }
 
 #[cfg(test)]

@@ -508,3 +508,16 @@ fn every_local_runtime_spelling_resolves_the_same_way_in_the_taxonomy_and_the_ca
         }
     }
 }
+
+#[test]
+fn an_absolute_fqdn_spelling_matches_the_same_provider() {
+    // Regression (review round 4): a trailing dot made the host a different one.
+    assert!(endpoint_is_chat_completions_only(
+        "https://api.groq.com./openai/v1"
+    ));
+    assert!(is_azure_endpoint("https://x.openai.azure.com./openai/v1"));
+    assert!(is_openrouter_endpoint("https://openrouter.ai./api/v1"));
+    assert!(!endpoint_is_chat_completions_only(
+        "https://api.openai.com./v1"
+    ));
+}

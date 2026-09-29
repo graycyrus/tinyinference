@@ -177,7 +177,7 @@ fn a_key_is_never_sent_to_an_http_endpoint_off_this_host() {
     );
     for local in [
         "http://localhost:11434/v1",
-        "http://ollama.localhost:11434/v1",
+        "http://localhost.:11434/v1",
         "http://127.0.0.1:11434/v1",
         "http://[::1]:11434/v1",
         "http://[::ffff:127.0.0.1]:11434/v1",
@@ -868,6 +868,76 @@ fn a_credential_named_query_parameter_is_refused_like_userinfo() {
     }
     assert_eq!(
         check_endpoint("https://h.test/v1?version=2&limit=5", &server_side()),
+        Ok(())
+    );
+}
+
+#[test]
+fn ipv4_translated_siit_addresses_get_the_embedded_ipv4_answer() {
+    // Regression (review round 4): `::ffff:0:a.b.c.d` fell through to public.
+    let p = server_side();
+    assert_eq!(
+        check_endpoint("http://[::ffff:0:169.254.169.254]/", &p),
+        Err(EndpointRefusal::LinkLocal)
+    );
+    assert_eq!(
+        check_endpoint("http://[::ffff:0:10.0.0.1]/", &p),
+        Err(EndpointRefusal::PrivateNetwork)
+    );
+    assert_eq!(
+        check_endpoint("http://[::ffff:0:127.0.0.1]/", &p),
+        Err(EndpointRefusal::Loopback)
+    );
+    assert_eq!(
+        check_endpoint("http://[::ffff:0:127.0.0.1]/", &local_offered()),
+        Ok(())
+    );
+    assert_eq!(check_endpoint("http://[::ffff:0:8.8.8.8]/", &p), Ok(()));
+    // ...but it does not count as this host for a cleartext credential.
+    assert!(
+        check_endpoint_with_credential("http://[::ffff:0:127.0.0.1]/", &local_offered(), true)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_localhost_subdomain_never_receives_a_cleartext_key() {
+    // Regression (review round 4): `*.localhost` is loopback only on resolvers
+    // that pin it; the exemption is for the exact name `localhost`.
+    let p = local_offered();
+    for url in [
+        "http://evil.localhost/v1",
+        "http://foo.bar.localhost:11434/v1",
+    ] {
+        assert_eq!(
+            check_endpoint(url, &p),
+            Ok(()),
+            "still loopback for the allowance: {url}"
+        );
+        assert_eq!(
+            check_endpoint_with_credential(url, &p, true),
+            Err(EndpointRefusal::Cleartext),
+            "{url}"
+        );
+        assert_eq!(
+            check_endpoint(url, &server_side()),
+            Err(EndpointRefusal::Loopback),
+            "{url}"
+        );
+        // https is fine: the certificate names the host.
+        let https = url.replace("http://", "https://");
+        assert_eq!(
+            check_endpoint_with_credential(&https, &p, true),
+            Ok(()),
+            "{https}"
+        );
+    }
+    assert_eq!(
+        check_endpoint_with_credential("http://localhost/v1", &p, true),
+        Ok(())
+    );
+    assert_eq!(
+        check_endpoint_with_credential("http://LOCALHOST./v1", &p, true),
         Ok(())
     );
 }

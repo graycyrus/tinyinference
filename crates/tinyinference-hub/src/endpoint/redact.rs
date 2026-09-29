@@ -199,7 +199,37 @@ pub fn redact_endpoint(endpoint: &str) -> String {
     for range in ranges.into_iter().rev() {
         out.replace_range(range, REDACTED_USERINFO);
     }
-    out
+    redact_query_credentials(&out)
+}
+
+/// Replaces the value of every credential-named query parameter
+/// (`?key=...&api_key=...`) with [`REDACTED_USERINFO`], leaving the rest of the
+/// URL, the other parameters and the fragment as written.
+fn redact_query_credentials(url: &str) -> String {
+    let Some(q) = url.find('?') else {
+        return url.to_string();
+    };
+    let (head, rest) = url.split_at(q + 1);
+    let (query, fragment) = match rest.find('#') {
+        Some(h) => rest.split_at(h),
+        None => (rest, ""),
+    };
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if is_credential_query_param(name) => {
+                format!("{name}={REDACTED_USERINFO}")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{head}{}{fragment}", redacted.join("&"))
+}
+
+/// A query-parameter name that carries a credential: the general credential
+/// names plus `code` (Azure Functions' `?code=`).
+pub(crate) fn is_credential_query_param(name: &str) -> bool {
+    crate::secret::is_credential_name(name) || name.trim().eq_ignore_ascii_case("code")
 }
 
 /// `text` with every credential removed that a request to `endpoint` carried
@@ -297,6 +327,6 @@ pub(super) fn base64_standard(input: &[u8]) -> String {
 pub fn endpoint_query_has_credential(endpoint: &str) -> bool {
     url::Url::parse(as_url_parser_reads(endpoint).as_str()).is_ok_and(|url| {
         url.query_pairs()
-            .any(|(name, _)| crate::secret::is_credential_name(&name))
+            .any(|(name, _)| is_credential_query_param(&name))
     })
 }

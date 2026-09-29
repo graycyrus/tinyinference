@@ -136,3 +136,34 @@ fn credential_names_are_recognised_across_spellings_and_ordinary_names_are_not()
         assert!(!is_credential_name(name), "{name}");
     }
 }
+
+#[test]
+fn credential_names_are_judged_by_their_last_word() {
+    // Regression (review round 4): the substring rule flagged `secretary` and
+    // missed Azure-style names.
+    for name in [
+        "subscription-key",
+        "Ocp-Apim-Subscription-Key",
+        "x-functions-key",
+        "app_key",
+        "cookie",
+        "Set-Cookie",
+        "X-Amz-Signature",
+        "pwd",
+        "client_secret",
+        "clientSecret",
+        "db_passwd",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+    for name in [
+        "secretary",
+        "keyword",
+        "token_limit",
+        "signature_algorithm",
+        "cookies_enabled",
+        "pwdx",
+    ] {
+        assert!(!is_credential_name(name), "{name}");
+    }
+}

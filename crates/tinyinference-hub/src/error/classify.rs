@@ -149,66 +149,73 @@ pub fn scrub_log_text(text: &str) -> String {
         "bearer ",
         "basic ",
         "authorization:",
+        "proxy-authorization:",
         "x-api-key:",
         "api-key:",
+        "cookie:",
+        "set-cookie:",
     ] {
         out = redact_after(&out, marker);
     }
-    // The same fields as JSON members: `"api-key":"value"`.
-    for name in [
-        "authorization",
-        "x-api-key",
-        "api-key",
-        "api_key",
-        "apikey",
-        "access_token",
-        "secret",
-        "password",
-    ] {
-        out = redact_json_member(&out, name);
-    }
-    out
+    redact_json_credentials(&out)
 }
 
-/// Replaces the string value of every JSON member named `name` (matched
-/// case-insensitively, quotes included) with `<redacted>`.
-fn redact_json_member(text: &str, name: &str) -> String {
-    let needle = format!("\"{name}\"");
-    let lower = text.to_ascii_lowercase();
+/// Replaces the string value of every JSON member whose *name* is
+/// credential-shaped (`"client_secret":"..."`, `"token":"..."`, `"key":"..."`,
+/// any spelling [`is_credential_name`](crate::secret::is_credential_name)
+/// recognises) with `<redacted>`. Strings are read escape-aware, so a value
+/// containing `\"` is redacted whole.
+fn redact_json_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(offset) = lower[at..].find(&needle) {
-        let after_name = at + offset + needle.len();
-        let value = text[after_name..]
-            .trim_start()
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let Some(name_end) = json_string_end(text, i + 1) else {
+            break;
+        };
+        let name = &text[i + 1..name_end];
+        let after = text[name_end + 1..].trim_start();
+        let value = after
             .strip_prefix(':')
             .map(str::trim_start)
             .and_then(|v| v.strip_prefix('"'));
-        let Some(body) = value else {
-            out.push_str(&text[at..after_name]);
-            at = after_name;
-            continue;
-        };
-        let value_start = text.len() - body.len();
-        // The closing quote is the first one not escaped by a backslash.
-        let mut close = body.len();
-        let mut escaped = false;
-        for (index, c) in body.char_indices() {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                close = index;
-                break;
+        match value {
+            Some(body) if crate::secret::is_credential_name(name) => {
+                let value_start = text.len() - body.len();
+                let close = json_string_end(text, value_start).unwrap_or(text.len());
+                out.push_str(&text[at..value_start]);
+                out.push_str("<redacted>");
+                at = close;
+                // Step over the value's closing quote so it is not read as the
+                // opening quote of the next string.
+                i = close + 1;
             }
+            _ => i = name_end + 1,
         }
-        out.push_str(&text[at..value_start]);
-        out.push_str("<redacted>");
-        at = value_start + close;
     }
     out.push_str(&text[at..]);
     out
+}
+
+/// The index of the closing `"` of the JSON string that starts at `from` (the
+/// byte after its opening quote), honouring backslash escapes.
+fn json_string_end(text: &str, from: usize) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, c) in text[from..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some(from + offset);
+        }
+    }
+    None
 }
 
 /// Replaces the value after each case-insensitive occurrence of `marker` with

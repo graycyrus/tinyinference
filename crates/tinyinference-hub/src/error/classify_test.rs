@@ -1022,3 +1022,34 @@ fn a_429_is_a_rate_limit_unless_it_says_the_spend_is_gone() {
     assert_eq!(f.reason, ReasonCode::Unknown);
     assert!(matches!(f.retry, Retry::Later(_)));
 }
+
+#[test]
+fn any_credential_named_json_member_is_redacted_from_raw() {
+    // Regression (review round 4): only an 8-name list of exact members was.
+    let scrubbed = scrub_log_text(
+        r#"{"client_secret":"s3","refresh_token":"rt","token":"t","key":"k","subscription-key":"sk","note":"keep","n":5}"#,
+    );
+    for leaked in ["s3", "\"rt\"", "\"t\"", "\"k\"", "\"sk\""] {
+        assert!(!scrubbed.contains(leaked), "{leaked} in {scrubbed}");
+    }
+    assert!(
+        scrubbed.contains(r#""note":"keep""#) && scrubbed.contains(r#""n":5"#),
+        "{scrubbed}"
+    );
+    let cookies = scrub_log_text(
+        "Set-Cookie: sid=abc123; HttpOnly\nCookie: a=b\nProxy-Authorization: Basic zzz\nok line",
+    );
+    assert!(
+        !cookies.contains("abc123") && !cookies.contains("a=b") && !cookies.contains("zzz"),
+        "{cookies}"
+    );
+    assert!(cookies.contains("ok line"), "{cookies}");
+    // A member name is only matched as a name (before a colon), not in prose.
+    assert_eq!(
+        scrub_log_text(r#"the "token" was fine"#),
+        r#"the "token" was fine"#
+    );
+    // An unterminated string does not panic or loop.
+    let _ = scrub_log_text(r#"{"token":"abc"#);
+    let _ = scrub_log_text(r#"{"token"#);
+}

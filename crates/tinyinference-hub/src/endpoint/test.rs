@@ -505,7 +505,7 @@ fn a_bare_slash_before_a_query_or_fragment_still_gets_v1() {
         ("http://host/?x=1", "http://host/v1?x=1"),
         ("http://host:11434/#frag", "http://host:11434/v1#frag"),
         ("http://host//?x=1", "http://host/v1?x=1"),
-        ("http://host/api/?x=1", "http://host/api/?x=1"),
+        ("http://host/api/?x=1", "http://host/api?x=1"),
     ] {
         let once = normalize_local_endpoint(raw).unwrap();
         assert_eq!(once, expected, "{raw}");
@@ -530,5 +530,87 @@ fn an_endpoint_with_a_credential_query_is_not_storable() {
     assert_eq!(
         normalize_local_endpoint("http://h.test:1234/v1?api_key=abc"),
         None
+    );
+}
+
+// ---- round 4 review regressions ----------------------------------------------------------
+
+#[test]
+fn redacting_an_endpoint_masks_credential_query_values_too() {
+    assert_eq!(
+        redact_endpoint("https://generativelanguage.googleapis.com/v1beta/openai?key=AIzaSECRET"),
+        "https://generativelanguage.googleapis.com/v1beta/openai?key=***"
+    );
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?a=1&api_key=abc&Signature=x%2By&limit=5#frag"),
+        "https://h.test/v1?a=1&api_key=***&Signature=***&limit=5#frag"
+    );
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?code=abc"),
+        "https://h.test/v1?code=***"
+    );
+    assert_eq!(
+        redact_endpoint("https://u:pw@h.test/v1?subscription-key=abc"),
+        "https://***@h.test/v1?subscription-key=***"
+    );
+    // Ordinary queries and query-less URLs are untouched.
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?version=2&flag"),
+        "https://h.test/v1?version=2&flag"
+    );
+    assert_eq!(redact_endpoint("https://h.test/v1"), "https://h.test/v1");
+}
+
+#[test]
+fn azure_and_cookie_style_query_names_count_as_credentials() {
+    for url in [
+        "https://h.test/v1?subscription-key=a",
+        "https://h.test/v1?Ocp-Apim-Subscription-Key=a",
+        "https://h.test/v1?x-functions-key=a",
+        "https://h.test/v1?code=a",
+        "https://h.test/v1?cookie=a",
+        "https://h.test/v1?app_key=a",
+        "https://h.test/v1?X-Amz-Signature=a",
+        "https://h.test/v1?pwd=a",
+    ] {
+        assert!(endpoint_query_has_credential(url), "{url}");
+    }
+    for url in [
+        "https://h.test/v1?secretary=a",
+        "https://h.test/v1?monkey=a",
+        "https://h.test/v1?max_tokens=5",
+    ] {
+        assert!(!endpoint_query_has_credential(url), "{url}");
+    }
+}
+
+#[test]
+fn an_endpoint_with_no_host_or_a_backslash_is_not_normalisable() {
+    // Regression (review round 4): these returned Some and failed to parse later.
+    for bad in [
+        "http://:8080",
+        "http://?x=1",
+        "http:///",
+        "http://host\\@evil.test",
+        "https://[::1",
+    ] {
+        assert_eq!(normalize_local_endpoint(bad), None, "{bad}");
+    }
+    // The query value is kept exactly as typed.
+    assert_eq!(
+        normalize_local_endpoint("http://host/?a=b/").as_deref(),
+        Some("http://host/v1?a=b/")
+    );
+}
+
+#[test]
+fn an_absolute_host_name_is_the_same_host() {
+    assert_eq!(
+        endpoint_host("https://api.groq.com./openai/v1").as_deref(),
+        Some("api.groq.com")
+    );
+    assert_eq!(
+        endpoint_host("api.groq.com./x").as_deref(),
+        Some("api.groq.com")
     );
 }
