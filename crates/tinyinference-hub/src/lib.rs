@@ -3,10 +3,13 @@
 //!
 //! This crate is a leaf: it depends on `tinyinference-core` and
 //! `tinyinference-llm`, and nothing depends on it. The modules land in the
-//! commits that follow; this one adds credential-safe wrappers and endpoint
-//! text handling.
+//! commits that follow; this one adds the taxonomy enums.
 
 pub mod endpoint;
 mod secret;
+pub mod taxonomy;
 
 pub use secret::{LogOnly, Secret};
+pub use taxonomy::{
+    AuthStyle, CatalogShape, CliKind, LocalRuntime, Protocol, ProviderGroup, TestDepth, Transport,
+};
