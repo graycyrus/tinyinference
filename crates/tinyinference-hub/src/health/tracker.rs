@@ -1,0 +1,195 @@
+//! [`HealthTracker`]: health fed by probes and by real turns.
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Mutex;
+
+use crate::error::{HubError, PortName, ProviderFailure, ReasonCode};
+use crate::ids::{ScopeKey, Slug};
+use crate::ports::{Clock, EventSink, HealthStore, HubEvent};
+use crate::probe::ProbeReport;
+
+use super::types::{HealthSnapshot, ProviderHealth};
+
+/// How a real turn went, reported by the host after every turn so a provider
+/// that passes probes but fails turns does not look green.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    /// The turn succeeded.
+    Ok {
+        /// How long it took.
+        latency: Duration,
+    },
+    /// The turn failed, already classified.
+    Failed(ProviderFailure),
+}
+
+/// Reads and updates health snapshots and tells the host when a status changes.
+///
+/// Updates are serialised in-process so two turns finishing together cannot lose
+/// one another's signal.
+pub struct HealthTracker {
+    store: Arc<dyn HealthStore>,
+    clock: Arc<dyn Clock>,
+    events: Arc<dyn EventSink>,
+    write: Mutex<()>,
+}
+
+impl HealthTracker {
+    /// A tracker over `store`.
+    pub fn new(
+        store: Arc<dyn HealthStore>,
+        clock: Arc<dyn Clock>,
+        events: Arc<dyn EventSink>,
+    ) -> Self {
+        Self {
+            store,
+            clock,
+            events,
+            write: Mutex::new(()),
+        }
+    }
+
+    /// The snapshot for a provider (an empty one when nothing was recorded).
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store cannot be read.
+    pub async fn snapshot(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+    ) -> Result<HealthSnapshot, HubError> {
+        Ok(self
+            .store
+            .get(scope, slug)
+            .await
+            .map_err(|e| e.into_hub(PortName::Health))?
+            .unwrap_or_default())
+    }
+
+    /// The folded status for a provider; `Unknown` when nothing was recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store cannot be read.
+    pub async fn health(&self, scope: &ScopeKey, slug: &Slug) -> Result<ProviderHealth, HubError> {
+        Ok(self.snapshot(scope, slug).await?.health)
+    }
+
+    async fn update<F>(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        apply: F,
+    ) -> Result<ProviderHealth, HubError>
+    where
+        F: FnOnce(&mut HealthSnapshot, u64) -> bool,
+    {
+        let _serial = self.write.lock().await;
+        let mut snapshot = self.snapshot(scope, slug).await?;
+        let from = snapshot.health;
+        let changed = apply(&mut snapshot, self.clock.wall_ms());
+        let to = snapshot.health;
+        self.store
+            .put(scope, slug, snapshot)
+            .await
+            .map_err(|e| e.into_hub(PortName::Health))?;
+        if changed {
+            self.events.emit(HubEvent::HealthChanged {
+                scope: scope.clone(),
+                slug: slug.clone(),
+                from,
+                to,
+            });
+        }
+        Ok(to)
+    }
+
+    /// Records a probe's result. Returns the new status.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn record_probe(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        report: &ProbeReport,
+    ) -> Result<ProviderHealth, HubError> {
+        let failure = report.failure.as_ref().map(|f| (f.reason, f.status));
+        let latency = u64::try_from(report.latency.as_millis()).ok();
+        let depth = report.depth;
+        self.update(scope, slug, move |snapshot, now| {
+            snapshot.record_probe(depth, failure, latency, now)
+        })
+        .await
+    }
+
+    /// Records how a real turn went. A failure whose reason is `signed_out`
+    /// marks the provider signed out. Returns the new status.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn record_outcome(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        outcome: &Outcome,
+    ) -> Result<ProviderHealth, HubError> {
+        match outcome {
+            Outcome::Ok { .. } => {
+                self.update(scope, slug, |snapshot, now| snapshot.record_turn(None, now))
+                    .await
+            }
+            Outcome::Failed(failure) if failure.reason == ReasonCode::SignedOut => {
+                self.mark_signed_out(scope, slug).await
+            }
+            Outcome::Failed(failure) => {
+                let note = (failure.reason, failure.status);
+                self.update(scope, slug, move |snapshot, now| {
+                    snapshot.record_turn(Some(note), now)
+                })
+                .await
+            }
+        }
+    }
+
+    /// Marks a provider signed out (the managed credential chain is empty).
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn mark_signed_out(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+    ) -> Result<ProviderHealth, HubError> {
+        self.update(scope, slug, |snapshot, now| snapshot.record_signed_out(now))
+            .await
+    }
+
+    /// Forgets a provider's health: it was removed, or its key changed and what
+    /// was learned with the old key no longer applies.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), HubError> {
+        let _serial = self.write.lock().await;
+        self.store
+            .forget(scope, slug)
+            .await
+            .map_err(|e| e.into_hub(PortName::Health))
+    }
+}
+
+impl fmt::Debug for HealthTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HealthTracker").finish_non_exhaustive()
+    }
+}

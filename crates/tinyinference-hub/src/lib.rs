@@ -60,8 +60,10 @@ pub mod endpoint;
 pub mod error;
 pub mod health;
 pub mod ids;
+pub mod kinds;
 pub mod policy;
 pub mod ports;
+pub mod probe;
 mod secret;
 pub mod taxonomy;
 #[cfg(any(test, feature = "testing"))]

@@ -55,6 +55,37 @@ pub fn descriptors() -> &'static [ProviderDescriptor] {
     })
 }
 
+/// The template for an operator-named OpenAI-compatible endpoint.
+///
+/// `custom` is a group of operator-defined records rather than a catalogue row,
+/// so it is not in [`descriptors`] (and not in the golden catalogue); drivers
+/// for it are built from this.
+pub fn custom_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        kind: KindId::new("custom"),
+        label: "Custom endpoint",
+        group: ProviderGroup::Custom,
+        transport: crate::taxonomy::Transport::Http,
+        protocol: crate::taxonomy::Protocol::OpenAiChat,
+        auth: AuthStyle::Bearer,
+        catalog: CatalogShape::OpenAi,
+        default_endpoint: None,
+        endpoint_editable: true,
+        needs_key: false,
+        key_placeholder: None,
+        local_runtime: None,
+        cli: None,
+        aliases: &[],
+        test_depths: &[
+            crate::taxonomy::TestDepth::Catalog,
+            crate::taxonomy::TestDepth::Completion,
+        ],
+        free_text_models: false,
+        extra_headers: &[],
+        quirks: &[],
+    }
+}
+
 /// The descriptor a name resolves to, by kind id or alias (case-insensitive).
 ///
 /// `None` for anything the catalogue does not ship, including `custom`, which
