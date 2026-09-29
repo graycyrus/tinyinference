@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::descriptor::{LegacyFields, ProviderRecord};
 use crate::error::{InputField, InvalidInput};
-use crate::ids::{AgentKey, ModelId, Slug};
+use crate::ids::{AgentKey, ModelId, Slug, WorkloadKey};
+use crate::route::{ProviderRoute, RouteTarget};
 use crate::secret::is_credential_name;
 
 /// The schema version this build writes. A reader meeting a larger number knows
@@ -71,6 +72,10 @@ pub struct HubConfig {
     pub default: DefaultChoice,
     /// Per-agent pins, keyed by the host's agent key.
     pub agent_pins: BTreeMap<AgentKey, ModelChoice>,
+    /// Per-workload routes, keyed by the host's opaque workload key (a tier or
+    /// role; the hub never interprets it). Never holds a default route or an
+    /// ephemeral one.
+    pub workload_routes: BTreeMap<WorkloadKey, ProviderRoute>,
     /// Fields this build does not interpret, preserved on save.
     pub extra: LegacyFields,
 }
@@ -85,6 +90,8 @@ struct HubConfigWire {
     default: DefaultChoice,
     #[serde(default)]
     agent_pins: BTreeMap<AgentKey, ModelChoice>,
+    #[serde(default)]
+    workload_routes: BTreeMap<WorkloadKey, ProviderRoute>,
     #[serde(default, flatten)]
     extra: LegacyFields,
 }
@@ -102,7 +109,7 @@ impl Serialize for HubConfig {
         for (key, value) in &self.extra {
             if !matches!(
                 key.as_str(),
-                "schema_version" | "providers" | "default" | "agent_pins"
+                "schema_version" | "providers" | "default" | "agent_pins" | "workload_routes"
             ) {
                 map.serialize_entry(key, value)?;
             }
@@ -111,6 +118,11 @@ impl Serialize for HubConfig {
         map.serialize_entry("providers", &self.providers)?;
         map.serialize_entry("default", &self.default)?;
         map.serialize_entry("agent_pins", &self.agent_pins)?;
+        // Written only when there are routes, so a document that never used them
+        // is byte-for-byte what earlier builds wrote.
+        if !self.workload_routes.is_empty() {
+            map.serialize_entry("workload_routes", &self.workload_routes)?;
+        }
         map.end()
     }
 }
@@ -124,6 +136,7 @@ impl TryFrom<HubConfigWire> for HubConfig {
             providers: wire.providers,
             default: wire.default,
             agent_pins: wire.agent_pins,
+            workload_routes: wire.workload_routes,
             extra: wire.extra,
         };
         config.validate()?;
@@ -138,6 +151,7 @@ impl Default for HubConfig {
             providers: Vec::new(),
             default: DefaultChoice::Unset,
             agent_pins: BTreeMap::new(),
+            workload_routes: BTreeMap::new(),
             extra: LegacyFields::new(),
         }
     }
@@ -192,6 +206,16 @@ impl HubConfig {
             };
             if let Some(name) = found {
                 return Err(InvalidInput::CredentialField { name });
+            }
+        }
+        for route in self.workload_routes.values() {
+            // A default route is the absence of a route, and an ephemeral one is
+            // never persisted; either in a stored document is a bug upstream.
+            if matches!(route.target, RouteTarget::Default | RouteTarget::Ephemeral) {
+                return Err(InvalidInput::Malformed {
+                    field: InputField::Config,
+                    reason: "a workload route must name a provider, the managed provider, a local runtime or a CLI login",
+                });
             }
         }
         let mut seen = std::collections::HashSet::new();
