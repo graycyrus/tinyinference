@@ -234,9 +234,7 @@ pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), Endpoint
     }
     if !parsed.username().is_empty()
         || parsed.password().is_some()
-        || parsed
-            .query_pairs()
-            .any(|(name, _)| crate::endpoint::is_credential_query_param(&name))
+        || crate::endpoint::url_query_has_credential(&parsed)
     {
         return Err(EndpointRefusal::CredentialInUrl);
     }

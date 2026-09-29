@@ -647,3 +647,47 @@ fn run_together_credential_names_in_a_query_are_caught() {
         );
     }
 }
+
+// ---- round 6 review regressions ----------------------------------------------------------
+
+#[test]
+fn a_code_query_parameter_is_a_credential_only_on_an_azure_functions_host() {
+    // Regression (review round 6): dropping `code` globally let Azure Functions
+    // keys through; keeping it globally refused routing parameters.
+    for url in [
+        "https://myapp.azurewebsites.net/api/chat?code=FUNCKEY",
+        "https://azurewebsites.net/api/chat?code=FUNCKEY",
+    ] {
+        assert!(endpoint_query_has_credential(url), "{url}");
+        assert!(redact_endpoint(url).ends_with("code=***"), "{url}");
+        assert_eq!(normalize_local_endpoint(url), None, "{url}");
+    }
+    for url in [
+        "http://gw:8080/v1?code=eu",
+        "https://notazurewebsites.net/api?code=eu",
+    ] {
+        assert!(!endpoint_query_has_credential(url), "{url}");
+        assert_eq!(redact_endpoint(url), url);
+    }
+}
+
+#[test]
+fn a_leading_slash_after_the_scheme_is_not_a_host() {
+    for bad in ["http:///v1", "http://\\v1", "https:////x"] {
+        assert_eq!(normalize_local_endpoint(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_double_encoded_query_name_is_judged_by_what_the_server_receives() {
+    // Regression (review round 6): detection decoded twice, so `%256Bey` (the
+    // literal name `%6Bey`) was refused although it carries no credential.
+    assert!(!endpoint_query_has_credential(
+        "https://h.test/v1?%256Bey=1"
+    ));
+    assert_eq!(
+        redact_endpoint("https://h.test/v1?%256Bey=1"),
+        "https://h.test/v1?%256Bey=1"
+    );
+    assert!(endpoint_query_has_credential("https://h.test/v1?%6Bey=1"));
+}

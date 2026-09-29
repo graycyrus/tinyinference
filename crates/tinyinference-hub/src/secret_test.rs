@@ -189,7 +189,6 @@ fn run_together_names_are_credentials_and_benign_key_and_token_names_are_not() {
         "ssh_public_key",
         "cache_key",
         "sort_key",
-        "primary_key",
         "partition_key",
         "idempotency_key",
         "page_token",
@@ -204,4 +203,44 @@ fn run_together_names_are_credentials_and_benign_key_and_token_names_are_not() {
     assert!(is_credential_name("public_api_key"));
     assert!(is_credential_name("cache_secret"));
     assert!(is_credential_name("page_password"));
+}
+
+#[test]
+fn concatenated_and_prefixed_credential_names_are_caught_and_benign_words_do_not_veto_them() {
+    // Regression (review round 6): `secretkey`, `accesstoken`, `secret_value`
+    // leaked, and a benign word anywhere vetoed a real credential
+    // (`primaryKey`, `page_access_token`).
+    for name in [
+        "secretkey",
+        "accesstoken",
+        "authtoken",
+        "refreshtoken",
+        "sessiontoken",
+        "privatekey",
+        "clientsecretkey",
+        "secret_value",
+        "password_value",
+        "primaryKey",
+        "primary_master_key",
+        "page_access_token",
+        "group_access_token",
+        "next_secret_key",
+        "public_access_token",
+        "ordertoken_secret",
+        "idToken",
+        "subscriptionKey",
+        "masterkey",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+    for name in [
+        "secretary",
+        "secretariat_id",
+        "signature_algorithm",
+        "cookies_enabled",
+        "keywords",
+        "monkey",
+    ] {
+        assert!(!is_credential_name(name), "{name}");
+    }
 }

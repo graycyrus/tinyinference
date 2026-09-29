@@ -209,6 +209,7 @@ fn redact_query_credentials(url: &str) -> String {
     let Some(q) = url.find('?') else {
         return url.to_string();
     };
+    let host = super::normalize::endpoint_host(url);
     let (head, rest) = url.split_at(q + 1);
     let (query, fragment) = match rest.find('#') {
         Some(h) => rest.split_at(h),
@@ -217,7 +218,7 @@ fn redact_query_credentials(url: &str) -> String {
     let redacted: Vec<String> = query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((name, _)) if is_credential_query_param(name) => {
+            Some((name, _)) if raw_query_name_is_credential(name, host.as_deref()) => {
                 format!("{name}={REDACTED_USERINFO}")
             }
             _ => pair.to_string(),
@@ -226,15 +227,24 @@ fn redact_query_credentials(url: &str) -> String {
     format!("{head}{}{fragment}", redacted.join("&"))
 }
 
-/// A query-parameter name that carries a credential. The name is
-/// percent-decoded first (`%6Bey` is `key`), exactly as `Url::query_pairs`
-/// would hand it to a check.
-pub(crate) fn is_credential_query_param(name: &str) -> bool {
+/// Whether an already-decoded query-parameter name carries a credential. A
+/// bare `code` counts only on an Azure Functions host (`*.azurewebsites.net`),
+/// where `?code=` is the function key; elsewhere it is a routing parameter as
+/// often as a secret.
+pub(crate) fn query_name_is_credential(name: &str, host: Option<&str>) -> bool {
+    crate::secret::is_credential_name(name)
+        || (name.trim().eq_ignore_ascii_case("code")
+            && host.is_some_and(|h| h == "azurewebsites.net" || h.ends_with(".azurewebsites.net")))
+}
+
+/// [`query_name_is_credential`] for a name as written in the URL text, which is
+/// percent-decoded first (`%6Bey` is `key`).
+fn raw_query_name_is_credential(name: &str, host: Option<&str>) -> bool {
     let decoded = url::form_urlencoded::parse(format!("{name}=").as_bytes())
         .next()
         .map(|(decoded, _)| decoded.into_owned())
         .unwrap_or_default();
-    crate::secret::is_credential_name(&decoded)
+    query_name_is_credential(&decoded, host)
 }
 
 /// `text` with every credential removed that a request to `endpoint` carried
@@ -330,8 +340,13 @@ pub(super) fn base64_standard(input: &[u8]) -> String {
 /// name. Gemini-style `?key=` URLs are a common paste; like userinfo, the value
 /// would be stored and echoed to every reader of the configuration.
 pub fn endpoint_query_has_credential(endpoint: &str) -> bool {
-    url::Url::parse(as_url_parser_reads(endpoint).as_str()).is_ok_and(|url| {
-        url.query_pairs()
-            .any(|(name, _)| is_credential_query_param(&name))
-    })
+    url::Url::parse(as_url_parser_reads(endpoint).as_str())
+        .is_ok_and(|url| url_query_has_credential(&url))
+}
+
+/// Whether a parsed URL carries a credential in its query string.
+pub(crate) fn url_query_has_credential(url: &url::Url) -> bool {
+    let host = url.host_str().map(str::to_ascii_lowercase);
+    url.query_pairs()
+        .any(|(name, _)| query_name_is_credential(&name, host.as_deref()))
 }

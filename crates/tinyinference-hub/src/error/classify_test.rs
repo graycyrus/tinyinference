@@ -1091,3 +1091,15 @@ proptest! {
         prop_assert!(!scrubbed.contains(&value), "{scrubbed}");
     }
 }
+
+#[test]
+fn a_credential_inside_a_json_document_carried_as_a_string_is_redacted() {
+    // Regression (review round 6): gateways stringify a nested provider body,
+    // so its quotes arrive escaped.
+    let scrubbed = scrub_log_text(r#"{"error":"{\"api_key\":\"sk-LEAK1\",\"ok\":1}"}"#);
+    assert!(!scrubbed.contains("sk-LEAK1"), "{scrubbed}");
+    assert!(scrubbed.contains("<redacted>"), "{scrubbed}");
+    // The unescaped and escaped forms in one text are both handled.
+    let both = scrub_log_text(r#"{"token":"sk-LEAK2","echo":"{\"password\":\"sk-LEAK3\"}"}"#);
+    assert!(!both.contains("sk-LEAK"), "{both}");
+}

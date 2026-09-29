@@ -941,3 +941,23 @@ fn a_localhost_subdomain_never_receives_a_cleartext_key() {
         Ok(())
     );
 }
+
+#[test]
+fn a_double_encoded_query_name_is_not_a_credential_and_azure_code_is() {
+    assert_eq!(
+        check_endpoint("https://h.test/v1?%256Bey=1", &server_side()),
+        Ok(())
+    );
+    assert_eq!(
+        check_endpoint("https://h.test/v1?%6Bey=1", &server_side()),
+        Err(EndpointRefusal::CredentialInUrl)
+    );
+    assert_eq!(
+        check_endpoint("https://app.azurewebsites.net/api?code=k", &server_side()),
+        Err(EndpointRefusal::CredentialInUrl)
+    );
+    assert_eq!(
+        check_endpoint("https://gw.test/api?code=eu", &server_side()),
+        Ok(())
+    );
+}

@@ -157,7 +157,9 @@ pub fn scrub_log_text(text: &str) -> String {
     ] {
         out = redact_after(&out, marker);
     }
-    redact_json_credentials(&out)
+    // Also the same members inside a JSON document carried as a string value
+    // (`"error":"{\\"api_key\\":\\"..\\"}"`), whose quotes are escaped.
+    redact_json_credentials(&redact_json_credentials(&out, "\""), "\\\"")
 }
 
 /// Replaces the string value of every JSON member whose *name* is
@@ -165,31 +167,36 @@ pub fn scrub_log_text(text: &str) -> String {
 /// any spelling [`is_credential_name`](crate::secret::is_credential_name)
 /// recognises) with `<redacted>`. Strings are read escape-aware, so a value
 /// containing `\"` is redacted whole.
-fn redact_json_credentials(text: &str) -> String {
+fn redact_json_credentials(text: &str, quote: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     // Every `"` followed by `:` closes a candidate member name. Looking
     // backwards from it (instead of pairing quotes from the start) keeps a stray
     // quote in the surrounding prose from shifting every later pairing.
-    for (close, _) in text.match_indices('"') {
+    for (close, _) in text.match_indices(quote) {
         if close < at {
             continue;
         }
-        let Some(open) = text[at..close].rfind('"').map(|i| at + i) else {
+        let Some(open) = text[at..close].rfind(quote).map(|i| at + i) else {
             continue;
         };
-        let name = &text[open + 1..close];
-        let value = text[close + 1..]
+        let name = &text[open + quote.len()..close];
+        let value = text[close + quote.len()..]
             .trim_start()
             .strip_prefix(':')
             .map(str::trim_start)
-            .and_then(|v| v.strip_prefix('"'));
+            .and_then(|v| v.strip_prefix(quote));
         let Some(body) = value else { continue };
         if !crate::secret::is_credential_name(name) {
             continue;
         }
         let value_start = text.len() - body.len();
-        let end = json_string_end(text, value_start).unwrap_or(text.len());
+        let end = if quote == "\"" {
+            json_string_end(text, value_start)
+        } else {
+            text[value_start..].find(quote).map(|i| value_start + i)
+        }
+        .unwrap_or(text.len());
         out.push_str(&text[at..value_start]);
         out.push_str("<redacted>");
         at = end;

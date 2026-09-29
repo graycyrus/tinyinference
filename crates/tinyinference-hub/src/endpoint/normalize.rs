@@ -89,6 +89,11 @@ pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     // Only the path is normalised: the query and fragment are kept exactly as
     // typed (a trailing `/` inside `?a=b/` is the operator's value), and `/v1`
     // goes before them, not after.
+    // `http:///v1` reads as host `v1` to WHATWG parsers and as an empty
+    // authority to RFC ones; either way it is not what the operator meant.
+    if rest.starts_with(['/', '\\']) {
+        return None;
+    }
     let cut = rest.find(['?', '#']).unwrap_or(rest.len());
     let (head, tail) = rest.split_at(cut);
     let head = head.trim_end_matches('/');
