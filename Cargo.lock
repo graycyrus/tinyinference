@@ -1465,6 +1465,8 @@ dependencies = [
 name = "tinyinference-hub"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "httpdate",
  "proptest",
  "serde",
@@ -1473,6 +1475,8 @@ dependencies = [
  "tinyinference-embeddings",
  "tinyinference-llm",
  "tinyinference-local",
+ "tokio",
+ "tracing",
  "url",
 ]
 

@@ -12,6 +12,14 @@ keywords = ["llm", "inference", "providers", "catalogue"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
+# Port traits (`Http`, `CredentialStore`, `KindDriver`, ...) are async and
+# object-safe.
+async-trait = { workspace = true }
+# The catalog cache's single-flight lock and nothing else (`sync`); tests use
+# the runtime macros.
+tokio = { workspace = true }
+# Structured, redacted diagnostics.
+tracing = { workspace = true }
 # HTTP-date `Retry-After` values, resolved against a supplied instant.
 httpdate = { workspace = true }
 # `HubError` maps llm's error in, and the taxonomy bridges its provider kinds.
@@ -28,6 +36,8 @@ url = { workspace = true }
 tinyinference-local = { version = "0.3.0", path = "../tinyinference-local", optional = true }
 
 [dev-dependencies]
+# Concurrent-callers cases (`join_all`) in the cache and simulation tests.
+futures = { workspace = true }
 # The compat guard matches embeddings' frozen error exhaustively.
 tinyinference-embeddings = { version = "0.3.0", path = "../tinyinference-embeddings" }
 # Property tests for parsers, classifiers, and redaction (the workspace has no

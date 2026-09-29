@@ -52,13 +52,18 @@
 //! milestones and currently add nothing; `oauth` will only ever define types.
 
 pub mod catalogue;
+pub mod config;
 pub mod descriptor;
 pub mod endpoint;
 pub mod error;
+pub mod health;
 pub mod ids;
 pub mod policy;
+pub mod ports;
 mod secret;
 pub mod taxonomy;
+#[cfg(any(test, feature = "testing"))]
+pub mod testkit;
 
 pub use descriptor::{Capabilities, ProviderDescriptor, ProviderRecord, Quirk};
 pub use error::{
