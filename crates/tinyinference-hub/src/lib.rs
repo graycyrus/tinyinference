@@ -53,6 +53,7 @@
 
 pub mod catalogue;
 pub mod config;
+pub mod credential;
 pub mod descriptor;
 pub mod endpoint;
 pub mod error;
