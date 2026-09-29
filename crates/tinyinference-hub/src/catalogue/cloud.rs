@@ -32,7 +32,7 @@ struct CloudRow {
     quirks: &'static [Quirk],
 }
 
-const fn row(
+fn row(
     slug: &'static str,
     label: &'static str,
     endpoint: &'static str,
@@ -55,190 +55,194 @@ const REGIONAL: &[Quirk] = &[Quirk::RegionalEndpointSplit];
 const UNVERIFIED: &[Quirk] = &[Quirk::EndpointUnverified];
 const UNAUTH_CATALOG: &[Quirk] = &[Quirk::CatalogUnauthenticated];
 
-/// Ported verbatim from OpenCompany `catalogue.rs:145`, in its order.
-const CLOUD: &[CloudRow] = &[
-    row(
-        "openai",
-        "OpenAI",
-        "https://api.openai.com/v1",
-        Some("sk-..."),
-        &[Quirk::ResponsesApi],
-    ),
-    CloudRow {
-        slug: "anthropic",
-        label: "Anthropic",
-        endpoint: "https://api.anthropic.com/v1",
-        auth: RowAuth::Anthropic,
-        key_placeholder: Some("sk-ant-..."),
-        quirks: &[Quirk::NativeMessagesFirstParty],
-    },
-    row(
-        "openrouter",
-        "OpenRouter",
-        "https://openrouter.ai/api/v1",
-        Some("sk-or-..."),
-        &[
-            Quirk::AttributionHeaders,
-            Quirk::ScopedCatalogPath,
-            Quirk::KeyCheckEndpoint,
-        ],
-    ),
-    row(
-        "orcarouter",
-        "OrcaRouter",
-        "https://api.orcarouter.ai/v1",
-        Some("sk-orca-..."),
-        UNVERIFIED,
-    ),
-    row(
-        "gmi",
-        "GMI",
-        "https://api.gmi-serving.com/v1",
-        Some("eyJ...."),
-        NO_QUIRKS,
-    ),
-    row(
-        "fireworks",
-        "Fireworks",
-        "https://api.fireworks.ai/inference/v1",
-        Some("fw-..."),
-        &[Quirk::CatalogAccountScoped],
-    ),
-    row(
-        "moonshot",
-        "Kimi (Moonshot)",
-        "https://api.moonshot.ai/v1",
-        Some("sk-..."),
-        NO_QUIRKS,
-    ),
-    row(
-        "groq",
-        "Groq",
-        "https://api.groq.com/openai/v1",
-        Some("gsk_..."),
-        NO_QUIRKS,
-    ),
-    row(
-        "mistral",
-        "Mistral",
-        "https://api.mistral.ai/v1",
-        None,
-        &[Quirk::RegionalEndpointSplit, Quirk::MovingAliasModels],
-    ),
-    row(
-        "deepseek",
-        "DeepSeek",
-        "https://api.deepseek.com",
-        Some("sk-..."),
-        MOVING_ALIASES,
-    ),
-    row(
-        "together",
-        "Together AI",
-        "https://api.together.ai/v1",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "google",
-        "Google Gemini",
-        "https://generativelanguage.googleapis.com/v1beta/openai",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "cerebras",
-        "Cerebras",
-        "https://api.cerebras.ai/v1",
-        None,
-        &[Quirk::CatalogKeylessTwin],
-    ),
-    row("xai", "xAI", "https://api.x.ai/v1", None, MOVING_ALIASES),
-    row(
-        "huggingface",
-        "Hugging Face",
-        "https://router.huggingface.co/v1",
-        Some("hf_..."),
-        UNAUTH_CATALOG,
-    ),
-    row(
-        "nvidia",
-        "NVIDIA",
-        "https://integrate.api.nvidia.com/v1",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "zai",
-        "Z.AI",
-        "https://api.z.ai/api/paas/v4",
-        None,
-        REGIONAL,
-    ),
-    row(
-        "minimax",
-        "MiniMax",
-        "https://api.minimax.io/v1",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "stepfun",
-        "StepFun",
-        "https://api.stepfun.ai/v1",
-        None,
-        REGIONAL,
-    ),
-    row(
-        "kilocode",
-        "Kilo Code",
-        "https://api.kilo.ai/api/gateway",
-        None,
-        UNVERIFIED,
-    ),
-    row(
-        "deepinfra",
-        "DeepInfra",
-        "https://api.deepinfra.com/v1/openai",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "novita",
-        "Novita",
-        "https://api.novita.ai/v3/openai",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "venice",
-        "Venice",
-        "https://api.venice.ai/api/v1",
-        None,
-        UNAUTH_CATALOG,
-    ),
-    row(
-        "vercel-ai-gateway",
-        "Vercel AI Gateway",
-        "https://ai-gateway.vercel.sh/v1",
-        None,
-        NO_QUIRKS,
-    ),
-    row(
-        "sumopod",
-        "SumoPod",
-        "https://ai.sumopod.com/v1",
-        Some("sk-..."),
-        UNVERIFIED,
-    ),
-    row(
-        "modelscope",
-        "ModelScope",
-        "https://api-inference.modelscope.cn/v1",
-        Some("ms-..."),
-        &[Quirk::MeteredFreeTier],
-    ),
-];
+/// Ported verbatim from OpenCompany `catalogue.rs:145`, in its order. Built at
+/// runtime rather than as a `const` so the table is exercised by every test
+/// that reads the catalogue (and counted by the coverage gate).
+fn cloud_rows() -> Vec<CloudRow> {
+    vec![
+        row(
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            Some("sk-..."),
+            &[Quirk::ResponsesApi],
+        ),
+        CloudRow {
+            slug: "anthropic",
+            label: "Anthropic",
+            endpoint: "https://api.anthropic.com/v1",
+            auth: RowAuth::Anthropic,
+            key_placeholder: Some("sk-ant-..."),
+            quirks: &[Quirk::NativeMessagesFirstParty],
+        },
+        row(
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            Some("sk-or-..."),
+            &[
+                Quirk::AttributionHeaders,
+                Quirk::ScopedCatalogPath,
+                Quirk::KeyCheckEndpoint,
+            ],
+        ),
+        row(
+            "orcarouter",
+            "OrcaRouter",
+            "https://api.orcarouter.ai/v1",
+            Some("sk-orca-..."),
+            UNVERIFIED,
+        ),
+        row(
+            "gmi",
+            "GMI",
+            "https://api.gmi-serving.com/v1",
+            Some("eyJ...."),
+            NO_QUIRKS,
+        ),
+        row(
+            "fireworks",
+            "Fireworks",
+            "https://api.fireworks.ai/inference/v1",
+            Some("fw-..."),
+            &[Quirk::CatalogAccountScoped],
+        ),
+        row(
+            "moonshot",
+            "Kimi (Moonshot)",
+            "https://api.moonshot.ai/v1",
+            Some("sk-..."),
+            NO_QUIRKS,
+        ),
+        row(
+            "groq",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            Some("gsk_..."),
+            NO_QUIRKS,
+        ),
+        row(
+            "mistral",
+            "Mistral",
+            "https://api.mistral.ai/v1",
+            None,
+            &[Quirk::RegionalEndpointSplit, Quirk::MovingAliasModels],
+        ),
+        row(
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com",
+            Some("sk-..."),
+            MOVING_ALIASES,
+        ),
+        row(
+            "together",
+            "Together AI",
+            "https://api.together.ai/v1",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "google",
+            "Google Gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "cerebras",
+            "Cerebras",
+            "https://api.cerebras.ai/v1",
+            None,
+            &[Quirk::CatalogKeylessTwin],
+        ),
+        row("xai", "xAI", "https://api.x.ai/v1", None, MOVING_ALIASES),
+        row(
+            "huggingface",
+            "Hugging Face",
+            "https://router.huggingface.co/v1",
+            Some("hf_..."),
+            UNAUTH_CATALOG,
+        ),
+        row(
+            "nvidia",
+            "NVIDIA",
+            "https://integrate.api.nvidia.com/v1",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "zai",
+            "Z.AI",
+            "https://api.z.ai/api/paas/v4",
+            None,
+            REGIONAL,
+        ),
+        row(
+            "minimax",
+            "MiniMax",
+            "https://api.minimax.io/v1",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "stepfun",
+            "StepFun",
+            "https://api.stepfun.ai/v1",
+            None,
+            REGIONAL,
+        ),
+        row(
+            "kilocode",
+            "Kilo Code",
+            "https://api.kilo.ai/api/gateway",
+            None,
+            UNVERIFIED,
+        ),
+        row(
+            "deepinfra",
+            "DeepInfra",
+            "https://api.deepinfra.com/v1/openai",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "novita",
+            "Novita",
+            "https://api.novita.ai/v3/openai",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "venice",
+            "Venice",
+            "https://api.venice.ai/api/v1",
+            None,
+            UNAUTH_CATALOG,
+        ),
+        row(
+            "vercel-ai-gateway",
+            "Vercel AI Gateway",
+            "https://ai-gateway.vercel.sh/v1",
+            None,
+            NO_QUIRKS,
+        ),
+        row(
+            "sumopod",
+            "SumoPod",
+            "https://ai.sumopod.com/v1",
+            Some("sk-..."),
+            UNVERIFIED,
+        ),
+        row(
+            "modelscope",
+            "ModelScope",
+            "https://api-inference.modelscope.cn/v1",
+            Some("ms-..."),
+            &[Quirk::MeteredFreeTier],
+        ),
+    ]
+}
 
 const STANDARD_DEPTHS: &[TestDepth] = &[TestDepth::Catalog, TestDepth::Completion];
 const OPENROUTER_DEPTHS: &[TestDepth] = &[
@@ -256,8 +260,8 @@ const OPENROUTER_HEADERS: &[(&str, &str)] = &[
 ];
 
 pub(super) fn descriptors() -> Vec<ProviderDescriptor> {
-    CLOUD
-        .iter()
+    cloud_rows()
+        .into_iter()
         .map(|row| {
             let openrouter = row.slug == "openrouter";
             let anthropic = matches!(row.auth, RowAuth::Anthropic);

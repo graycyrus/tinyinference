@@ -65,9 +65,6 @@ pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
     }
-    if rest.trim().is_empty() {
-        return None;
-    }
     // No path segment at all (the trailing slash is already gone), so the
     // operator gave a bare origin.
     if !rest.contains('/') {

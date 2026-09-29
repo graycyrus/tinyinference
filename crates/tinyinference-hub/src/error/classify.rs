@@ -73,10 +73,9 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
         if before_ok && after_ok {
             return true;
         }
+        // `start` is the index of an ASCII byte of `needle`, so `start + 1` is
+        // always a char boundary.
         from = start + 1;
-        if from >= haystack.len() {
-            break;
-        }
     }
     false
 }

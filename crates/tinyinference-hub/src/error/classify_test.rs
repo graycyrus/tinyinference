@@ -689,3 +689,12 @@ fn trailing_punctuation_is_not_part_of_a_stripped_url() {
     assert_eq!(strip_urls("failed: https://a.test/x."), "failed: <url>.");
     assert_eq!(strip_urls("see https://a.test/x; then"), "see <url>; then");
 }
+
+#[test]
+fn a_malformed_number_in_a_try_again_hint_is_no_hint() {
+    // "1.2.3" collects as one digit run but does not parse.
+    assert_eq!(
+        classify(429, &[], "try again in 1.2.3s").retry,
+        Retry::Later(None)
+    );
+}

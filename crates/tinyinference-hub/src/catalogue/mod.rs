@@ -151,10 +151,12 @@ pub fn endpoint_is_chat_completions_only(endpoint: &str) -> bool {
         return false;
     };
     let mut matched = false;
-    for descriptor in descriptors_in(ProviderGroup::Cloud) {
-        let Some(preset) = descriptor.default_endpoint else {
-            continue;
-        };
+    let presets = descriptors_in(ProviderGroup::Cloud).filter_map(|descriptor| {
+        descriptor
+            .default_endpoint
+            .map(|preset| (descriptor, preset))
+    });
+    for (descriptor, preset) in presets {
         if endpoint_host(preset).as_deref() == Some(host.as_str()) {
             if descriptor.slug() == RESPONSES_API_SLUG {
                 return false;

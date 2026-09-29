@@ -207,11 +207,12 @@ fn is_loopback_name(domain: &str) -> bool {
 /// An [`EndpointRefusal`] naming why.
 pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), EndpointRefusal> {
     let parsed = parse(url)?;
-    match parsed.host() {
-        None => Err(EndpointRefusal::Unparseable),
-        Some(Host::Ipv4(v4)) => check_address(IpAddr::V4(v4), policy),
-        Some(Host::Ipv6(v6)) => check_address(IpAddr::V6(v6), policy),
-        Some(Host::Domain(name)) => {
+    // A special scheme (`http`, `https`) always has a host once it parses; the
+    // `ok_or` keeps the impossible case an error rather than a panic.
+    match parsed.host().ok_or(EndpointRefusal::Unparseable)? {
+        Host::Ipv4(v4) => check_address(IpAddr::V4(v4), policy),
+        Host::Ipv6(v6) => check_address(IpAddr::V6(v6), policy),
+        Host::Domain(name) => {
             if is_loopback_name(name) {
                 loopback(policy)
             } else if policy.allow_public {
@@ -248,13 +249,10 @@ pub fn check_endpoint_with_credential(
     if parsed.scheme() != "http" {
         return Ok(());
     }
-    let on_this_host = match parsed.host() {
-        Some(Host::Domain(name)) => is_loopback_name(name),
-        Some(Host::Ipv4(v4)) => v4.is_loopback(),
-        Some(Host::Ipv6(v6)) => {
-            v6.is_loopback() || embedded_v4(v6).is_some_and(|v4| v4.is_loopback())
-        }
-        None => false,
+    let on_this_host = match parsed.host().ok_or(EndpointRefusal::Unparseable)? {
+        Host::Domain(name) => is_loopback_name(name),
+        Host::Ipv4(v4) => v4.is_loopback(),
+        Host::Ipv6(v6) => v6.is_loopback() || embedded_v4(v6).is_some_and(|v4| v4.is_loopback()),
     };
     if on_this_host {
         Ok(())
