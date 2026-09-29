@@ -5,9 +5,11 @@
 //! that get screenshotted into tickets. The raw text lives in
 //! [`ProviderFailure::raw`](super::ProviderFailure) and goes to a log channel.
 //!
-//! Every sentence but the first begins with "Saved" in [`describe`], because
-//! every class but `auth` kept the record and the credential: the save is a
-//! fact and only reachability is in question. When a class rolls the add back,
+//! Every provider-facing sentence but the first begins with "Saved" in
+//! [`describe`], because every provider class but `auth` kept the record and
+//! the credential: the save is a fact and only reachability is in question. The
+//! hub-internal classes (`signed_out`, `invalid`, `conflict`, ...) describe
+//! themselves instead. When a class rolls the add back,
 //! [`describe_refusal`] has its own sentences, each naming the next thing to
 //! do, because telling the operator something was saved while no row appears is
 //! worse than telling them nothing.
