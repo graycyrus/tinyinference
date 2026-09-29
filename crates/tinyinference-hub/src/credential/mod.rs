@@ -13,7 +13,7 @@
 //!
 //! Two rules from OpenCompany hold for every chain:
 //!
-//! * a source that **errors** stops the chain ([`HubError::StoreUnreadable`]),
+//! * a source that **errors** stops the chain ([`crate::HubError::StoreUnreadable`]),
 //!   because falling through from an unreadable store to the managed account
 //!   would spend the operator's money on a store outage;
 //! * an empty or whitespace-only value is "not here", never a credential.

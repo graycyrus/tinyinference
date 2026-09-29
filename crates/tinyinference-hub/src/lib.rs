@@ -51,6 +51,7 @@
 //! enums. `cli`, `oauth`, `testing` and `http-reqwest` are reserved for later
 //! milestones and currently add nothing; `oauth` will only ever define types.
 
+pub mod catalog;
 pub mod catalogue;
 pub mod config;
 pub mod credential;
