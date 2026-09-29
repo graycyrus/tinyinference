@@ -64,9 +64,13 @@ impl HeaderPolicy {
         let Some(host) = endpoint_host(url) else {
             return false;
         };
-        self.first_party_hosts
-            .iter()
-            .any(|first| host == *first || host.ends_with(&format!(".{first}")))
+        // An absolute name (`api.tinyhumans.ai.`) is the same host, and a
+        // configured entry is compared case-insensitively.
+        let host = host.trim_end_matches('.');
+        self.first_party_hosts.iter().any(|first| {
+            let first = first.trim_end_matches('.').to_ascii_lowercase();
+            host == first || host.ends_with(&format!(".{first}"))
+        })
     }
 
     /// Whether `name` carries a credential (case-insensitive).

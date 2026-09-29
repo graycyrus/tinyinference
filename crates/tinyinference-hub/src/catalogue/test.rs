@@ -461,3 +461,50 @@ fn a_descriptor_answers_to_its_aliases_and_kind() {
     let d = descriptor("lmstudio").unwrap();
     assert!(d.answers_to("LMSTUDIO") && d.answers_to("lm-studio") && !d.answers_to("ollama"));
 }
+
+#[test]
+fn every_local_runtime_spelling_resolves_the_same_way_in_the_taxonomy_and_the_catalogue() {
+    // Regression (review round 2): `openai_compatible` and `llama-cpp` were
+    // runtimes to `LocalRuntime` but custom endpoints to the catalogue.
+    let spellings = [
+        "ollama",
+        "lmstudio",
+        "lm-studio",
+        "lm_studio",
+        "llamacpp",
+        "llama.cpp",
+        "llama_cpp",
+        "llama-cpp",
+        "vllm",
+        "mlx",
+        "mlx-server",
+        "mlx_lm",
+        "omlx",
+        "omlx-server",
+        "local-openai",
+        "local_openai",
+        "custom-openai",
+        "custom_openai",
+        "openai_compatible",
+        "open_ai_compatible",
+    ];
+    for spelling in spellings {
+        let runtime = LocalRuntime::parse_loose(spelling).unwrap_or_else(|| panic!("{spelling}"));
+        let by_runtime = descriptor_for_runtime(runtime).unwrap();
+        let by_name =
+            descriptor(spelling).unwrap_or_else(|| panic!("{spelling} is not in the catalogue"));
+        assert_eq!(by_name.slug(), by_runtime.slug(), "{spelling}");
+        assert_eq!(group_of(spelling), ProviderGroup::Local, "{spelling}");
+        assert!(is_reserved_slug(spelling), "{spelling}");
+        // The serde spellings agree too.
+        let parsed: LocalRuntime = serde_json::from_value(serde_json::json!(spelling))
+            .unwrap_or_else(|_| panic!("serde {spelling}"));
+        assert_eq!(parsed, runtime, "{spelling}");
+    }
+    // And every alias a local descriptor carries is a runtime spelling.
+    for d in descriptors_in(ProviderGroup::Local) {
+        for alias in d.aliases {
+            assert!(LocalRuntime::parse_loose(alias).is_some(), "{alias}");
+        }
+    }
+}

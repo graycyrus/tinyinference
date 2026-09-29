@@ -5,7 +5,7 @@
 //! two catalogues of the same hosted vendors, two error classifiers, and safety
 //! invariants (SSRF policy, credential redaction) that only one of them has.
 //! This crate is the shared answer, built as a **leaf**: it depends on
-//! `tinyinference-core` and `tinyinference-llm`, nothing depends on it, and no
+//! `tinyinference-llm` (plus small utility crates), nothing depends on it, and no
 //! existing public item of any other crate changed.
 //!
 //! # What is here

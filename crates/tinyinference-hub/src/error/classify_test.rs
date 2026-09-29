@@ -581,7 +581,11 @@ fn request_ids_come_from_headers_first_then_the_body() {
 fn the_raw_body_is_kept_log_only_and_never_displayed() {
     let secretish = "Authorization: Bearer sk-not-a-real-key rejected";
     let failure = body(401, secretish);
-    assert_eq!(failure.raw.expose(), secretish);
+    // The raw text is scrubbed on the way in: the echoed credential is gone.
+    assert_eq!(
+        failure.raw.expose(),
+        "Authorization: Bearer <redacted> rejected"
+    );
     assert!(!format!("{failure}").contains("sk-not"));
     assert!(!format!("{failure:?}").contains("sk-not"));
     let error = HubError::Provider(failure);
@@ -847,4 +851,72 @@ fn an_http_date_retry_after_is_resolved_against_the_supplied_instant_and_not_cap
         classify_for(Some("openai"), 429, &[("retry-after", "5")], "").retry,
         Retry::Later(Some(Duration::from_secs(5)))
     );
+}
+
+// ---- regressions from the fresh-eyes review (round 2) -----------------------------------
+
+#[test]
+fn raw_text_never_keeps_a_url_credential_or_an_echoed_authorization_value() {
+    // Regression: `raw` was documented log-safe but held the body verbatim, so a
+    // Gemini `?key=` URL or an echoed header reached whatever logged it.
+    let raw = |text: &str| classify(400, &[], text).raw.expose().clone();
+    let gemini = raw(
+        "bad request for https://generativelanguage.test/v1/models?key=AIzaFAKE123&alt=json#frag",
+    );
+    assert_eq!(
+        gemini,
+        "bad request for https://generativelanguage.test/v1/models?<redacted>"
+    );
+    let userinfo = raw("failed at https://alice:hunter2@host.test/v1");
+    assert!(
+        !userinfo.contains("hunter2") && userinfo.contains("host.test"),
+        "{userinfo}"
+    );
+    let fragment_only = raw("see https://a.test/x#secretfrag now");
+    assert_eq!(fragment_only, "see https://a.test/x now");
+    for (text, needle) in [
+        ("x-api-key: sk-not-a-real-key sent", "sk-not-a-real-key"),
+        ("X-Api-Key:sk-not-a-real-key sent", "sk-not-a-real-key"),
+        (
+            r#"{"headers":{"api-key":"sk-not-a-real-key"}}"#,
+            "sk-not-a-real-key",
+        ),
+        ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ("bad Bearer sk-not-a-real-key, retry", "sk-not-a-real-key"),
+    ] {
+        let scrubbed = raw(text);
+        assert!(!scrubbed.contains(needle), "{text} -> {scrubbed}");
+        assert!(scrubbed.contains("<redacted>"), "{scrubbed}");
+    }
+    // Ordinary text and an already-redacted value are left alone.
+    assert_eq!(scrub_log_text("plain failure text"), "plain failure text");
+    assert_eq!(scrub_log_text("Bearer <redacted>"), "Bearer <redacted>");
+    assert_eq!(scrub_log_text("Bearer"), "Bearer");
+    // Transport detail goes through the same scrub.
+    let t = classify_transport(
+        TransportCondition::Other,
+        "error for url (https://x.test/v1?api_key=sk-not-a-real-key)",
+    );
+    assert!(!t.raw.expose().contains("sk-not"), "{}", t.raw.expose());
+}
+
+#[test]
+fn many_urls_in_a_hostile_body_are_handled_in_linear_time() {
+    // Regression: `strip_urls` re-lowercased the remainder per URL (quadratic).
+    let body = "http://a ".repeat(30_000);
+    let start = std::time::Instant::now();
+    let stripped = strip_urls(&body);
+    assert_eq!(stripped.matches("<url>").count(), 30_000);
+    let _ = scrub_log_text(&body);
+    // Generous bound: quadratic behaviour took many seconds at this size.
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}
+
+proptest! {
+    #[test]
+    fn scrubbing_never_panics_and_never_grows_a_credential(text in "[ -~]{0,200}") {
+        let scrubbed = scrub_log_text(&text);
+        prop_assert!(!scrubbed.contains("?key="));
+        let _ = strip_urls(&text);
+    }
 }

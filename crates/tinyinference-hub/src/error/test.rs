@@ -711,3 +711,60 @@ fn an_endpoint_refusal_converts_to_the_matching_policy_violation() {
         PolicyViolation::Endpoint(EndpointRefusal::LinkLocal)
     );
 }
+
+#[test]
+fn a_status_guessed_from_free_text_is_reported_but_never_authoritative() {
+    // Regression (review round 2): llm's extractor takes any three digits after
+    // a `(`, and the hub used to treat that guess as the HTTP status, skipping
+    // the token rules that text-only errors get.
+    let HubError::Provider(guess) = HubError::from(tinyinference_llm::Error::Model(
+        "stream stalled (500 items sent) after a timeout".into(),
+    )) else {
+        panic!("provider")
+    };
+    assert_eq!(guess.status, Some(500), "reported for the log");
+    assert_eq!(
+        guess.reason,
+        ReasonCode::Timeout,
+        "but the class comes from the text rules"
+    );
+    // A URL cannot supply the number either.
+    let HubError::Provider(url) = HubError::from(tinyinference_llm::Error::Model(
+        "request to https://x.test/v1/(401/models failed: connection refused".into(),
+    )) else {
+        panic!("provider")
+    };
+    assert_eq!(url.reason, ReasonCode::Endpoint);
+    assert_eq!(url.status, None);
+}
+
+#[test]
+fn an_undone_add_keeps_its_own_sentence_for_hub_internal_errors() {
+    // Regression (review round 2): every non-provider error read "Could not
+    // verify X, so it was not connected" when the add was undone.
+    let invalid = HubError::Invalid(InvalidInput::Empty(InputField::Slug));
+    let said = invalid.user_message(CopyContext::undone("Acme"));
+    assert_eq!(said, "That input is not valid.");
+    let policy = HubError::Policy(PolicyViolation::CrossOriginRedirect);
+    assert!(
+        policy
+            .user_message(CopyContext::undone("Acme"))
+            .contains("not allowed")
+    );
+    let taken = HubError::AlreadyExists { slug: slug("acme") };
+    assert!(
+        taken
+            .user_message(CopyContext::undone("Acme"))
+            .contains("already connected")
+    );
+    // Provider-facing classes still switch register.
+    let endpoint = HubError::Provider(ProviderFailure::new(
+        ReasonCode::Endpoint,
+        Retry::Later(None),
+    ));
+    assert!(
+        endpoint
+            .user_message(CopyContext::undone("Acme"))
+            .contains("Start it")
+    );
+}

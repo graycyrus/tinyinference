@@ -523,10 +523,13 @@ impl ProviderFailure {
         self
     }
 
-    /// Attaches the raw upstream text (log-only).
+    /// Attaches the raw upstream text (log-only). The text is passed through
+    /// [`scrub_log_text`](super::scrub_log_text) first, so a URL's userinfo or
+    /// query string and an echoed `Authorization` value never sit in the field
+    /// a host will write to a log.
     #[must_use]
-    pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
-        self.raw = LogOnly::new(raw.into());
+    pub fn with_raw(mut self, raw: impl AsRef<str>) -> Self {
+        self.raw = LogOnly::new(super::scrub_log_text(raw.as_ref()));
         self
     }
 }

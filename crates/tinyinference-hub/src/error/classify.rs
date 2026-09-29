@@ -80,25 +80,29 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Replaces every `http(s)://...` token in `text` with `<url>`.
-///
-/// Applied to text before it is classified, so a URL that happens to contain
-/// `models` or `404` cannot steer the result (guard G19).
-pub fn strip_urls(text: &str) -> String {
+/// Calls `f` on every `http(s)://...` token in `text` and splices the result
+/// in. The text is lowercased once (ASCII lowercasing keeps byte offsets), so
+/// the scan is linear however many URLs a hostile body contains.
+fn map_urls(text: &str, mut f: impl FnMut(&str) -> String) -> String {
+    let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let lower = rest.to_ascii_lowercase();
-        let next = ["https://", "http://"]
-            .iter()
-            .filter_map(|p| lower.find(p))
-            .min();
-        let Some(start) = next else {
-            out.push_str(rest);
-            return out;
+    let mut at = 0;
+    while at < text.len() {
+        // Find the nearest "http" and check what follows: each search starts at
+        // the cursor and stops at the first hit, so the scan is linear even when
+        // one of the two schemes never occurs.
+        let Some(offset) = lower[at..].find("http") else {
+            break;
         };
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
+        let start = at + offset;
+        let after = &lower[start + 4..];
+        if !(after.starts_with("://") || after.starts_with("s://")) {
+            out.push_str(&text[at..start + 4]);
+            at = start + 4;
+            continue;
+        }
+        out.push_str(&text[at..start]);
+        let tail = &text[start..];
         let end = tail
             .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<' | ','))
             .unwrap_or(tail.len());
@@ -106,9 +110,125 @@ pub fn strip_urls(text: &str) -> String {
         let end = tail[..end]
             .trim_end_matches(['.', ';', ':', '!', '?'])
             .len();
-        out.push_str("<url>");
-        rest = &tail[end..];
+        out.push_str(&f(&tail[..end]));
+        at = start + end;
     }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Replaces every `http(s)://...` token in `text` with `<url>`.
+///
+/// Applied to text before it is classified, so a URL that happens to contain
+/// `models` or `404` cannot steer the result (guard G19).
+pub fn strip_urls(text: &str) -> String {
+    map_urls(text, |_| "<url>".to_string())
+}
+
+/// Makes upstream or transport text safer to write to a log: URL userinfo is
+/// redacted, query strings and fragments (Gemini's `?key=...`) are dropped, and
+/// the value after `Bearer`/`Basic` or an `Authorization`/`x-api-key`/`api-key`
+/// header echo is replaced. Best effort, not a guarantee: a credential in free
+/// prose is still a credential in free prose. Applied automatically by
+/// [`ProviderFailure::with_raw`](super::ProviderFailure::with_raw).
+pub fn scrub_log_text(text: &str) -> String {
+    let urls = map_urls(text, |url| {
+        let redacted = crate::endpoint::redact_endpoint(url);
+        match redacted.find(['?', '#']) {
+            Some(cut) if redacted[cut..].starts_with('?') => {
+                format!("{}?<redacted>", &redacted[..cut])
+            }
+            Some(cut) => redacted[..cut].to_string(),
+            None => redacted,
+        }
+    });
+    let mut out = urls;
+    for marker in [
+        "bearer ",
+        "basic ",
+        "authorization:",
+        "x-api-key:",
+        "api-key:",
+    ] {
+        out = redact_after(&out, marker);
+    }
+    // The same fields as JSON members: `"api-key":"value"`.
+    for name in [
+        "authorization",
+        "x-api-key",
+        "api-key",
+        "api_key",
+        "apikey",
+        "access_token",
+        "secret",
+        "password",
+    ] {
+        out = redact_json_member(&out, name);
+    }
+    out
+}
+
+/// Replaces the string value of every JSON member named `name` (matched
+/// case-insensitively, quotes included) with `<redacted>`.
+fn redact_json_member(text: &str, name: &str) -> String {
+    let needle = format!("\"{name}\"");
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(offset) = lower[at..].find(&needle) {
+        let after_name = at + offset + needle.len();
+        let value = text[after_name..]
+            .trim_start()
+            .strip_prefix(':')
+            .map(str::trim_start)
+            .and_then(|v| v.strip_prefix('"'));
+        let Some(body) = value else {
+            out.push_str(&text[at..after_name]);
+            at = after_name;
+            continue;
+        };
+        let value_start = text.len() - body.len();
+        let close = body.find('"').unwrap_or(body.len());
+        out.push_str(&text[at..value_start]);
+        out.push_str("<redacted>");
+        at = value_start + close;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Replaces the run of non-whitespace, non-quote characters after each
+/// case-insensitive occurrence of `marker` with `<redacted>`.
+fn redact_after(text: &str, marker: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(offset) = lower[at..].find(marker) {
+        let value_start = at + offset + marker.len();
+        out.push_str(&text[at..value_start]);
+        // Skip spaces after a header colon, then take the value.
+        let rest = &text[value_start..];
+        let spaces = rest.len() - rest.trim_start_matches(' ').len();
+        out.push_str(&rest[..spaces]);
+        let value = &rest[spaces..];
+        let len = value
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '}' | ')'))
+            .unwrap_or(value.len());
+        let word = &value[..len];
+        // `Authorization: Bearer <token>`: the scheme word stays (the `bearer `
+        // marker redacts the token itself), and a value already redacted stays.
+        let already = word.starts_with("<redacted>")
+            || word.eq_ignore_ascii_case("bearer")
+            || word.eq_ignore_ascii_case("basic");
+        if len > 0 && !already {
+            out.push_str("<redacted>");
+        } else {
+            out.push_str(&value[..len]);
+        }
+        at = value_start + spaces + len;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// Whether the body says the **credential itself** was refused, as opposed to
@@ -297,16 +417,21 @@ pub fn classify_at(
 ) -> ProviderFailure {
     let retry_after = retry_after(headers, body, now);
     let mut failure = classify_text(kind, Some(status), &strip_urls(body), retry_after.is_some());
-    if let Retry::Later(delay) = &mut failure.retry {
-        *delay = retry_after;
-    }
+    set_delay(&mut failure, retry_after);
     failure.status = Some(status);
     failure.request_id = request_id(headers, body);
     if failure.provider_code.is_none() {
         failure.provider_code = provider_code(body);
     }
-    failure.raw = crate::secret::LogOnly::new(body.to_string());
-    failure
+    failure.with_raw(body)
+}
+
+/// Sets the provider's delay on a retryable failure (and caps it at
+/// [`MAX_RETRY_AFTER`]); leaves a `Never`/`Now` failure alone.
+pub(crate) fn set_delay(failure: &mut ProviderFailure, delay: Option<Duration>) {
+    if let Retry::Later(slot) = &mut failure.retry {
+        *slot = delay.map(|d| d.min(MAX_RETRY_AFTER));
+    }
 }
 
 /// The classification core, on text that already has its URLs stripped.
@@ -482,7 +607,7 @@ fn request_id(headers: &[(&str, &str)], body: &str) -> Option<String> {
 }
 
 /// Accepts a short identifier (`[A-Za-z0-9_.:-]`, at most 128 characters).
-fn sanitize_identifier(raw: &str) -> Option<String> {
+pub(crate) fn sanitize_identifier(raw: &str) -> Option<String> {
     let id = raw.trim();
     let ok = !id.is_empty()
         && id.len() <= 128

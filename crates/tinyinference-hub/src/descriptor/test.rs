@@ -278,3 +278,36 @@ fn validate_checks_a_hand_built_record_too() {
         Err(crate::error::InvalidInput::Malformed { .. })
     ));
 }
+
+#[test]
+fn credentials_nested_or_spelled_differently_are_refused_too() {
+    // Regression (review round 2): only top-level, exact-ish names were checked.
+    for extra in [
+        json!({"tiers": {"api_key": "sk-not-a-real-key"}}),
+        json!({"headers": {"Authorization": "Bearer sk-not-a-real-key"}}),
+        json!({"nested": [{"deeper": {"client_secret": "x"}}]}),
+        json!({"auth_token": "x"}),
+        json!({"session_token": "x"}),
+        json!({"access_key": "x"}),
+        json!({"private_key": "x"}),
+        json!({"passphrase": "x"}),
+        json!({"db_passwd": "x"}),
+    ] {
+        let name = extra.as_object().unwrap().keys().next().unwrap().clone();
+        let loaded = serde_json::from_value::<ProviderRecord>(stored(extra));
+        let error = loaded.expect_err(&name).to_string();
+        assert!(
+            error.contains("credential") && !error.contains("sk-not-a-real-key"),
+            "{name}: {error}"
+        );
+    }
+    // A too-deep structure is not walked without bound, and ordinary nested data loads.
+    let mut deep = json!({"leaf": 1});
+    for _ in 0..20 {
+        deep = json!({ "n": deep });
+    }
+    assert!(serde_json::from_value::<ProviderRecord>(stored(json!({"tiers": deep}))).is_ok());
+    let ok =
+        json!({"tiers": {"chat-v1": "gpt-5", "list": [1, {"max_tokens": 5, "tokenizer": "x"}]}});
+    assert!(serde_json::from_value::<ProviderRecord>(stored(ok)).is_ok());
+}

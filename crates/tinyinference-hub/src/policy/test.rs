@@ -764,3 +764,61 @@ fn a_first_party_check_reads_the_host_a_client_connects_to() {
     assert!(policy.allows_product_header_to("https://tinyhumans.ai\\.evil.test/"));
     assert!(!policy.allows_product_header_to("https://evil.test:443\\@api.tinyhumans.ai/v1"));
 }
+
+#[test]
+fn reserved_documentation_and_transition_ranges_are_never_endpoints() {
+    // Regression (review round 2): these fell through to "public", and only
+    // three IPv6-embedded-IPv4 forms were unwrapped.
+    let p = local_offered().with_private(true);
+    for url in [
+        "http://192.0.0.1/v1",
+        "http://192.0.2.10/v1",
+        "http://198.18.0.1/v1",
+        "http://198.19.255.254/v1",
+        "http://198.51.100.7/v1",
+        "http://203.0.113.9/v1",
+        "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1",
+        "http://[2001:db8::1]/v1",
+        "http://[64:ff9b:1::1]/v1",
+    ] {
+        assert_eq!(
+            check_endpoint(url, &p),
+            Err(EndpointRefusal::PrivateNetwork),
+            "{url}"
+        );
+    }
+    // 6to4 embeds the IPv4 address in bits 16..48: metadata and loopback stay refused.
+    assert_eq!(
+        check_endpoint("http://[2002:a9fe:a9fe::1]/v1", &p),
+        Err(EndpointRefusal::LinkLocal)
+    );
+    assert_eq!(
+        check_endpoint("http://[2002:7f00:1::1]/v1", &server_side()),
+        Err(EndpointRefusal::Loopback)
+    );
+    assert_eq!(
+        check_endpoint("http://[2002:0808:0808::1]/v1", &server_side()),
+        Ok(()),
+        "6to4 of 8.8.8.8"
+    );
+    // The neighbours of the reserved blocks are ordinary public addresses.
+    for url in [
+        "http://192.0.1.1/v1",
+        "http://198.17.0.1/v1",
+        "http://198.20.0.1/v1",
+        "http://198.51.101.1/v1",
+        "http://203.0.114.1/v1",
+    ] {
+        assert_eq!(check_endpoint(url, &server_side()), Ok(()), "{url}");
+    }
+}
+
+#[test]
+fn an_absolute_host_name_and_a_mixed_case_entry_still_match_first_party() {
+    // Regression (review round 2).
+    let mut policy = HeaderPolicy::builtin();
+    assert!(policy.allows_product_header_to("https://api.tinyhumans.ai./v1"));
+    policy.first_party_hosts.push("Example.Org.".to_string());
+    assert!(policy.allows_product_header_to("https://api.example.org/v1"));
+    assert!(!policy.allows_product_header_to("https://example.org.evil.test/v1"));
+}

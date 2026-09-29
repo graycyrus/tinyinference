@@ -302,8 +302,9 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 
 /// The IPv4 address an IPv6 address embeds, if it is one of the forms that is
 /// "the same machine wearing a longer name": IPv4-mapped (`::ffff:a.b.c.d`),
-/// the well-known NAT64 prefix (`64:ff9b::a.b.c.d`), or the deprecated
-/// IPv4-compatible form (`::a.b.c.d`, excluding `::` and `::1`).
+/// the well-known NAT64 prefix (`64:ff9b::a.b.c.d`), 6to4
+/// (`2002:aabb:ccdd::/48`, which embeds the address in bits 16..48), or the
+/// deprecated IPv4-compatible form (`::a.b.c.d`, excluding `::` and `::1`).
 fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(mapped) = ip.to_ipv4_mapped() {
         return Some(mapped);
@@ -315,6 +316,14 @@ fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
             s[6] as u8,
             (s[7] >> 8) as u8,
             s[7] as u8,
+        ));
+    }
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
         ));
     }
     if s[..6] == [0, 0, 0, 0, 0, 0] && ip != Ipv6Addr::UNSPECIFIED && ip != Ipv6Addr::LOCALHOST {
@@ -352,7 +361,18 @@ pub fn check_address(ip: IpAddr, policy: &EndpointPolicy) -> Result<(), Endpoint
             if (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
                 return Err(EndpointRefusal::LinkLocal);
             }
-            if v6 == Ipv6Addr::UNSPECIFIED || v6.is_multicast() {
+            // Unspecified, multicast, Teredo (2001::/32, which obfuscates a
+            // client IPv4), the local-use NAT64 prefix (64:ff9b:1::/48) and the
+            // documentation prefix (2001:db8::/32) are never a real endpoint.
+            let teredo = s[0] == 0x2001 && s[1] == 0;
+            let local_nat64 = s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1;
+            let documentation = s[0] == 0x2001 && s[1] == 0x0db8;
+            if v6 == Ipv6Addr::UNSPECIFIED
+                || v6.is_multicast()
+                || teredo
+                || local_nat64
+                || documentation
+            {
                 return Err(EndpointRefusal::PrivateNetwork);
             }
             // fc00::/7 unique-local.
@@ -377,6 +397,16 @@ fn check_v4(ip: Ipv4Addr, policy: &EndpointPolicy) -> Result<(), EndpointRefusal
     // Never routable, whatever the policy says. 0.0.0.0/8 reaches localhost on
     // several stacks; 240.0.0.0/4 is reserved.
     if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() || a == 0 || a >= 240 {
+        return Err(EndpointRefusal::PrivateNetwork);
+    }
+    // Documentation and benchmarking ranges are never a real endpoint:
+    // 192.0.0.0/24, 192.0.2.0/24, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24.
+    let [_, _, c, _] = ip.octets();
+    let reserved = (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113);
+    if reserved {
         return Err(EndpointRefusal::PrivateNetwork);
     }
     // 100.64.0.0/10, carrier-grade NAT: where a container network often lives.

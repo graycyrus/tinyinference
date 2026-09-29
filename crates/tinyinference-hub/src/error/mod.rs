@@ -16,7 +16,7 @@ use crate::taxonomy::ProviderGroup;
 
 pub use classify::{
     MAX_RETRY_AFTER, TransportCondition, classify, classify_at, classify_for, classify_transport,
-    strip_urls,
+    scrub_log_text, strip_urls,
 };
 pub use copy::{describe, describe_refusal};
 pub use types::{
@@ -124,11 +124,10 @@ impl From<tinyinference_llm::Error> for HubError {
                     &text,
                     has_retry_after,
                 );
-                if let Retry::Later(delay) = &mut failure.retry {
-                    *delay = provider
-                        .retry_after_ms
-                        .map(|ms| Duration::from_millis(ms).min(MAX_RETRY_AFTER));
-                }
+                classify::set_delay(
+                    &mut failure,
+                    provider.retry_after_ms.map(Duration::from_millis),
+                );
                 if provider.retryable
                     && failure.reason == ReasonCode::Unknown
                     && failure.retry == Retry::Never
@@ -137,13 +136,10 @@ impl From<tinyinference_llm::Error> for HubError {
                 }
                 failure.status = provider.status;
                 if failure.provider_code.is_none() {
-                    failure.provider_code = provider.code.filter(|c| {
-                        !c.is_empty()
-                            && c.len() <= 128
-                            && c.chars().all(|ch| {
-                                ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':' | '-')
-                            })
-                    });
+                    failure.provider_code = provider
+                        .code
+                        .as_deref()
+                        .and_then(classify::sanitize_identifier);
                 }
                 Self::Provider(failure.with_raw(provider.message))
             }
@@ -168,17 +164,20 @@ impl From<tinyinference_llm::Error> for HubError {
 }
 
 /// Classifies llm's free-text model error: URLs stripped first (transport text
-/// always contains the request URL), status recovered from the text when it
-/// carries one.
+/// always contains the request URL).
+///
+/// The status llm's extractor guesses from free text is **reported** but not
+/// treated as authoritative: it accepts any three digits after a `(`
+/// (`"error (401 bytes dropped)"`), so the classifier is handed no status and
+/// falls back to its whole-token rules, as it does for any text-only error.
 fn classify_llm_text(text: &str) -> ProviderFailure {
-    let status = tinyinference_llm::structured_http_status(text);
     let has_retry_after = tinyinference_llm::parse_retry_after_ms(text).is_some();
-    let mut failure = classify::classify_text(None, status, &strip_urls(text), has_retry_after);
-    if let Retry::Later(delay) = &mut failure.retry {
-        *delay = tinyinference_llm::parse_retry_after_ms(text)
-            .map(|ms| Duration::from_millis(ms).min(MAX_RETRY_AFTER));
-    }
-    failure.status = status;
+    let mut failure = classify::classify_text(None, None, &strip_urls(text), has_retry_after);
+    classify::set_delay(
+        &mut failure,
+        tinyinference_llm::parse_retry_after_ms(text).map(Duration::from_millis),
+    );
+    failure.status = tinyinference_llm::structured_http_status(&strip_urls(text));
     failure.with_raw(text)
 }
 

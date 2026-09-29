@@ -80,10 +80,12 @@ pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
     }
-    // No path segment at all (the trailing slash is already gone), so the
-    // operator gave a bare origin.
-    if !rest.contains('/') {
-        return Some(format!("{trimmed}/v1"));
+    // No path segment at all, so the operator gave a bare origin. The query
+    // and fragment are not path: `host?next=/a` has no path, and `/v1` goes
+    // before a query, not after it.
+    let cut = rest.find(['?', '#']).unwrap_or(rest.len());
+    if !rest[..cut].contains('/') {
+        return Some(format!("{scheme}://{}/v1{}", &rest[..cut], &rest[cut..]));
     }
     Some(trimmed.to_string())
 }

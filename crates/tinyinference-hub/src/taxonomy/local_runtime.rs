@@ -28,7 +28,7 @@ pub enum LocalRuntime {
     #[serde(alias = "lmstudio", alias = "lm-studio")]
     LmStudio,
     /// llama.cpp's `llama-server`.
-    #[serde(alias = "llamacpp", alias = "llama.cpp")]
+    #[serde(alias = "llamacpp", alias = "llama.cpp", alias = "llama-cpp")]
     LlamaCpp,
     /// vLLM's OpenAI-compatible server.
     Vllm,

@@ -473,3 +473,27 @@ fn endpoint_host_agrees_with_the_host_a_client_connects_to() {
         Some("host.test")
     );
 }
+
+#[test]
+fn a_query_or_fragment_is_not_a_path_when_appending_v1() {
+    // Regression (review round 2): `?x=1/v1` corrupted the query, and a `/` in
+    // the query suppressed the append.
+    for (raw, expected) in [
+        (
+            "http://localhost:11434?x=1",
+            "http://localhost:11434/v1?x=1",
+        ),
+        ("http://host?next=/a", "http://host/v1?next=/a"),
+        ("http://host#frag", "http://host/v1#frag"),
+        ("http://host:1/api?x=1", "http://host:1/api?x=1"),
+        ("https://Host.test", "https://Host.test/v1"),
+    ] {
+        let once = normalize_local_endpoint(raw).unwrap();
+        assert_eq!(once, expected, "{raw}");
+        assert_eq!(
+            normalize_local_endpoint(&once),
+            Some(once.clone()),
+            "idempotent: {raw}"
+        );
+    }
+}

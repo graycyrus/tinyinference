@@ -785,9 +785,12 @@
       "custom-openai",
       "custom_openai",
       "local_openai",
+      "openai_compatible",
+      "open_ai_compatible",
       "llamacpp",
       "llama.cpp",
       "llama_cpp",
+      "llama-cpp",
       "vllm"
     ],
     "auth": "bearer",

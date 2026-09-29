@@ -35,8 +35,8 @@ pub enum RecordOrigin {
 /// `CredentialStore` under [`Slug::key_slot`] and is read per request. The type
 /// enforces it rather than only documenting it: deserialising (and
 /// [`ProviderRecord::validate`]) refuse a `base_url` that carries userinfo and
-/// any [`legacy`](ProviderRecord::legacy) field whose name marks it as a
-/// credential, so plaintext cannot re-enter through a stored file.
+/// any [`legacy`](ProviderRecord::legacy) field, at any depth, whose name marks
+/// it as a credential, so plaintext cannot re-enter through a stored file.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ProviderRecordWire")]
@@ -119,31 +119,52 @@ impl TryFrom<ProviderRecordWire> for ProviderRecord {
 
 /// Whether a field name marks its value as a credential.
 ///
-/// Deliberately narrow so ordinary fields (`max_tokens`, `tiers`) are not
-/// caught: the substrings `api_key`, `apikey`, `secret`, `password`,
-/// `authorization` and `bearer`, plus the exact names `key`, `token`,
-/// `access_token`, `refresh_token`, `id_token`, `credential` and
-/// `credentials`.
+/// Deliberately narrow so ordinary fields (`max_tokens`, `tokenizer`, `tiers`)
+/// are not caught: the substrings `api_key`, `apikey`, `access_key`,
+/// `private_key`, `secret`, `password`, `passwd`, `passphrase`, `authorization`
+/// and `bearer`, the suffix `_token`, and the exact names `key`, `token`,
+/// `credential` and `credentials`. `-` and case are ignored.
 fn is_credential_field(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase().replace('-', "_");
     const SUBSTRINGS: &[&str] = &[
         "api_key",
         "apikey",
+        "access_key",
+        "private_key",
         "secret",
         "password",
+        "passwd",
+        "passphrase",
         "authorization",
         "bearer",
     ];
-    const EXACT: &[&str] = &[
-        "key",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "credential",
-        "credentials",
-    ];
-    SUBSTRINGS.iter().any(|s| lower.contains(s)) || EXACT.contains(&lower.as_str())
+    const EXACT: &[&str] = &["key", "token", "credential", "credentials"];
+    SUBSTRINGS.iter().any(|s| lower.contains(s))
+        || lower.ends_with("_token")
+        || EXACT.contains(&lower.as_str())
+}
+
+/// The first credential-shaped field name anywhere in `value`, looking through
+/// nested objects and arrays (a secret under `tiers` or `headers` is still a
+/// secret on the record). Depth-bounded so a hostile file cannot recurse
+/// without limit.
+fn find_credential_field(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    match value {
+        serde_json::Value::Object(map) => map.iter().find_map(|(name, inner)| {
+            if is_credential_field(name) {
+                Some(name.clone())
+            } else {
+                find_credential_field(inner, depth + 1)
+            }
+        }),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|inner| find_credential_field(inner, depth + 1)),
+        _ => None,
+    }
 }
 
 fn default_true() -> bool {
@@ -168,8 +189,15 @@ impl ProviderRecord {
                 reason: "the endpoint carries a username or password",
             });
         }
-        if let Some(name) = self.legacy.keys().find(|name| is_credential_field(name)) {
-            return Err(InvalidInput::CredentialField { name: name.clone() });
+        for (name, value) in &self.legacy {
+            let found = if is_credential_field(name) {
+                Some(name.clone())
+            } else {
+                find_credential_field(value, 0)
+            };
+            if let Some(name) = found {
+                return Err(InvalidInput::CredentialField { name });
+            }
         }
         Ok(())
     }

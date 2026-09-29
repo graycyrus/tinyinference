@@ -69,7 +69,19 @@ impl HubError {
     /// A sentence safe to show an operator. Never contains raw upstream text.
     pub fn user_message(&self, ctx: CopyContext) -> String {
         let reason = self.reason();
-        if ctx.undone {
+        let provider_facing = matches!(
+            reason,
+            ReasonCode::Auth
+                | ReasonCode::Model
+                | ReasonCode::Quota
+                | ReasonCode::RateLimited
+                | ReasonCode::Endpoint
+                | ReasonCode::Timeout
+                | ReasonCode::Unknown
+        );
+        // A validation or policy refusal is not a failed connectivity check, so
+        // it keeps its own sentence even when the add was undone.
+        if ctx.undone && provider_facing {
             describe_refusal(reason, &ctx.subject)
         } else {
             describe(reason, &ctx.subject)

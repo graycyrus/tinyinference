@@ -7,8 +7,8 @@ servers).
 Two hosts used to implement provider management separately: two catalogues of
 the same hosted vendors, two error classifiers, and safety invariants (SSRF
 policy, credential redaction) that only one had. This crate is the shared
-answer. It is a **leaf**: it depends on `tinyinference-core` and
-`tinyinference-llm`, nothing depends on it, and no existing public item of any
+answer. It is a **leaf**: it depends on `tinyinference-llm` (plus small
+utility crates), nothing depends on it, and no existing public item of any
 other crate changed.
 
 This first slice ships the foundations. Probing, model catalogs, health,
