@@ -157,10 +157,12 @@ struct Entry {
 struct SlotState {
     entry: Option<Entry>,
     failure: Option<(Instant, ProviderFailure)>,
-    /// The last rejected-credential failure and the generation it completed in.
-    /// Never replayed to a later caller; only to callers that were already
-    /// queued behind the fetch that produced it.
-    rejection: Option<(u64, ProviderFailure)>,
+    /// The last failure that is deliberately **not remembered** (a rejected
+    /// credential, or a bare 403), the generation it completed in, and whether
+    /// an older list may still be served beside it. Never replayed to a later
+    /// caller; only to callers that were already queued behind the fetch that
+    /// produced it.
+    unremembered: Option<(u64, ProviderFailure, bool)>,
     last_used: Option<Instant>,
 }
 
@@ -202,10 +204,10 @@ impl Slot {
         })
     }
 
-    fn rejection_at(&self, generation: u64) -> Option<ProviderFailure> {
+    fn unremembered_at(&self, generation: u64) -> Option<(ProviderFailure, bool)> {
         let state = self.state();
-        let (at, failure) = state.rejection.as_ref()?;
-        (*at == generation).then(|| failure.clone())
+        let (at, failure, soft) = state.unremembered.as_ref()?;
+        (*at == generation).then(|| (failure.clone(), *soft))
     }
 
     fn fresh_failure(&self, now: Instant) -> Option<ProviderFailure> {
@@ -392,6 +394,10 @@ impl CatalogCache {
         refresh: bool,
         fetch: FetchFn<'_>,
     ) -> Result<ModelList, HubError> {
+        // A rejection is a fact about the *key presented*. A keyless read
+        // presented none, so a 401 there is a fact about the endpoint (an auth
+        // proxy in front of a public listing) and is remembered like any other.
+        let credentialed = key.scope.is_some();
         let slot = self.slot(key);
         let generation_seen = slot.generation.load(Ordering::SeqCst);
         if !refresh {
@@ -411,8 +417,12 @@ impl CatalogCache {
             // The fetch they queued behind was rejected: they share that answer
             // (one request, not one per waiter), but it is never replayed to a
             // caller that arrives later.
-            if let Some(failure) = slot.rejection_at(generation_now) {
-                return Err(HubError::Provider(failure));
+            if let Some((failure, soft)) = slot.unremembered_at(generation_now) {
+                return if soft {
+                    slot.stale_or(failure, self.clock.now())
+                } else {
+                    Err(HubError::Provider(failure))
+                };
             }
             let now = self.clock.now();
             if let Some(mut list) = slot.fresh(now) {
@@ -456,11 +466,11 @@ impl CatalogCache {
             // About the presented key: reported to this caller, never
             // remembered, and never answered with an older list (a bad key must
             // show).
-            Err(HubError::Provider(failure)) if is_rejection(&failure) => {
+            Err(HubError::Provider(failure)) if credentialed && is_rejection(&failure) => {
                 let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 {
                     let mut state = slot.state();
-                    state.rejection = Some((generation, failure.clone()));
+                    state.unremembered = Some((generation, failure.clone(), false));
                     // "A bad key must show": the list read with a key the provider
                     // now refuses is not served as if nothing happened, and an
                     // earlier endpoint failure must not answer instead of the
@@ -470,7 +480,11 @@ impl CatalogCache {
                 }
                 Err(HubError::Provider(failure))
             }
-            Err(HubError::Provider(failure)) if is_forbidden(&failure) => {
+            Err(HubError::Provider(failure)) if credentialed && is_forbidden(&failure) => {
+                // Shared with the callers queued behind this request (one 403,
+                // not one per waiter), never remembered for later ones.
+                let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                slot.state().unremembered = Some((generation, failure.clone(), true));
                 slot.stale_or(failure, now)
             }
             Err(HubError::Provider(failure)) => {

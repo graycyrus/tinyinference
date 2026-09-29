@@ -177,3 +177,39 @@ fn paged_a_total_that_is_not_a_number_is_no_total() {
         json!({"success": true, "data": {"total": -3, "data": [{"id": "a"}]}}).to_string();
     assert_eq!(parse_page(&negative).unwrap().total, None);
 }
+
+fn full_page(prefix: &str, n: usize) -> Page {
+    let ids: Vec<String> = (0..PAGE_LIMIT)
+        .map(|i| format!("{prefix}{n}-{i}"))
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    page(&refs, None)
+}
+
+#[test]
+fn paged_a_full_page_with_no_total_keeps_reading_until_a_short_page() {
+    let mut collector = Collector::default();
+    assert_eq!(collector.push(full_page("a", 0)), NextPage::At(PAGE_LIMIT));
+    assert_eq!(
+        collector.push(full_page("a", 1)),
+        NextPage::At(2 * PAGE_LIMIT)
+    );
+    assert_eq!(collector.push(page(&["last"], None)), NextPage::Done);
+    assert_eq!(collector.finish().len(), 2 * PAGE_LIMIT + 1);
+}
+
+#[test]
+fn paged_full_pages_with_no_total_stop_at_the_page_cap_and_say_so() {
+    let mut collector = Collector::default();
+    let mut last = NextPage::Done;
+    for n in 0..MAX_PAGES {
+        last = collector.push(full_page("b", n));
+    }
+    assert_eq!(
+        last,
+        NextPage::Truncated {
+            read: MAX_PAGES * PAGE_LIMIT,
+            total: MAX_PAGES * PAGE_LIMIT
+        }
+    );
+}

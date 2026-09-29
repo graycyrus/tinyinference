@@ -250,6 +250,34 @@ fn health_the_fold_table() {
             ProviderHealth::Degraded(ReasonCode::Model),
         ),
         (
+            "a cleared failure stays cleared when the clearing lane fails later",
+            vec![
+                Probe(Completion, Some(ReasonCode::Timeout)),
+                Turn(None),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
+            "and the same the other way round",
+            vec![
+                Turn(Some(ReasonCode::Timeout)),
+                Probe(Completion, None),
+                Probe(Completion, Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
+            "a passing key-only probe clears a rejected key",
+            vec![Turn(Some(ReasonCode::Auth)), Probe(KeyOnly, None)],
+            ok,
+        ),
+        (
+            "but not an exhausted account",
+            vec![Turn(Some(ReasonCode::Quota)), Probe(KeyOnly, None)],
+            ProviderHealth::Down(ReasonCode::Quota),
+        ),
+        (
             "a failed turn is not superseded by an older completion pass",
             vec![Probe(Completion, None), Turn(Some(ReasonCode::Endpoint))],
             ProviderHealth::Degraded(ReasonCode::Endpoint),
@@ -782,4 +810,82 @@ async fn health_forgetting_never_drops_a_lock_somebody_still_holds() {
     // Idle again: the entry went, and a later caller gets a fresh lock.
     let fresh = bed.tracker.lock_for(&s, &p);
     assert_eq!(Arc::strong_count(&fresh), 2);
+}
+
+#[test]
+fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degraded() {
+    let mut recent = HealthSnapshot::default();
+    recent.record_probe(TestDepth::Catalog, None, None, 0);
+    recent.record_probe(
+        TestDepth::Completion,
+        Some((ReasonCode::Endpoint, None)),
+        None,
+        5 * 60 * 1000,
+    );
+    // Endpoint is severe on its own only with nothing passing; a fresh pass keeps it partial.
+    assert_eq!(
+        recent.health,
+        ProviderHealth::Degraded(ReasonCode::Endpoint)
+    );
+
+    let mut old = HealthSnapshot::default();
+    old.record_probe(TestDepth::Catalog, None, None, 0);
+    old.record_probe(
+        TestDepth::Completion,
+        Some((ReasonCode::Endpoint, None)),
+        None,
+        31 * 60 * 1000,
+    );
+    assert_eq!(
+        old.health,
+        ProviderHealth::Down(ReasonCode::Endpoint),
+        "the pass predates the failure by over 30 minutes"
+    );
+
+    let mut timeout = HealthSnapshot::default();
+    timeout.record_probe(TestDepth::Catalog, None, None, 0);
+    timeout.record_probe(
+        TestDepth::Completion,
+        Some((ReasonCode::Timeout, None)),
+        None,
+        31 * 60 * 1000,
+    );
+    timeout.record_probe(
+        TestDepth::KeyOnly,
+        Some((ReasonCode::Timeout, None)),
+        None,
+        31 * 60 * 1000,
+    );
+    assert_eq!(
+        timeout.health,
+        ProviderHealth::Down(ReasonCode::Timeout),
+        "two lanes failing, nothing fresh passing"
+    );
+}
+
+#[test]
+fn health_the_superseded_flag_survives_storage_and_is_absent_when_false() {
+    let mut snapshot = HealthSnapshot::default();
+    snapshot.record_turn(Some((ReasonCode::Timeout, None)), 1);
+    snapshot.record_probe(TestDepth::Completion, None, None, 2);
+    let text = serde_json::to_string(&snapshot).unwrap();
+    assert!(text.contains("\"superseded\":true"), "{text}");
+    let back: HealthSnapshot = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, snapshot);
+    let plain = serde_json::to_string(&HealthSnapshot::default()).unwrap();
+    assert!(!plain.contains("superseded"));
+}
+
+#[tokio::test]
+async fn health_idle_locks_are_dropped_so_the_map_does_not_grow_with_every_provider_ever_seen() {
+    let bed = bed();
+    for n in 0..50 {
+        let p = Slug::parse(&format!("p{n}")).unwrap();
+        bed.tracker
+            .record_outcome(&scope(), &p, &failure(ReasonCode::Timeout))
+            .await
+            .unwrap();
+        // Idle after the update: a fresh lock has just the map's and our reference.
+        assert_eq!(Arc::strong_count(&bed.tracker.lock_for(&scope(), &p)), 2);
+    }
 }

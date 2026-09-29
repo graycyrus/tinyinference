@@ -21,22 +21,6 @@ pub enum HubEvent {
         /// The new health.
         to: ProviderHealth,
     },
-    /// A model list was fetched from a provider.
-    CatalogFetched {
-        /// The scope.
-        scope: ScopeKey,
-        /// The endpoint, already redacted.
-        endpoint: String,
-        /// How many models it listed.
-        models: usize,
-    },
-    /// A model list could not be refreshed and an older one was served.
-    CatalogServedStale {
-        /// The scope.
-        scope: ScopeKey,
-        /// The endpoint, already redacted.
-        endpoint: String,
-    },
 }
 
 /// Receives [`HubEvent`]s. The default drops them.

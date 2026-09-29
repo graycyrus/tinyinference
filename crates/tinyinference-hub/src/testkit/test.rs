@@ -663,3 +663,9 @@ mod contract_mutations {
         );
     }
 }
+
+#[test]
+#[should_panic(expected = "`Not A Slug` is not a valid provider slug")]
+fn testkit_a_fixture_with_a_bad_slug_says_which() {
+    let _ = crate::testkit::ContractFixture::openai_shaped("Not A Slug", "https://a.test/v1");
+}

@@ -25,9 +25,12 @@ const PING_PROMPT: &str = "ping";
 /// however the operator reached it (a `custom` row pointed at api.openai.com
 /// gets the same 400 on its reasoning models).
 fn wants_max_completion_tokens(descriptor: &ProviderDescriptor, base: &str) -> bool {
-    descriptor.has_quirk(Quirk::MaxCompletionTokens)
-        || crate::catalogue::is_azure_endpoint(base)
-        || endpoint_host(base).is_some_and(|host| host == "api.openai.com")
+    // Only the OpenAI chat wire has the field; Anthropic's native `/messages`
+    // requires `max_tokens` wherever it is hosted.
+    descriptor.protocol != Protocol::AnthropicMessages
+        && (descriptor.has_quirk(Quirk::MaxCompletionTokens)
+            || crate::catalogue::is_azure_endpoint(base)
+            || endpoint_host(base).is_some_and(|host| host == "api.openai.com"))
 }
 
 /// Pings with the protocol the descriptor names.

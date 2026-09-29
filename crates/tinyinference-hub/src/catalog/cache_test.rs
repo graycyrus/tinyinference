@@ -1057,7 +1057,9 @@ mod cache_props {
                                 prop_assert!(fetched_now, "Fresh without a fetch");
                             }
                         }
-                        if let Err(error) = &result
+                        // (A keyless 401 is a fact about the endpoint and is remembered.)
+                        if credentialed
+                            && let Err(error) = &result
                             && error.reason() == ReasonCode::Auth
                         {
                             prop_assert!(fetched_now, "an Auth error must come from a fetch, never a memo");
@@ -1316,4 +1318,71 @@ async fn cache_a_cache_hit_shares_the_list_instead_of_copying_it() {
             .ids(),
         ["a", "b", "c"]
     );
+}
+
+#[tokio::test]
+async fn cache_a_keyless_401_is_a_fact_about_the_endpoint_and_is_remembered() {
+    // An auth proxy in front of a public listing: no credential was presented,
+    // so this is not "the key was rejected".
+    let (cache, clock) = cache();
+    let counter = Counter::new();
+    for _ in 0..3 {
+        let error = cache
+            .read(key("a", false), false, {
+                let c = counter.clone();
+                move || c.err(failure(ReasonCode::Auth, Some(401)))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason(), ReasonCode::Auth);
+    }
+    assert_eq!(counter.calls(), 1, "the 60 second memo applies");
+    clock.advance(FAILURE_TTL);
+    cache
+        .read(key("a", false), false, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Auth, Some(401)))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(counter.calls(), 2);
+}
+
+#[tokio::test]
+async fn cache_callers_queued_behind_a_bare_403_share_it_and_get_the_older_list() {
+    let (cache, clock) = cache();
+    let counter = Counter::new();
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.ok(&["good"])
+        })
+        .await
+        .unwrap();
+    clock.advance(CATALOG_TTL);
+    let calls: Vec<_> = (0..40)
+        .map(|_| {
+            let c = counter.clone();
+            cache.read(key("a", true), false, move || async move {
+                tokio::task::yield_now().await;
+                c.err(failure(ReasonCode::Unknown, Some(403))).await
+            })
+        })
+        .collect();
+    let results = join_all(calls).await;
+    assert!(results.iter().all(|r| r.as_ref().unwrap().is_stale()));
+    assert_eq!(
+        counter.calls(),
+        2,
+        "the first fill plus one shared 403, not 40"
+    );
+    // A later caller is not answered from a memo.
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Unknown, Some(403)))
+        })
+        .await
+        .unwrap();
+    assert_eq!(counter.calls(), 3);
 }

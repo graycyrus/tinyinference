@@ -681,3 +681,27 @@ async fn kinds_the_ping_asks_for_max_completion_tokens_wherever_the_endpoint_is_
         assert_eq!(body[expect], 16, "{base}");
     }
 }
+
+#[tokio::test]
+async fn kinds_anthropic_protocol_pings_always_use_max_tokens_even_on_an_azure_host() {
+    let bed = Bed::new();
+    let base = "https://my-resource.openai.azure.com/anthropic/v1";
+    bed.http.route(
+        Match::post(format!("{base}/messages")),
+        Scripted::json(200, &json!({})),
+    );
+    let (slug, kind, key) = (
+        Slug::parse("claude-on-azure").unwrap(),
+        KindId::new("anthropic"),
+        Secret::new("k"),
+    );
+    let t = target(&slug, &kind, base, &AuthStyle::Anthropic, Some(&key));
+    driver("anthropic")
+        .completion_ping(&bed.cx(), &t, &ModelId::parse("claude-x").unwrap())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(bed.http.requests()[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["max_tokens"], 16);
+    assert!(body.get("max_completion_tokens").is_none());
+}

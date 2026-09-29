@@ -67,6 +67,24 @@ impl HealthTracker {
         Arc::clone(locks.entry((scope.clone(), slug.clone())).or_default())
     }
 
+    /// Gives back a lock taken with [`HealthTracker::lock_for`], and drops the
+    /// map's entry when nobody else holds or waits on it (the map's copy and
+    /// `lock` are the two references when idle). Without this the map would keep
+    /// one entry per provider ever seen; dropping it under a waiter would hand
+    /// the next caller a fresh lock and let two updates run at once.
+    fn release_lock(&self, scope: &ScopeKey, slug: &Slug, lock: Arc<Mutex<()>>) {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (scope.clone(), slug.clone());
+        if Arc::strong_count(&lock) <= 2
+            && locks.get(&key).is_some_and(|held| Arc::ptr_eq(held, &lock))
+        {
+            locks.remove(&key);
+        }
+    }
+
     /// The snapshot for a provider (an empty one when nothing was recorded).
     ///
     /// # Errors
@@ -104,6 +122,21 @@ impl HealthTracker {
         F: FnOnce(&mut HealthSnapshot, u64) -> bool,
     {
         let lock = self.lock_for(scope, slug);
+        let result = self.update_locked(&lock, scope, slug, apply).await;
+        self.release_lock(scope, slug, lock);
+        result
+    }
+
+    async fn update_locked<F>(
+        &self,
+        lock: &Mutex<()>,
+        scope: &ScopeKey,
+        slug: &Slug,
+        apply: F,
+    ) -> Result<ProviderHealth, HubError>
+    where
+        F: FnOnce(&mut HealthSnapshot, u64) -> bool,
+    {
         let _serial = lock.lock().await;
         let mut snapshot = self.snapshot(scope, slug).await?;
         let from = snapshot.health;

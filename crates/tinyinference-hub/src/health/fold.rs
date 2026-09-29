@@ -14,12 +14,15 @@
 //! * with nothing passing, an unreachable endpoint is `Down`; any other failure
 //!   is `Degraded` until it repeats ([`FAILURES_TO_DOWN`] failed turns in a
 //!   row, or several lanes failing) and then `Down`;
-//! * a failing **chat** lane (a completion probe or a real turn) is superseded
-//!   by a newer success in the other chat lane: a real turn that worked after a
-//!   completion probe failed says chat works, and the reverse. Read-only lanes
-//!   (key check, catalog) are never superseded by anything but their own next
-//!   result: a working completion says nothing about a broken listing, and that
-//!   partial outage is exactly what `Degraded` is for.
+//! * a failing **chat** lane (a completion probe or a real turn) is cleared by a
+//!   newer success in the other chat lane (see `supersede_chat_failures` for
+//!   exactly which success clears which failure). The clearing is recorded on the
+//!   failed signal, so it stays cleared. Read-only lanes (key check, catalog)
+//!   are never cleared by anything but their own next result: a working
+//!   completion says nothing about a broken listing, and that partial outage is
+//!   exactly what `Degraded` is for;
+//! * a passing lane counts as evidence the provider is alive only if it is not
+//!   more than 30 minutes older than the newest failure.
 
 use crate::error::ReasonCode;
 use crate::taxonomy::TestDepth;
@@ -56,39 +59,21 @@ fn repeats_mean_down(reason: ReasonCode) -> bool {
     !matches!(reason, ReasonCode::RateLimited | ReasonCode::Model)
 }
 
+/// A passing lane older than this, measured against the newest failure, is not
+/// evidence the provider is alive *now*: an hours-old catalog pass must not keep
+/// a dead endpoint at `Degraded`.
+const PASS_FRESH_MS: u64 = 30 * 60 * 1000;
+
 /// One lane's latest result, for comparison.
 #[derive(Clone, Copy)]
 struct Lane {
     ok: bool,
+    superseded: bool,
     reason: Option<ReasonCode>,
     at_ms: u64,
     /// The probe depth, or `None` for a real turn (which is as deep as a
     /// completion).
     depth: Option<TestDepth>,
-}
-
-impl Lane {
-    /// Whether this lane exercises chat (a completion probe or a real turn).
-    fn is_chat(&self) -> bool {
-        matches!(self.depth, None | Some(TestDepth::Completion))
-    }
-
-    /// Whether a success in this lane says a failure in `other` is over.
-    ///
-    /// A rejected credential or an exhausted account is `Down` "whatever else
-    /// passes", so a passive success (a real turn) never clears one. Only a
-    /// **deliberate** completion probe does: the operator re-testing after
-    /// fixing the key or topping up is fresh, current evidence, and without it a
-    /// `Down` provider that is no longer routed to would never produce another
-    /// turn to clear itself. (Changing the key resets the snapshot outright.)
-    fn supersedes(&self, other: &Lane) -> bool {
-        let deliberate = self.depth == Some(TestDepth::Completion);
-        self.ok
-            && self.at_ms >= other.at_ms
-            && self.is_chat()
-            && other.is_chat()
-            && (deliberate || !other.reason.is_some_and(is_terminal))
-    }
 }
 
 impl HealthSnapshot {
@@ -98,6 +83,7 @@ impl HealthSnapshot {
             .iter()
             .map(|(depth, signal)| Lane {
                 ok: signal.ok,
+                superseded: signal.superseded,
                 reason: signal.reason,
                 at_ms: signal.at_ms,
                 depth: Some(*depth),
@@ -106,12 +92,52 @@ impl HealthSnapshot {
         if let Some(turn) = &self.turn {
             lanes.push(Lane {
                 ok: turn.ok,
+                superseded: turn.superseded,
                 reason: turn.reason,
                 at_ms: turn.at_ms,
                 depth: None,
             });
         }
         lanes
+    }
+
+    /// Marks failing chat lanes (the turn lane and the completion probe) as
+    /// superseded when `matches` says their reason is one the new success
+    /// proves over. Sticky, so overwriting the success lane later does not
+    /// resurrect them.
+    ///
+    /// Which success clears which failure is the point of the rules:
+    ///
+    /// * a real turn that worked clears a failing completion probe, unless that
+    ///   failure was terminal: a rejected credential or an exhausted account is
+    ///   `Down` "whatever else passes", so a passive success never hides one;
+    /// * a **deliberate** completion probe that passed clears a failing turn,
+    ///   terminal or not: the operator re-testing after fixing the key or
+    ///   topping up is fresh, current evidence, and without it a `Down`
+    ///   provider that is no longer routed to would never produce a turn to
+    ///   clear itself;
+    /// * a key-only probe that passed clears a rejected credential (that is
+    ///   exactly what it proves) and nothing else.
+    fn supersede_chat_failures(
+        &mut self,
+        turn: bool,
+        completion: bool,
+        matches: impl Fn(ReasonCode) -> bool,
+    ) {
+        if turn
+            && let Some(signal) = self.turn.as_mut()
+            && !signal.ok
+            && signal.reason.is_some_and(&matches)
+        {
+            signal.superseded = true;
+        }
+        if completion
+            && let Some(signal) = self.probes.get_mut(&TestDepth::Completion)
+            && !signal.ok
+            && signal.reason.is_some_and(&matches)
+        {
+            signal.superseded = true;
+        }
     }
 
     /// Recomputes [`HealthSnapshot::health`] from the signals.
@@ -122,10 +148,13 @@ impl HealthSnapshot {
         let lanes = self.lanes();
         let failing: Vec<&Lane> = lanes
             .iter()
-            .filter(|lane| !lane.ok)
-            .filter(|failed| !lanes.iter().any(|other| other.supersedes(failed)))
+            .filter(|lane| !lane.ok && !lane.superseded)
             .collect();
-        let passing = lanes.iter().filter(|lane| lane.ok).count();
+        let newest_failure = failing.iter().map(|lane| lane.at_ms).max().unwrap_or(0);
+        let passing = lanes
+            .iter()
+            .filter(|lane| lane.ok && lane.at_ms.saturating_add(PASS_FRESH_MS) >= newest_failure)
+            .count();
         let turns_failing = failing.iter().any(|lane| lane.depth.is_none());
         let next = match failing
             .iter()
@@ -178,10 +207,20 @@ impl HealthSnapshot {
         if depth == TestDepth::Completion && failure.is_none() {
             self.consecutive_failures = 0;
         }
+        if failure.is_none() {
+            match depth {
+                TestDepth::Completion => self.supersede_chat_failures(true, false, |_| true),
+                TestDepth::KeyOnly => {
+                    self.supersede_chat_failures(true, true, |r| r == ReasonCode::Auth);
+                }
+                TestDepth::Catalog => {}
+            }
+        }
         self.probes.insert(
             depth,
             ProbeSignal {
                 ok: failure.is_none(),
+                superseded: false,
                 reason: failure.map(|(reason, _)| reason),
                 at_ms: now_ms,
                 latency_ms,
@@ -193,8 +232,12 @@ impl HealthSnapshot {
 
     /// Records the result of a real turn. Returns whether the status changed.
     pub fn record_turn(&mut self, failure: Option<(ReasonCode, Option<u16>)>, now_ms: u64) -> bool {
+        if failure.is_none() {
+            self.supersede_chat_failures(false, true, |r| !is_terminal(r));
+        }
         self.turn = Some(TurnSignal {
             ok: failure.is_none(),
+            superseded: false,
             reason: failure.map(|(reason, _)| reason),
             at_ms: now_ms,
         });

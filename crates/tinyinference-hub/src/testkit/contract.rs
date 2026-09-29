@@ -68,7 +68,7 @@ impl ContractFixture {
     ///
     /// # Panics
     ///
-    /// Never for a catalogue descriptor: its slug and endpoint are valid.
+    /// Never for a catalogue descriptor: its slug is valid.
     pub fn for_builtin(descriptor: &crate::descriptor::ProviderDescriptor) -> Self {
         let slug = descriptor.kind.as_str();
         match descriptor.group {
@@ -142,16 +142,17 @@ impl ContractFixture {
     ///
     /// # Panics
     ///
-    /// Never: the literals are valid.
+    /// When `slug` is not a valid [`Slug`]; the message names it.
     pub fn openai_shaped(slug: &str, base_url: &str) -> Self {
         Self {
-            slug: Slug::parse(slug).unwrap_or_else(|_| unreachable!()),
+            slug: Slug::parse(slug)
+                .unwrap_or_else(|e| panic!("`{slug}` is not a valid provider slug: {e}")),
             base_url: base_url.to_string(),
             policy: EndpointPolicy::hosted(),
             group: ProviderGroup::Cloud,
             auth: AuthStyle::Bearer,
             key: Some(Secret::new("sk-not-a-real-key")),
-            model: ModelId::parse("contract-model").unwrap_or_else(|_| unreachable!()),
+            model: ModelId::parse("contract-model").unwrap_or_else(|e| panic!("{e}")),
             listing_urls: vec![format!("{}/models", base_url.trim_end_matches('/'))],
             listing_body: Arc::new(
                 |ids| json!({"object": "list", "data": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()}),

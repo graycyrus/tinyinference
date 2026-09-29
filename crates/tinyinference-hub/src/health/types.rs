@@ -56,6 +56,11 @@ pub struct FailureNote {
 pub struct ProbeSignal {
     /// Whether the depth passed.
     pub ok: bool,
+    /// A later success in a lane that proves this failure is over cleared it
+    /// (see the fold rules). Sticky: overwriting the *other* lane later does not
+    /// bring the failure back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
     /// Why it failed.
     pub reason: Option<ReasonCode>,
     /// When, in milliseconds since the Unix epoch.
@@ -70,6 +75,9 @@ pub struct ProbeSignal {
 pub struct TurnSignal {
     /// Whether the turn succeeded.
     pub ok: bool,
+    /// A later success in a lane that proves this failure is over cleared it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
     /// Why it failed.
     pub reason: Option<ReasonCode>,
     /// When, in milliseconds since the Unix epoch.

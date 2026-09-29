@@ -152,7 +152,7 @@ impl Collector {
     }
 
     /// Folds one page in and says what to do next. Stops on: an empty page;
-    /// reaching `total`; no `total` at all; [`MAX_PAGES`].
+    /// reaching `total`; a short page when there is no `total`; [`MAX_PAGES`].
     pub fn push(&mut self, page: Page) -> NextPage {
         self.pages += 1;
         for entry in page.entries {
@@ -170,6 +170,15 @@ impl Collector {
                 total,
             },
             Some(total) if self.offset < total => NextPage::At(self.offset),
+            // No `total`, but a page as full as the limit we asked for: there may
+            // well be more, so keep reading until a short page (or the page cap)
+            // rather than presenting one page as the whole catalog. (OpenCompany
+            // stopped here; the hub does not silently truncate.)
+            None if page.raw_len >= PAGE_LIMIT && self.pages >= MAX_PAGES => NextPage::Truncated {
+                read: self.offset,
+                total: self.offset,
+            },
+            None if page.raw_len >= PAGE_LIMIT => NextPage::At(self.offset),
             _ => NextPage::Done,
         }
     }
