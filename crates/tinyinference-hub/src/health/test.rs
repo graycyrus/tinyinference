@@ -37,7 +37,13 @@ fn run(steps: &[Step]) -> ProviderHealth {
         let now = 1_000 + n as u64;
         match *step {
             Step::Probe(depth, reason) => {
-                snapshot.record_probe(depth, reason.map(|r| (r, None)), Some(5), now);
+                snapshot.record_probe(
+                    depth,
+                    reason.map(|r| (r, None)),
+                    Some(5),
+                    depth != Catalog,
+                    now,
+                );
             }
             Step::Turn(reason) => {
                 snapshot.record_turn(reason.map(|r| (r, None)), now);
@@ -300,6 +306,17 @@ fn health_the_fold_table() {
             ProviderHealth::Degraded(ReasonCode::Timeout),
         ),
         (
+            "rate-limited turns are not made Down by an unrelated timing-out catalog",
+            vec![
+                Probe(KeyOnly, None),
+                Probe(Catalog, Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::RateLimited)),
+                Turn(Some(ReasonCode::RateLimited)),
+                Turn(Some(ReasonCode::RateLimited)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
             "but not an exhausted account",
             vec![Turn(Some(ReasonCode::Quota)), Probe(KeyOnly, None)],
             ProviderHealth::Down(ReasonCode::Quota),
@@ -342,10 +359,13 @@ fn health_the_fold_table() {
 fn health_a_status_change_reports_true_and_a_repeat_reports_false() {
     let mut snapshot = HealthSnapshot::default();
     assert!(
-        snapshot.record_probe(Catalog, None, None, 10),
+        snapshot.record_probe(Catalog, None, None, false, 10),
         "Unknown to Ok"
     );
-    assert!(!snapshot.record_probe(Catalog, None, None, 20), "Ok to Ok");
+    assert!(
+        !snapshot.record_probe(Catalog, None, None, false, 20),
+        "Ok to Ok"
+    );
     assert_eq!(
         snapshot.changed_at_ms, 10,
         "the change time is when the status changed"
@@ -360,12 +380,12 @@ fn health_a_status_change_reports_true_and_a_repeat_reports_false() {
 #[test]
 fn health_signed_out_is_its_own_state_and_survives_until_something_new_is_heard() {
     let mut snapshot = HealthSnapshot::default();
-    snapshot.record_probe(Catalog, None, None, 1);
+    snapshot.record_probe(Catalog, None, None, false, 1);
     assert!(snapshot.record_signed_out(2));
     assert_eq!(snapshot.health, ProviderHealth::SignedOut);
     assert!(snapshot.probes.is_empty() && snapshot.turn.is_none());
     assert!(!snapshot.record_signed_out(3), "already signed out");
-    snapshot.record_probe(Catalog, None, None, 4);
+    snapshot.record_probe(Catalog, None, None, false, 4);
     assert_eq!(
         snapshot.health,
         ProviderHealth::Ok,
@@ -397,7 +417,7 @@ fn health_wire_forms_are_stable() {
     );
     assert_eq!(json(ProviderHealth::SignedOut), r#"{"state":"signed_out"}"#);
     let mut snapshot = HealthSnapshot::default();
-    snapshot.record_probe(Completion, fail(ReasonCode::Model), Some(9), 5);
+    snapshot.record_probe(Completion, fail(ReasonCode::Model), Some(9), true, 5);
     snapshot.record_turn(None, 6);
     let back: HealthSnapshot =
         serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
@@ -654,7 +674,7 @@ fn health_a_stored_failure_with_no_reason_is_degraded_not_ok() {
     let json = r#"{"health":{"state":"unknown"},"changed_at_ms":0,
         "probes":{"catalog":{"ok":false,"reason":null,"at_ms":1,"latency_ms":null}}}"#;
     let mut snapshot: HealthSnapshot = serde_json::from_str(json).unwrap();
-    snapshot.record_probe(TestDepth::KeyOnly, None, None, 2);
+    snapshot.record_probe(TestDepth::KeyOnly, None, None, true, 2);
     assert_eq!(
         snapshot.health,
         ProviderHealth::Degraded(ReasonCode::Unknown)
@@ -684,9 +704,9 @@ mod health_props {
     fn apply(snapshot: &mut HealthSnapshot, lane: u8, outcome: Option<u8>, now: u64) {
         let failure = outcome.map(|r| (reason(r), None));
         match lane {
-            0 => snapshot.record_probe(TestDepth::KeyOnly, failure, None, now),
-            1 => snapshot.record_probe(TestDepth::Catalog, failure, None, now),
-            2 => snapshot.record_probe(TestDepth::Completion, failure, None, now),
+            0 => snapshot.record_probe(TestDepth::KeyOnly, failure, None, true, now),
+            1 => snapshot.record_probe(TestDepth::Catalog, failure, None, false, now),
+            2 => snapshot.record_probe(TestDepth::Completion, failure, None, true, now),
             _ => snapshot.record_turn(failure, now),
         };
     }
@@ -842,11 +862,12 @@ async fn health_forgetting_never_drops_a_lock_somebody_still_holds() {
 #[test]
 fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degraded() {
     let mut recent = HealthSnapshot::default();
-    recent.record_probe(TestDepth::Catalog, None, None, 0);
+    recent.record_probe(TestDepth::Catalog, None, None, false, 0);
     recent.record_probe(
         TestDepth::Completion,
         Some((ReasonCode::Endpoint, None)),
         None,
+        true,
         5 * 60 * 1000,
     );
     // Endpoint is severe on its own only with nothing passing; a fresh pass keeps it partial.
@@ -856,11 +877,12 @@ fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degr
     );
 
     let mut old = HealthSnapshot::default();
-    old.record_probe(TestDepth::Catalog, None, None, 0);
+    old.record_probe(TestDepth::Catalog, None, None, false, 0);
     old.record_probe(
         TestDepth::Completion,
         Some((ReasonCode::Endpoint, None)),
         None,
+        true,
         31 * 60 * 1000,
     );
     assert_eq!(
@@ -870,17 +892,19 @@ fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degr
     );
 
     let mut timeout = HealthSnapshot::default();
-    timeout.record_probe(TestDepth::Catalog, None, None, 0);
+    timeout.record_probe(TestDepth::Catalog, None, None, false, 0);
     timeout.record_probe(
         TestDepth::Completion,
         Some((ReasonCode::Timeout, None)),
         None,
+        true,
         31 * 60 * 1000,
     );
     timeout.record_probe(
         TestDepth::KeyOnly,
         Some((ReasonCode::Timeout, None)),
         None,
+        true,
         31 * 60 * 1000,
     );
     assert_eq!(
@@ -894,7 +918,7 @@ fn health_a_pass_hours_older_than_the_failure_does_not_keep_a_dead_endpoint_degr
 fn health_the_superseded_flag_survives_storage_and_is_absent_when_false() {
     let mut snapshot = HealthSnapshot::default();
     snapshot.record_turn(Some((ReasonCode::Timeout, None)), 1);
-    snapshot.record_probe(TestDepth::Completion, None, None, 2);
+    snapshot.record_probe(TestDepth::Completion, None, None, true, 2);
     let text = serde_json::to_string(&snapshot).unwrap();
     assert!(text.contains("\"superseded\":true"), "{text}");
     let back: HealthSnapshot = serde_json::from_str(&text).unwrap();
@@ -915,4 +939,24 @@ async fn health_idle_locks_are_dropped_so_the_map_does_not_grow_with_every_provi
         // Idle after the update: a fresh lock has just the map's and our reference.
         assert_eq!(Arc::strong_count(&bed.tracker.lock_for(&scope(), &p)), 2);
     }
+}
+
+#[test]
+fn health_an_authenticated_catalog_pass_that_proves_the_key_clears_a_rejected_key_everywhere() {
+    let mut snapshot = HealthSnapshot::default();
+    snapshot.record_turn(Some((ReasonCode::Auth, None)), 1);
+    snapshot.record_probe(
+        TestDepth::KeyOnly,
+        Some((ReasonCode::Auth, None)),
+        None,
+        false,
+        2,
+    );
+    // A catalog pass on a public listing proves nothing about the key.
+    snapshot.record_probe(TestDepth::Catalog, None, None, false, 3);
+    assert_eq!(snapshot.health, ProviderHealth::Down(ReasonCode::Auth));
+    // One that does (an authenticated, non-public listing) clears both.
+    snapshot.record_probe(TestDepth::Catalog, None, None, true, 4);
+    assert_eq!(snapshot.health, ProviderHealth::Ok);
+    assert_eq!(snapshot.consecutive_failures, 0);
 }

@@ -246,8 +246,38 @@ impl DriverContext<'_> {
                 .strip_product_header_unless_first_party(&mut product, &request.url);
             request.headers.extend(product);
         }
+        // The policy is the authority on how long and how much: a request that
+        // was not given a body cap of its own keeps the policy's failure cap.
         request.timeout = self.policy.timeout;
+        if request.body_cap == HubRequest::DEFAULT_BODY_CAP {
+            request.body_cap = self.policy.fail_body_cap;
+        }
         request
+    }
+
+    /// How much of the list deadline is left for a read that started at
+    /// `started`.
+    ///
+    /// # Errors
+    ///
+    /// A `timeout` failure once the deadline has passed: a paged read that keeps
+    /// finding one more page must not hold its cache lock (and everyone queued
+    /// on it) for pages times the per-request timeout.
+    pub(crate) fn time_left(
+        &self,
+        started: std::time::Instant,
+    ) -> Result<std::time::Duration, HubError> {
+        let spent = self.clock.now().saturating_duration_since(started);
+        self.policy
+            .list_deadline
+            .checked_sub(spent)
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| {
+                HubError::Provider(classify_transport(
+                    TransportCondition::Timeout,
+                    "the model list took longer than the list deadline",
+                ))
+            })
     }
 
     /// Sends `request`, turning a transport failure into a hub error and a

@@ -105,6 +105,10 @@ fn apply_override(entry: &mut ModelEntry, over: &ModelOverride) {
 
 /// Merges what a registry and the operator know into `entries`.
 ///
+/// Overrides are applied first so a model an override adds (an Azure deployment)
+/// is also enriched by the registry; precedence is unchanged because the registry
+/// only fills slots nothing better supplied.
+///
 /// * a registry fills gaps only: facts the provider (or a local probe) already
 ///   supplied are kept, and everything it adds is tagged
 ///   [`CapSource::Registry`] whatever tag it arrived with;
@@ -119,6 +123,16 @@ pub fn merge_metadata(
     registry: Option<&dyn ModelMetadataSource>,
     overrides: &[ModelOverride],
 ) {
+    for over in overrides {
+        let position = entries.iter().position(|e| e.id == over.model);
+        let index = position.unwrap_or_else(|| {
+            let mut added = ModelEntry::new(over.model.clone());
+            added.origin = EntrySource::User;
+            entries.push(added);
+            entries.len() - 1
+        });
+        apply_override(&mut entries[index], over);
+    }
     if let Some(registry) = registry {
         for entry in entries.iter_mut() {
             let Some(meta) = registry.lookup(kind, entry.id.as_str()) else {
@@ -141,15 +155,5 @@ pub fn merge_metadata(
                 entry.alias_of = meta.alias_of;
             }
         }
-    }
-    for over in overrides {
-        let position = entries.iter().position(|e| e.id == over.model);
-        let index = position.unwrap_or_else(|| {
-            let mut added = ModelEntry::new(over.model.clone());
-            added.origin = EntrySource::User;
-            entries.push(added);
-            entries.len() - 1
-        });
-        apply_override(&mut entries[index], over);
     }
 }

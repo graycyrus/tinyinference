@@ -27,9 +27,7 @@ pub use cache::{
     STALE_RETENTION,
 };
 pub use merge::{ModelOverride, merge_metadata};
-pub use paged::{
-    Collector, MAX_PAGES, NextPage, PAGE_BODY_CAP, PAGE_LIMIT, Page, page_path, parse_page,
-};
+pub use paged::{Collector, MAX_PAGES, NextPage, PAGE_LIMIT, Page, page_path, parse_page};
 pub use parse::{
     ParsedCatalog, parse_lmstudio_v0, parse_ollama_tags, parse_openai, parse_openai_value,
 };

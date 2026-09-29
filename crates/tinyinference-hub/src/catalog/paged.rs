@@ -20,8 +20,6 @@ use super::types::ModelEntry;
 pub const PAGE_LIMIT: usize = 500;
 /// Most pages one read follows, so a `total` never reached cannot loop.
 pub const MAX_PAGES: usize = 20;
-/// Largest success body read for one page.
-pub const PAGE_BODY_CAP: usize = 4 * 1024 * 1024;
 
 /// The path (with query) for one page at `offset`.
 pub fn page_path(offset: usize) -> String {

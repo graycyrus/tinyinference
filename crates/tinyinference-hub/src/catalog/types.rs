@@ -16,7 +16,8 @@ pub enum EntrySource {
     /// The provider's own listing.
     #[default]
     ProviderApi,
-    /// A metadata registry added a model the provider did not list.
+    /// Reserved for a registry that supplies a model the provider did not list.
+    /// No registry ships in phase 1, so nothing produces it yet.
     Registry,
     /// The operator added it (an Azure deployment name, a fine-tune).
     User,

@@ -58,7 +58,8 @@ impl KindDriver for OpenAiCompatDriver {
         }
         let request = HubRequest::get(target.join("/key"));
         let request = cx.request(&self.descriptor, target, request);
-        cx.call(self, request).await.map(|_| ())
+        let response = cx.call(self, request).await?;
+        super::ping::require_answer(&response, "the key check")
     }
 
     async fn list_models(

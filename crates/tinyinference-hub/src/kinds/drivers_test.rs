@@ -919,3 +919,82 @@ async fn drivers_local_an_oversize_tags_list_is_reported_as_too_large_not_as_the
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn drivers_a_paged_read_is_bounded_by_the_list_deadline_across_pages() {
+    let mut bed = Bed::hosted();
+    bed.policy = EndpointPolicy::hosted().with_list_deadline(std::time::Duration::from_secs(60));
+    // Every page takes nine seconds and there is always another.
+    let pages: Vec<_> = (0..30)
+        .map(|n| {
+            page(&[format!("m{n}").as_str()], 1_000_000).after(std::time::Duration::from_secs(9))
+        })
+        .collect();
+    bed.http.route(
+        Match::prefix(format!("{MANAGED}/models")),
+        Script::Sequence(pages),
+    );
+    let s = managed_subject(Some("th-fake"));
+    let started = crate::ports::Clock::now(&bed.clock);
+    match managed()
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap_err()
+    {
+        HubError::Provider(f) => assert_eq!(f.reason, ReasonCode::Timeout),
+        other => panic!("{other:?}"),
+    }
+    let spent = crate::ports::Clock::now(&bed.clock) - started;
+    assert!(
+        spent <= std::time::Duration::from_secs(63),
+        "{spent:?}: the read stopped near its deadline, not after 20 pages"
+    );
+    assert!(bed.http.request_count() <= 7);
+}
+
+#[tokio::test]
+async fn drivers_anthropic_stops_when_the_cursor_does_not_move() {
+    let bed = Bed::hosted();
+    // A proxy that ignores `after_id` and always answers the same page.
+    bed.http.route(
+        Match::prefix("https://api.anthropic.com/v1/models"),
+        Scripted::json(
+            200,
+            &json!({"data": [{"id": "a"}], "has_more": true, "last_id": "a"}),
+        ),
+    );
+    let s = anthropic_subject();
+    let fetched = anthropic()
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap();
+    assert!(fetched.truncated);
+    assert_eq!(
+        bed.http.request_count(),
+        2,
+        "the second answer repeated the cursor, so it stopped"
+    );
+}
+
+#[test]
+fn drivers_managed_openai_shaped_normalises_the_query_and_the_descriptor_shape() {
+    for (given, expected) in [
+        ("catalog=openrouter", "?catalog=openrouter"),
+        ("?catalog=openrouter", "?catalog=openrouter"),
+        ("  ?x=1 ", "?x=1"),
+        ("", ""),
+        ("?", ""),
+    ] {
+        let d = ManagedDriver::openai_shaped(descriptor("tinyhumans").unwrap().clone(), given);
+        assert_eq!(
+            format!("{d:?}").contains(&format!("query: {expected:?}")),
+            true,
+            "{given:?} -> {d:?}"
+        );
+        assert_eq!(
+            d.descriptor().catalog,
+            CatalogShape::OpenAi,
+            "the descriptor a cache key is built from says how it is read"
+        );
+    }
+}

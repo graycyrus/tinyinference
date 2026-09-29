@@ -101,6 +101,10 @@ pub struct EndpointPolicy {
     pub catalog_cap: usize,
     /// Bytes of one page of a paged catalog.
     pub page_cap: usize,
+    /// Total time one model-list read may take across all its pages. Each
+    /// request is bounded by [`EndpointPolicy::timeout`]; this bounds the read,
+    /// which is what a cache lock and every caller queued behind it wait on.
+    pub list_deadline: Duration,
 }
 
 impl EndpointPolicy {
@@ -115,6 +119,7 @@ impl EndpointPolicy {
             fail_body_cap: 64 * 1024,
             catalog_cap: 16 * 1024 * 1024,
             page_cap: 4 * 1024 * 1024,
+            list_deadline: Duration::from_secs(60),
         }
     }
 
@@ -160,6 +165,13 @@ impl EndpointPolicy {
     #[must_use]
     pub fn with_max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
+        self
+    }
+
+    /// Sets the total time a model-list read may take across its pages.
+    #[must_use]
+    pub fn with_list_deadline(mut self, deadline: Duration) -> Self {
+        self.list_deadline = deadline;
         self
     }
 

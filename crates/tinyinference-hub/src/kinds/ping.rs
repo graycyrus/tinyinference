@@ -2,9 +2,10 @@
 
 use serde_json::json;
 
+use crate::catalog::unreadable;
 use crate::error::HubError;
 use crate::ids::ModelId;
-use crate::ports::HubRequest;
+use crate::ports::{HubRequest, HubResponse};
 use crate::taxonomy::Protocol;
 
 use crate::descriptor::{ProviderDescriptor, Quirk};
@@ -70,5 +71,25 @@ pub(super) async fn ping_by_protocol(
         }),
     );
     let request = cx.request(descriptor, target, request);
-    cx.call_with(classify, request).await.map(|_| ())
+    let response = cx.call_with(classify, request).await?;
+    require_answer(&response, "the completion")
+}
+
+/// A `2xx` is not yet an answer. A captive portal, an HTML landing page, or a
+/// gateway that wraps an upstream error as `200 {"error": ...}` all answer 200,
+/// and counting them as a pass would mark a provider that cannot serve a turn
+/// as proven. The body must be a JSON object with no `error` member. The
+/// failure is `unknown`, never `auth`: it says nothing about the credential.
+pub(super) fn require_answer(response: &HubResponse, what: &str) -> Result<(), HubError> {
+    let value: Result<serde_json::Value, _> = serde_json::from_slice(&response.body);
+    match value {
+        Ok(serde_json::Value::Object(map))
+            if !response.truncated && map.get("error").is_none_or(serde_json::Value::is_null) =>
+        {
+            Ok(())
+        }
+        _ => Err(HubError::Provider(unreadable(format!(
+            "{what} answered 2xx with a body that is not a JSON answer"
+        )))),
+    }
 }

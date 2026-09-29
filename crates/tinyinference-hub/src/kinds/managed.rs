@@ -42,11 +42,20 @@ impl ManagedDriver {
 
     /// The OpenAI-shaped listing with an extra query such as
     /// `?catalog=openrouter` (OpenHuman's backend).
-    pub fn openai_shaped(descriptor: ProviderDescriptor, query: impl Into<String>) -> Self {
+    pub fn openai_shaped(mut descriptor: ProviderDescriptor, query: impl Into<String>) -> Self {
+        // The descriptor a host builds its cache key from must say how the
+        // endpoint is really read.
+        descriptor.catalog = CatalogShape::OpenAi;
+        let query = query.into();
+        let query = query.trim().trim_start_matches('?');
         Self {
             descriptor,
             shape: CatalogShape::OpenAi,
-            query: query.into(),
+            query: if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{query}")
+            },
         }
     }
 
@@ -89,13 +98,16 @@ impl KindDriver for ManagedDriver {
         }
         let mut collector = Collector::default();
         let mut truncated = false;
+        let started = cx.clock.now();
         loop {
-            let request = cx.request(
+            let left = cx.time_left(started)?;
+            let mut request = cx.request(
                 &self.descriptor,
                 target,
                 HubRequest::get(target.join(&page_path(collector.offset())))
                     .with_body_cap(cx.policy.page_cap),
             );
+            request.timeout = request.timeout.min(left);
             let response = cx.call(self, request).await?;
             if response.truncated {
                 return Err(HubError::Provider(too_large("a model catalog page")));

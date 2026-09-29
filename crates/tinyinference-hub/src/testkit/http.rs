@@ -184,7 +184,7 @@ impl ScriptedHttp {
         self.state().refused.clone()
     }
 
-    fn record(&self, request: &HubRequest) {
+    fn record(&self, request: &HubRequest, at_wall_ms: u64) {
         let redacted: Vec<(String, String)> = request
             .headers
             .iter()
@@ -209,7 +209,7 @@ impl ScriptedHttp {
                 .as_ref()
                 .map(|b| scrub_log_text(&String::from_utf8_lossy(b))),
             credentialed: request.credentialed,
-            at_wall_ms: self.clock.wall_ms(),
+            at_wall_ms,
             raw_headers: request.headers.clone(),
         });
     }
@@ -221,22 +221,41 @@ impl ScriptedHttp {
     ) -> Result<HubResponse, HttpError> {
         let scripted = {
             let mut state = self.state();
+            // The first rule that matches answers, exhausted or not: a rule
+            // that has run dry must not quietly hand the request to an older,
+            // broader rule, or a driver making one request too many would pass.
             let position = state
                 .rules
                 .iter()
-                .position(|rule| rule.available() && rule.matcher.matches(&request));
+                .position(|rule| rule.matcher.matches(&request));
+            let url = redact_endpoint(&request.url);
+            let method = request.method;
             match position {
-                Some(index) => state.rules[index].take(),
+                Some(index) if state.rules[index].available() => state.rules[index].take(),
+                Some(_) => {
+                    drop(state);
+                    panic!("ScriptedHttp: the script for {method} {url} is exhausted");
+                }
                 None => {
-                    let url = redact_endpoint(&request.url);
-                    let method = request.method;
                     drop(state);
                     panic!("ScriptedHttp: no rule answers {method} {url}");
                 }
             }
         };
-        self.record(&request);
-        self.answer(scripted, &request, policy, request.timeout)
+        let at_wall_ms = self.clock.wall_ms();
+        let result = self.answer(scripted, &request, policy, request.timeout);
+        match &result {
+            // Refused before connecting (a resolved address the policy forbids):
+            // a real transport sends nothing, so nothing is logged as sent, and
+            // the refusal names the URL of *this* hop.
+            Err(HttpError::Policy(violation)) => {
+                self.state()
+                    .refused
+                    .push((redact_endpoint(&request.url), violation.clone()));
+            }
+            _ => self.record(&request, at_wall_ms),
+        }
+        result
     }
 
     fn answer(
@@ -326,14 +345,19 @@ impl Http for ScriptedHttp {
         policy: &EndpointPolicy,
     ) -> Result<HubResponse, HttpError> {
         let url = request.url.clone();
+        let refused_before = self.state().refused.len();
         let result = follow_redirects(request, policy, &self.headers, &self.clock, |hop| {
             let result = self.one_hop(hop, policy);
             async move { result }
         })
         .await;
-        // Every refusal (the first URL, a hop, a resolved address) is kept, so a
-        // test can assert "this was refused" without inspecting the error.
-        if let Err(HttpError::Policy(violation)) = &result {
+        // A refusal by the redirect loop itself (the first URL, a hop's target)
+        // is kept too, so a test can assert "this was refused" without
+        // inspecting the error. A resolved-address refusal was already kept by
+        // `one_hop`, under the URL of the hop that hit it.
+        if let Err(HttpError::Policy(violation)) = &result
+            && self.state().refused.len() == refused_before
+        {
             self.state()
                 .refused
                 .push((redact_endpoint(&url), violation.clone()));

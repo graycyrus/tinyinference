@@ -15,8 +15,10 @@ categories = ["api-bindings", "asynchronous"]
 # Port traits (`Http`, `CredentialStore`, `KindDriver`, ...) are async and
 # object-safe.
 async-trait = { workspace = true }
-# The catalog cache's single-flight lock and nothing else (`sync`); tests use
-# the runtime macros.
+# The library uses only `tokio::sync` (the catalog cache's single-flight lock
+# and the health tracker's per-provider lock). The workspace declares tokio with
+# its full feature set and Cargo cannot narrow an inherited dependency, so the
+# other features are enabled but unused; tests use the runtime macros.
 tokio = { workspace = true }
 # Structured, redacted diagnostics.
 tracing = { workspace = true }

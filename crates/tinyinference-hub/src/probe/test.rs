@@ -525,7 +525,7 @@ async fn probe_the_partial_outage_catalog_fails_while_the_completion_works() {
     let mut snapshot = crate::health::HealthSnapshot::default();
     for report in [&catalog, &completion] {
         let failure = report.failure.as_ref().map(|f| (f.reason, f.status));
-        snapshot.record_probe(report.depth, failure, None, 1);
+        snapshot.record_probe(report.depth, failure, None, report.proves_key, 1);
     }
     assert!(
         matches!(snapshot.health, crate::health::ProviderHealth::Degraded(_)),

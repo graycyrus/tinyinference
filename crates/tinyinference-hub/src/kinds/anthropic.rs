@@ -51,18 +51,21 @@ impl KindDriver for AnthropicDriver {
         let mut models: Vec<ModelEntry> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut after: Option<String> = None;
+        let started = cx.clock.now();
         for page in 0..MAX_PAGES {
+            let left = cx.time_left(started)?;
             let mut path = format!("/models?limit={PAGE_SIZE}");
             if let Some(cursor) = &after {
                 path.push_str("&after_id=");
                 path.push_str(&urlencode(cursor));
             }
             let url = target.join(&path);
-            let request = cx.request(
+            let mut request = cx.request(
                 &self.descriptor,
                 target,
                 HubRequest::get(url).with_body_cap(cx.policy.catalog_cap),
             );
+            request.timeout = request.timeout.min(left);
             let response = cx.call(self, request).await?;
             if response.truncated {
                 return Err(HubError::Provider(too_large("the model list")));
@@ -82,22 +85,23 @@ impl KindDriver for AnthropicDriver {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
             match (has_more, last) {
-                (true, Some(cursor)) if page + 1 < MAX_PAGES => after = Some(cursor),
-                (true, Some(_)) => {
-                    return Ok(Fetched {
-                        truncated: true,
-                        ..Fetched::new(models)
-                    });
-                }
-                // `has_more` with no cursor cannot be followed: stop rather than
-                // ask for the first page again, and say the list is a prefix.
-                (true, None) => {
-                    return Ok(Fetched {
-                        truncated: true,
-                        ..Fetched::new(models)
-                    });
-                }
                 (false, _) => break,
+                // Follow the cursor while it makes progress and the page cap
+                // allows.
+                (true, Some(cursor))
+                    if page + 1 < MAX_PAGES && after.as_deref() != Some(cursor.as_str()) =>
+                {
+                    after = Some(cursor);
+                }
+                // `has_more` with no cursor, a cursor that did not move (a proxy
+                // ignoring `after_id`), or the page cap: what was read is a
+                // prefix, and says so instead of asking again for the same page.
+                (true, _) => {
+                    return Ok(Fetched {
+                        truncated: true,
+                        ..Fetched::new(models)
+                    });
+                }
             }
         }
         Ok(Fetched::new(models))

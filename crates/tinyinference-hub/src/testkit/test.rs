@@ -68,7 +68,7 @@ async fn testkit_a_sequence_answers_in_order_then_runs_dry() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "no rule answers GET https://a.test/x")]
+#[should_panic(expected = "the script for GET https://a.test/x is exhausted")]
 async fn testkit_an_exhausted_sequence_panics_rather_than_repeating() {
     let (http, _) = http();
     http.route(
@@ -680,4 +680,57 @@ fn testkit_sub_millisecond_advances_accumulate_instead_of_vanishing() {
     assert_eq!(clock.now() - start, Duration::from_millis(400));
     assert_eq!(clock.elapsed(), Duration::from_millis(400));
     assert_eq!(clock.wall_ms() - FakeClock::START_WALL_MS, 400);
+}
+
+#[tokio::test]
+#[should_panic(expected = "is exhausted")]
+async fn testkit_an_exhausted_sequence_does_not_fall_through_to_an_older_broad_rule() {
+    let (http, _) = http();
+    http.route(
+        Match::prefix("https://a.test/"),
+        Scripted::text(200, "broad"),
+    );
+    http.route(
+        Match::get("https://a.test/x"),
+        Script::Sequence(vec![Scripted::text(503, "once")]),
+    );
+    let policy = hosted();
+    assert_eq!(
+        http.send(HubRequest::get("https://a.test/x"), &policy)
+            .await
+            .unwrap()
+            .status,
+        503
+    );
+    // The third request must not be answered by the broad 200.
+    let _ = http
+        .send(HubRequest::get("https://a.test/x"), &policy)
+        .await;
+}
+
+#[tokio::test]
+async fn testkit_a_request_refused_after_resolving_is_not_logged_as_sent_and_names_its_own_hop() {
+    let (http, _) = http();
+    let key = Secret::new("sk-not-a-real-key");
+    http.route(
+        Match::get("https://a.test/start"),
+        Scripted::redirect(302, "https://rebind.test/next"),
+    );
+    http.route(
+        Match::get("https://rebind.test/next"),
+        Scripted::text(200, "internal").resolving_to(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))]),
+    );
+    let request = HubRequest::get("https://a.test/start")
+        .with_header("x-note", "n")
+        .with_credentialed(false);
+    let refused = http.send(request, &hosted()).await;
+    assert!(matches!(refused, Err(HttpError::Policy(_))));
+    assert_eq!(http.request_count(), 1, "only the first hop was sent");
+    assert!(http.requests().iter().all(|r| !r.carried(&key)));
+    let refusals = http.refused();
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(
+        refusals[0].0, "https://rebind.test/next",
+        "the refusal names the hop that hit it"
+    );
 }

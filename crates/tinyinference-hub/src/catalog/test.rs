@@ -551,3 +551,29 @@ fn catalog_lm_studio_counts_a_damaged_embeddings_row_once_and_a_healthy_one_not_
         "only the chat row without an id is damage"
     );
 }
+
+#[test]
+fn catalog_an_override_that_adds_a_model_gets_the_registrys_facts_too() {
+    let mut entries = vec![ModelEntry::new(id("listed"))];
+    let mut over = ModelOverride::new(id("gpt-5"));
+    over.context_window = Some(1);
+    merge_metadata(
+        &mut entries,
+        &KindId::new("openai"),
+        Some(&Registry),
+        &[over],
+    );
+    let added = entries.iter().find(|e| e.id.as_str() == "gpt-5").unwrap();
+    assert_eq!(added.origin, EntrySource::User);
+    assert_eq!(
+        added.capabilities.context_window,
+        Sourced::new(Some(1), CapSource::UserOverride),
+        "the operator wins"
+    );
+    assert_eq!(
+        added.capabilities.tools.source,
+        CapSource::Registry,
+        "the registry fills what is left"
+    );
+    assert_eq!(added.input_per_1m, Some(9.0));
+}

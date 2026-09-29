@@ -816,3 +816,117 @@ async fn kinds_openrouters_fallback_to_the_public_list_is_reported_and_does_not_
             .contains(&crate::probe::ProbeNote::CatalogDoesNotProveKey)
     );
 }
+
+#[tokio::test]
+async fn kinds_a_2xx_that_is_not_a_json_answer_is_not_a_passing_ping_or_key_check() {
+    let cases = [
+        (
+            "html landing page",
+            Scripted::text(200, "<html>welcome to the hotel wifi</html>"),
+        ),
+        ("empty body", Scripted::text(200, "")),
+        ("a bare array", Scripted::text(200, "[1,2]")),
+        (
+            "a wrapped upstream error",
+            Scripted::json(200, &json!({"error": {"message": "upstream exploded"}})),
+        ),
+        (
+            "a body cut at the cap",
+            Scripted::Oversize { bytes: 999_999_999 },
+        ),
+    ];
+    for (what, answer) in cases {
+        let bed = Bed::new();
+        bed.http
+            .route(Match::prefix("https://a.test/v1/"), answer.clone());
+        let (slug, kind, key) = (
+            Slug::parse("acme").unwrap(),
+            KindId::new("custom"),
+            Secret::new("k"),
+        );
+        let t = target(
+            &slug,
+            &kind,
+            "https://a.test/v1",
+            &AuthStyle::Bearer,
+            Some(&key),
+        );
+        match OpenAiCompatDriver::custom()
+            .completion_ping(&bed.cx(), &t, &ModelId::parse("m").unwrap())
+            .await
+        {
+            Err(HubError::Provider(f)) => assert!(
+                f.reason == ReasonCode::Unknown && !f.rolls_back(ProviderGroup::Custom),
+                "{what}: {f:?}"
+            ),
+            other => panic!("{what}: {other:?}"),
+        }
+        // OpenRouter's key check reads the same way.
+        bed.http
+            .route(Match::prefix("https://openrouter.ai/api/v1/key"), answer);
+        let (slug, kind) = (
+            Slug::parse("openrouter").unwrap(),
+            KindId::new("openrouter"),
+        );
+        let t = target(
+            &slug,
+            &kind,
+            "https://openrouter.ai/api/v1",
+            &AuthStyle::Bearer,
+            Some(&key),
+        );
+        assert!(
+            driver("openrouter").key_check(&bed.cx(), &t).await.is_err(),
+            "{what}"
+        );
+    }
+    // A JSON object with a null error member is an answer.
+    let bed = Bed::new();
+    bed.http.route(
+        Match::prefix("https://a.test/v1/"),
+        Scripted::json(200, &json!({"error": null, "choices": []})),
+    );
+    let (slug, kind) = (Slug::parse("acme").unwrap(), KindId::new("custom"));
+    let t = target(&slug, &kind, "https://a.test/v1", &AuthStyle::Bearer, None);
+    assert!(
+        OpenAiCompatDriver::custom()
+            .completion_ping(&bed.cx(), &t, &ModelId::parse("m").unwrap())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn kinds_requests_without_a_size_of_their_own_take_the_policys_failure_cap() {
+    let mut bed = Bed::new();
+    bed.policy.fail_body_cap = 1234;
+    let (slug, kind, key) = (
+        Slug::parse("acme").unwrap(),
+        KindId::new("custom"),
+        Secret::new("k"),
+    );
+    let t = target(
+        &slug,
+        &kind,
+        "https://a.test/v1",
+        &AuthStyle::Bearer,
+        Some(&key),
+    );
+    let d = OpenAiCompatDriver::custom();
+    let ping = bed.cx().request(
+        d.descriptor(),
+        &t,
+        HubRequest::post_json("https://a.test/v1/x", &json!({})),
+    );
+    assert_eq!(ping.body_cap, 1234);
+    let listing = bed.cx().request(
+        d.descriptor(),
+        &t,
+        HubRequest::get("https://a.test/v1/models").with_body_cap(99_000_000),
+    );
+    assert_eq!(
+        listing.body_cap, 99_000_000,
+        "a catalog read keeps the cap it asked for"
+    );
+    assert_eq!(ping.timeout, bed.policy.timeout);
+}
