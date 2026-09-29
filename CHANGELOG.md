@@ -8,9 +8,12 @@
   taxonomy and catalogue (managed, 26 cloud, 5 local, 2 CLI kinds), a typed
   `HubError` with stable reason codes and a vendor-body classifier that
   separates spend caps from rate limits, redacting `Secret` and validated
-  identifiers, and the endpoint SSRF policy and credential-scrubbing helpers.
-  Nothing else in the workspace depends on it and no existing public item
-  changed.
+  identifiers, the endpoint SSRF policy and credential-scrubbing helpers, and
+  the engine: host ports with in-memory defaults, an ordered credential chain,
+  tolerant model-list parsers and a scope-partitioned cache, three-depth
+  probing, folded provider health, kind drivers with a contract suite, and a
+  no-socket `testing` kit (`FakeClock`, `ScriptedHttp`). Nothing else in the
+  workspace depends on it and no existing public item changed.
 - `tinyinference-image`: the `ImageGenerator` trait, `OpenRouterImageGenerator`
   (`POST /images`), `MockImageGenerator`, media-reference standards
   (URL, `data:` URL, bytes, local path → OpenRouter content parts), aspect-ratio,

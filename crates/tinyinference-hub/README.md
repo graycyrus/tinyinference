@@ -11,9 +11,9 @@ answer. It is a **leaf**: it depends on `tinyinference-llm` (plus small
 utility crates), nothing depends on it, and no existing public item of any
 other crate changed.
 
-This first slice ships the foundations. Probing, model catalogs, health,
-operations, route resolution and the `ChatModel` factory follow in later slices
-(see "Roadmap").
+This build ships the foundations and the engine: ports, credential chain, model
+catalogs, probing, health and the kind drivers. Operations, route resolution and
+the `ChatModel` factory follow (see "Roadmap").
 
 ## What is here
 
@@ -25,6 +25,12 @@ operations, route resolution and the `ChatModel` factory follow in later slices
 | `taxonomy` | Groups, transports, protocols, `AuthStyle`, catalog shapes, `TestDepth`, `CliKind`, and `LocalRuntime`, which reconciles the four local-runtime enums by conversion. |
 | `catalogue`, `descriptor` | Every built-in kind as data: the managed kind, 26 cloud providers, 5 local runtimes, 2 CLI logins, with typed quirks. `ProviderRecord` is a configured instance and has no credential field. |
 | `policy`, `endpoint` | `EndpointPolicy` presets (`hosted`, `desktop`, `local_only`), `check_endpoint`, `check_address`, redirect checks, `HeaderPolicy`, and endpoint credential refusal, redaction and scrubbing. |
+| `ports` | The traits a host implements: `CredentialStore` (get/set/delete; an error is never "no key"), `ConfigStore` (compare-and-swap), `Http`, `Clock`, plus defaulted `HealthStore`, `EventSink`, `TokenSource`, `EnvSource`, `Detector`. `ports::memory` has in-memory implementations; `follow_redirects` is the policy-enforcing redirect loop an `Http` implementation shares. |
+| `credential` | The ordered `CredentialChain` of `CredentialSource`s (store, environment, static, rotating token, legacy slot). It reports which source answered, re-reads on every call, stops on an unreadable source instead of falling through, and treats a blank value as "not here". |
+| `catalog` | Tolerant listing parsers (OpenAI shape including a bare array, Ollama `/api/tags`, LM Studio `/api/v0/models`, the TinyHumans paged envelope), the `CatalogCache` (endpoint-keyed, scope-partitioned when a credential was sent, a `401`/`403` never remembered, single-flight, stale on error), and `merge_metadata` for registries and operator overrides. |
+| `probe`, `health` | `run_probe` at three depths (`KeyOnly`, `Catalog`, `Completion`) with a `ProbeReport`; `HealthTracker` folds probes and real turns (`Outcome`) into `ProviderHealth` (`Ok`, `Degraded`, `Down`, `SignedOut`, ...). |
+| `kinds` | `KindDriver` and the built-in drivers (OpenAI-compatible, Anthropic, managed, local, CLI) plus the `DriverRegistry`. A host adds a kind with `register`. |
+| `testkit` (feature `testing`) | `FakeClock`, `ScriptedHttp` (applies the same endpoint policy a real `Http` must), and `run_contract`, the suite every driver passes. No sockets, no wall clock. |
 
 ## Guarantees
 
@@ -64,11 +70,13 @@ assert_eq!(failure.retry, Retry::Never);
 | Feature | Effect |
 |---|---|
 | `local-bridge` | `From`/`TryFrom` between `LocalRuntime` and `tinyinference-local`'s `LocalProviderKind` and `LocalAiProvider`. |
-| `cli`, `oauth`, `testing`, `http-reqwest` | Reserved for later slices; they add nothing yet. `oauth` will only ever define types: no OAuth flow is enabled. |
+| `testing` | The `testkit` module: `FakeClock`, `ScriptedHttp`, `ContractFixture`, `run_contract`. Always available to this crate's own tests. |
+| `cli`, `oauth`, `http-reqwest` | `cli` adds the `ProcessSpawner` port (readiness arrives later). `oauth` and `http-reqwest` are reserved and add nothing yet; `oauth` will only ever define types: no OAuth flow is enabled. |
 
 ## Known limits of this slice
 
-- `Http` is a port the host implements (a later slice). Turn traffic uses
+- `Http` is a port the host implements; the hub ships the scripted double, not a
+  socket implementation (`http-reqwest` is reserved). Turn traffic uses
   `tinyinference-llm`'s own transport, so the hub's per-hop redirect and
   IP-pinning guarantees will cover probes and catalogs, not chat turns.
 - The managed kind's endpoint, catalog shape and query are supplied by the host,
@@ -76,10 +84,10 @@ assert_eq!(failure.retry, Retry::Never);
 
 ## Roadmap
 
-1. Foundations (this crate as it stands): errors, secrets, identifiers,
-   taxonomy, catalogue, endpoint policy.
-2. Engine: ports, credential chain, model catalog cache, probing, health, kind
-   drivers.
+1. Foundations (done): errors, secrets, identifiers, taxonomy, catalogue,
+   endpoint policy.
+2. Engine (this crate as it stands): ports, credential chain, model catalog
+   cache, probing, health, kind drivers, contract suite.
 3. Operations: config with compare-and-swap, the operation set, route
    resolution, import readers, the `ChatModel` factory, and the no-socket
    simulation harness.

@@ -22,6 +22,12 @@
 //! * [`catalogue`] and [`descriptor`]: every built-in kind as data.
 //! * [`policy`] and [`endpoint`]: the SSRF policy and endpoint credential
 //!   redaction.
+//! * [`ports`]: the traits a host implements, and in-memory defaults.
+//! * [`credential`]: the ordered credential chain and its sources.
+//! * [`catalog`]: listing parsers, the safe model-list cache, metadata merge.
+//! * [`probe`] and [`health`]: three-depth probing and folded provider health.
+//! * [`kinds`]: the kind drivers and the registry.
+//! * `testkit` (feature `testing`): the no-socket simulation kit.
 //!
 //! # Guarantees
 //!
@@ -48,8 +54,9 @@
 //! # Features
 //!
 //! `default = []`. `local-bridge` adds conversions to `tinyinference-local`'s
-//! enums. `cli`, `oauth`, `testing` and `http-reqwest` are reserved for later
-//! milestones and currently add nothing; `oauth` will only ever define types.
+//! enums. `testing` exposes the simulation kit and `cli` adds the
+//! `ProcessSpawner` port. `oauth` and `http-reqwest` are reserved and currently
+//! add nothing; `oauth` will only ever define types.
 
 pub mod catalog;
 pub mod catalogue;
