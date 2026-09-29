@@ -16,9 +16,10 @@ categories = ["api-bindings", "asynchronous"]
 # object-safe.
 async-trait = { workspace = true }
 # The library uses only `tokio::sync` (the catalog cache's single-flight lock
-# and the health tracker's per-provider lock). The workspace declares tokio with
-# its full feature set and Cargo cannot narrow an inherited dependency, so the
-# other features are enabled but unused; tests use the runtime macros.
+# and the health tracker's per-provider lock). The workspace enables tokio's
+# `macros`, `process`, `rt-multi-thread`, `sync` and `time`, and Cargo cannot
+# narrow an inherited dependency, so the others are enabled but unused by this
+# crate; its tests use the runtime macros.
 tokio = { workspace = true }
 # Structured, redacted diagnostics.
 tracing = { workspace = true }

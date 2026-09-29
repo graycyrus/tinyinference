@@ -274,20 +274,25 @@ fn health_the_fold_table() {
             ProviderHealth::Degraded(ReasonCode::Timeout),
         ),
         (
-            "a passing key-only probe clears a rejected key",
+            "a passing key-only probe does not hide a chat lane's rejected key",
             vec![Turn(Some(ReasonCode::Auth)), Probe(KeyOnly, None)],
-            ok,
+            ProviderHealth::Down(ReasonCode::Auth),
         ),
         (
-            "a key-only re-test also ends the run of failed turns",
+            "nor does a passing catalog hide a completion probe's rejected key",
             vec![
-                Turn(Some(ReasonCode::Auth)),
-                Turn(Some(ReasonCode::Auth)),
-                Turn(Some(ReasonCode::Auth)),
-                Probe(KeyOnly, None),
-                Turn(Some(ReasonCode::Timeout)),
+                Probe(Completion, Some(ReasonCode::Auth)),
+                Probe(Catalog, None),
             ],
-            ProviderHealth::Degraded(ReasonCode::Timeout),
+            ProviderHealth::Down(ReasonCode::Auth),
+        ),
+        (
+            "and a working completion clears an exhausted account on the shallow lanes",
+            vec![
+                Probe(KeyOnly, Some(ReasonCode::Quota)),
+                Probe(Completion, None),
+            ],
+            ok,
         ),
         (
             "a working completion clears a rejected key on the catalog lane",
@@ -958,7 +963,7 @@ async fn health_idle_locks_are_dropped_so_the_map_does_not_grow_with_every_provi
 }
 
 #[test]
-fn health_an_authenticated_catalog_pass_that_proves_the_key_clears_a_rejected_key_everywhere() {
+fn health_a_key_proving_pass_clears_rejected_keys_only_in_the_lanes_shallower_than_itself() {
     let mut snapshot = HealthSnapshot::default();
     snapshot.record_turn(Some((ReasonCode::Auth, None)), None, 1);
     snapshot.record_probe(
@@ -971,8 +976,14 @@ fn health_an_authenticated_catalog_pass_that_proves_the_key_clears_a_rejected_ke
     // A catalog pass on a public listing proves nothing about the key.
     snapshot.record_probe(TestDepth::Catalog, None, None, false, 3);
     assert_eq!(snapshot.health, ProviderHealth::Down(ReasonCode::Auth));
-    // One that does (an authenticated, non-public listing) clears both.
+    // One that does clears the key-only lane's rejection, but the chat lane's
+    // (deeper) rejection stands: a key that lists can still be refused a chat.
     snapshot.record_probe(TestDepth::Catalog, None, None, true, 4);
+    assert!(snapshot.probes[&TestDepth::KeyOnly].superseded);
+    assert!(!snapshot.turn.unwrap().superseded);
+    assert_eq!(snapshot.health, ProviderHealth::Down(ReasonCode::Auth));
+    // Only a completion, the deepest check, clears it, and ends the run of failures.
+    snapshot.record_probe(TestDepth::Completion, None, None, true, 5);
     assert_eq!(snapshot.health, ProviderHealth::Ok);
     assert_eq!(snapshot.consecutive_failures, 0);
 }
@@ -1002,4 +1013,71 @@ async fn health_a_turns_latency_is_kept_in_the_snapshot() {
         .unwrap();
     let after = serde_json::to_string(&bed.tracker.snapshot(&s, &p).await.unwrap().turn).unwrap();
     assert!(!after.contains("latency_ms"), "{after}");
+}
+
+#[tokio::test]
+async fn health_a_cancelled_waiter_does_not_leak_the_providers_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_trait::async_trait;
+
+    use crate::ports::HealthStore;
+
+    /// A store whose first `put` waits for a release.
+    #[derive(Debug)]
+    struct Gated {
+        inner: MemoryHealth,
+        released: AtomicBool,
+        gate: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl HealthStore for Gated {
+        async fn get(&self, s: &ScopeKey, p: &Slug) -> Result<Option<HealthSnapshot>, PortError> {
+            self.inner.get(s, p).await
+        }
+        async fn put(&self, s: &ScopeKey, p: &Slug, h: HealthSnapshot) -> Result<(), PortError> {
+            if !self.released.load(Ordering::SeqCst) {
+                self.gate.notified().await;
+            }
+            self.inner.put(s, p, h).await
+        }
+        async fn forget(&self, s: &ScopeKey, p: &Slug) -> Result<(), PortError> {
+            self.inner.forget(s, p).await
+        }
+    }
+
+    let store = Arc::new(Gated {
+        inner: MemoryHealth::new(),
+        released: AtomicBool::new(false),
+        gate: tokio::sync::Notify::new(),
+    });
+    let tracker = Arc::new(HealthTracker::new(
+        store.clone(),
+        Arc::new(FakeClock::new()),
+        Arc::new(MemoryEvents::new()),
+    ));
+    let spawn = |tracker: Arc<HealthTracker>| {
+        tokio::spawn(async move {
+            tracker
+                .record_outcome(&scope(), &slug(), &failure(ReasonCode::Timeout))
+                .await
+        })
+    };
+    let first = spawn(tracker.clone());
+    tokio::task::yield_now().await;
+    // A second update queues on the provider's lock behind the first...
+    let second = spawn(tracker.clone());
+    tokio::task::yield_now().await;
+    // ...and is cancelled (a timed-out request) while it waits.
+    second.abort();
+    let _ = second.await;
+    store.released.store(true, Ordering::SeqCst);
+    store.gate.notify_one();
+    first.await.unwrap().unwrap();
+    assert_eq!(
+        tracker.kept_locks(),
+        0,
+        "the cancelled waiter's lease still gave the lock back"
+    );
 }

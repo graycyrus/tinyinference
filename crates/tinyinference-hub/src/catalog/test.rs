@@ -577,3 +577,25 @@ fn catalog_an_override_that_adds_a_model_gets_the_registrys_facts_too() {
     );
     assert_eq!(added.input_per_1m, Some(9.0));
 }
+
+#[test]
+fn catalog_a_listing_whose_every_row_is_unusable_is_not_a_healthy_empty_one() {
+    let parsed = parse_openai(&body(
+        &json!({"data": [{"model": "x"}, {"id": 5}, {"id": "has space"}]}),
+    ))
+    .unwrap();
+    assert!(parsed.entries.is_empty() && parsed.skipped == 3);
+    let failure = parsed.into_usable().unwrap_err();
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    assert!(!failure.reason.destroys_credential());
+    // Genuinely empty (nothing pulled) is still fine, and so is a mixed list.
+    assert!(
+        parse_openai(br#"{"data":[]}"#)
+            .unwrap()
+            .into_usable()
+            .unwrap()
+            .is_empty()
+    );
+    let mixed = parse_openai(&body(&json!({"data": [{"id": "ok"}, {"id": 5}]}))).unwrap();
+    assert_eq!(mixed.into_usable().unwrap().len(), 1);
+}

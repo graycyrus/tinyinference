@@ -151,6 +151,9 @@ pub enum InputField {
     Key,
     /// A stored configuration document.
     Config,
+    /// A name inside a provider record (a legacy field must not shadow one of
+    /// the record's own).
+    RecordField,
 }
 
 impl fmt::Display for InputField {
@@ -163,6 +166,7 @@ impl fmt::Display for InputField {
             Self::Kind => "a provider kind",
             Self::Key => "a key",
             Self::Config => "the configuration",
+            Self::RecordField => "a record field",
         })
     }
 }

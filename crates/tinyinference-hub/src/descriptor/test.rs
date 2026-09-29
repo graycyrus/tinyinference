@@ -499,3 +499,25 @@ fn extract_credentials_leaves_a_non_string_credential_in_place_so_the_load_still
     assert!(extracted.is_empty());
     assert!(serde_json::from_value::<ProviderRecord>(cleaned).is_err());
 }
+
+#[test]
+fn every_serialised_field_of_a_record_is_in_the_reserved_list() {
+    // Ties the hand-kept list to the struct: a field added to `ProviderRecord`
+    // and forgotten in the list would let a legacy entry write a duplicate key.
+    let mut r = record();
+    r.model = Some(ModelId::parse("m").unwrap());
+    r.auth_override = Some(AuthStyle::Bearer);
+    r.legacy.insert("extra".into(), json!(1));
+    let value = serde_json::to_value(&r).unwrap();
+    for key in value.as_object().unwrap().keys() {
+        if key == "extra" {
+            continue;
+        }
+        let mut clash = record();
+        clash.legacy.insert(key.clone(), json!("x"));
+        assert!(
+            clash.validate().is_err(),
+            "`{key}` is serialised by the record but not reserved"
+        );
+    }
+}

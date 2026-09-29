@@ -96,7 +96,7 @@ pub fn parse_page(body: &str) -> Result<Page, ProviderFailure> {
             "the model catalog envelope carried no `data` list",
         ));
     };
-    let entries = rows
+    let entries: Vec<ModelEntry> = rows
         .iter()
         .filter_map(|row| {
             let id = ModelId::parse(&field(row, "id")?).ok()?;
@@ -123,6 +123,12 @@ pub fn parse_page(body: &str) -> Result<Page, ProviderFailure> {
             Some(entry)
         })
         .collect();
+    if entries.is_empty() && !rows.is_empty() {
+        return Err(unreadable(format!(
+            "the model catalog page had {} rows and none was usable",
+            rows.len()
+        )));
+    }
     let total = data
         .get("total")
         .and_then(Value::as_u64)

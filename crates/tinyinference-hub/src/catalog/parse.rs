@@ -14,6 +14,9 @@ use crate::ids::ModelId;
 use super::types::ModelEntry;
 
 /// A parsed listing and how much of it could not be used.
+///
+/// A listing that had rows but yielded **no** usable entry is not a healthy
+/// empty catalog: see [`ParsedCatalog::into_usable`].
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedCatalog {
@@ -38,6 +41,28 @@ pub(crate) fn unreadable(text: impl AsRef<str>) -> ProviderFailure {
 /// models. `Unknown`, not `Auth`, for the same reason as [`unreadable`].
 pub(crate) fn too_large(what: &str) -> ProviderFailure {
     unreadable(format!("{what} is larger than the size cap")).with_truncated(true)
+}
+
+impl ParsedCatalog {
+    /// The entries, unless the listing had rows and none were usable (every row
+    /// lacked an id, or had one that is not a valid model id). That is a
+    /// gateway answering in a shape this parser cannot read, not a provider with
+    /// no models, and reporting it as a passing empty listing would mark a
+    /// provider that cannot list anything as proven.
+    ///
+    /// # Errors
+    ///
+    /// A `ProviderFailure` (`unknown`, never retried) naming how many rows were
+    /// unusable.
+    pub fn into_usable(self) -> Result<Vec<ModelEntry>, ProviderFailure> {
+        if self.entries.is_empty() && self.skipped > 0 {
+            return Err(unreadable(format!(
+                "the model list had {} rows and none was usable",
+                self.skipped
+            )));
+        }
+        Ok(self.entries)
+    }
 }
 
 fn json(body: &[u8]) -> Result<Value, ProviderFailure> {

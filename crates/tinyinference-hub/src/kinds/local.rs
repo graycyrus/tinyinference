@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::catalog::{Fetched, parse_lmstudio_v0, parse_ollama_tags, too_large};
+use crate::catalog::{Fetched, ParsedCatalog, parse_lmstudio_v0, parse_ollama_tags, too_large};
 use crate::descriptor::ProviderDescriptor;
 use crate::error::{HubError, ProviderFailure, ReasonCode};
 use crate::taxonomy::LocalRuntime;
@@ -94,8 +94,10 @@ impl KindDriver for LocalDriver {
                 .await
             {
                 Ok(response) if !response.truncated => {
-                    if let Ok(parsed) = parse_lmstudio_v0(&response.body) {
-                        return Ok(Fetched::new(parsed.entries));
+                    if let Ok(entries) =
+                        parse_lmstudio_v0(&response.body).and_then(ParsedCatalog::into_usable)
+                    {
+                        return Ok(Fetched::new(entries));
                     }
                 }
                 Ok(_) => {}
@@ -120,7 +122,9 @@ impl KindDriver for LocalDriver {
                     return Err(HubError::Provider(too_large("the tags list")));
                 }
                 let parsed = parse_ollama_tags(&response.body).map_err(HubError::Provider)?;
-                Ok(Fetched::new(parsed.entries))
+                Ok(Fetched::new(
+                    parsed.into_usable().map_err(HubError::Provider)?,
+                ))
             }
             other => other,
         }

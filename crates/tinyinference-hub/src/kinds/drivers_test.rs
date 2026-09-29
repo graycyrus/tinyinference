@@ -997,3 +997,50 @@ fn drivers_managed_openai_shaped_normalises_the_query_and_the_descriptor_shape()
         );
     }
 }
+
+#[tokio::test]
+async fn drivers_a_200_listing_with_no_usable_rows_fails_the_read_instead_of_passing_empty() {
+    let bed = Bed::hosted();
+    bed.http.route(
+        Match::prefix("https://api.anthropic.com/v1/models"),
+        Scripted::json(
+            200,
+            &json!({"data": [{"model": "no-id"}], "has_more": false}),
+        ),
+    );
+    let s = anthropic_subject();
+    match anthropic()
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap_err()
+    {
+        HubError::Provider(f) => assert_eq!(f.reason, ReasonCode::Unknown),
+        other => panic!("{other:?}"),
+    }
+    // The generic driver and a probe read it the same way: not proven, not healthy.
+    let bed = Bed::hosted();
+    bed.http.route(
+        Match::prefix("https://a.test/v1/models"),
+        Scripted::json(200, &json!({"data": [{"x": 1}]})),
+    );
+    let (slug, kind) = (Slug::parse("acme").unwrap(), KindId::new("custom"));
+    let auth = AuthStyle::Bearer;
+    let key = Secret::new("k");
+    let t = Target::new(
+        &slug,
+        &kind,
+        ProviderGroup::Custom,
+        "https://a.test/v1",
+        &auth,
+    )
+    .with_credential(&key);
+    let report = crate::probe::run_probe(
+        &bed.cx(),
+        &OpenAiCompatDriver::custom(),
+        &t,
+        crate::taxonomy::TestDepth::Catalog,
+    )
+    .await
+    .unwrap();
+    assert!(!report.ok() && !report.proves_key);
+}

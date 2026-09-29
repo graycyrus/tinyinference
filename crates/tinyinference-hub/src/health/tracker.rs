@@ -67,22 +67,26 @@ impl HealthTracker {
         Arc::clone(locks.entry((scope.clone(), slug.clone())).or_default())
     }
 
-    /// Gives back a lock taken with [`HealthTracker::lock_for`], and drops the
-    /// map's entry when nobody else holds or waits on it (the map's copy and
-    /// `lock` are the two references when idle). Without this the map would keep
-    /// one entry per provider ever seen; dropping it under a waiter would hand
-    /// the next caller a fresh lock and let two updates run at once.
-    fn release_lock(&self, scope: &ScopeKey, slug: &Slug, lock: Arc<Mutex<()>>) {
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (scope.clone(), slug.clone());
-        if Arc::strong_count(&lock) <= 2
-            && locks.get(&key).is_some_and(|held| Arc::ptr_eq(held, &lock))
-        {
-            locks.remove(&key);
+    /// Takes the provider's lock as a lease that gives it back on drop. Without
+    /// giving it back the map would keep one entry per provider ever seen;
+    /// dropping the entry under a waiter would hand the next caller a fresh lock
+    /// and let two updates run at once. Doing it in `Drop` means a cancelled
+    /// future (a timed-out request) cannot skip it.
+    fn lease(&self, scope: &ScopeKey, slug: &Slug) -> LockLease<'_> {
+        LockLease {
+            tracker: self,
+            key: (scope.clone(), slug.clone()),
+            lock: self.lock_for(scope, slug),
         }
+    }
+
+    /// How many provider locks are currently kept (tests only).
+    #[cfg(test)]
+    pub(super) fn kept_locks(&self) -> usize {
+        self.locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// The snapshot for a provider (an empty one when nothing was recorded).
@@ -121,23 +125,8 @@ impl HealthTracker {
     where
         F: FnOnce(&mut HealthSnapshot, u64) -> bool,
     {
-        let lock = self.lock_for(scope, slug);
-        let result = self.update_locked(&lock, scope, slug, apply).await;
-        self.release_lock(scope, slug, lock);
-        result
-    }
-
-    async fn update_locked<F>(
-        &self,
-        lock: &Mutex<()>,
-        scope: &ScopeKey,
-        slug: &Slug,
-        apply: F,
-    ) -> Result<ProviderHealth, HubError>
-    where
-        F: FnOnce(&mut HealthSnapshot, u64) -> bool,
-    {
-        let _serial = lock.lock().await;
+        let lease = self.lease(scope, slug);
+        let _serial = lease.lock.lock().await;
         let mut snapshot = self.snapshot(scope, slug).await?;
         let from = snapshot.health;
         let changed = apply(&mut snapshot, self.clock.wall_ms());
@@ -232,17 +221,38 @@ impl HealthTracker {
     ///
     /// [`HubError::StoreUnreadable`] when the health store fails.
     pub async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), HubError> {
-        let lock = self.lock_for(scope, slug);
-        let forgotten = {
-            let _serial = lock.lock().await;
-            self.store
-                .forget(scope, slug)
-                .await
-                .map_err(|e| e.into_hub(PortName::Health))
-        };
-        // The provider is gone; its lock goes too, if nobody else holds it.
-        self.release_lock(scope, slug, lock);
-        forgotten
+        let lease = self.lease(scope, slug);
+        let _serial = lease.lock.lock().await;
+        self.store
+            .forget(scope, slug)
+            .await
+            .map_err(|e| e.into_hub(PortName::Health))
+    }
+}
+
+/// A provider's lock, given back to the tracker's map when dropped (even if the
+/// future holding it is cancelled) if nobody else holds or waits on it: the
+/// map's copy and the lease's own are the two references when idle.
+struct LockLease<'a> {
+    tracker: &'a HealthTracker,
+    key: (ScopeKey, Slug),
+    lock: Arc<Mutex<()>>,
+}
+
+impl Drop for LockLease<'_> {
+    fn drop(&mut self) {
+        let mut locks = self
+            .tracker
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(&self.lock) <= 2
+            && locks
+                .get(&self.key)
+                .is_some_and(|held| Arc::ptr_eq(held, &self.lock))
+        {
+            locks.remove(&self.key);
+        }
     }
 }
 

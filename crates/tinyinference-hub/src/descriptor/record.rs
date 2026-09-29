@@ -130,10 +130,6 @@ impl TryFrom<ProviderRecordWire> for ProviderRecord {
     }
 }
 
-/// The first credential-shaped field name anywhere in `value`, looking through
-/// nested objects and arrays (a secret under `tiers` or `headers` is still a
-/// secret on the record). Depth-bounded so a hostile file cannot recurse
-/// without limit.
 /// The names of the record's own serialised fields.
 const KNOWN_FIELDS: &[&str] = &[
     "id",
@@ -148,6 +144,10 @@ const KNOWN_FIELDS: &[&str] = &[
     "origin",
 ];
 
+/// The first credential-shaped field name anywhere in `value`, looking through
+/// nested objects and arrays (a secret under `tiers` or `headers` is still a
+/// secret on the record). Depth-bounded so a hostile file cannot recurse
+/// without limit.
 pub(crate) fn find_credential_field(value: &serde_json::Value, depth: usize) -> Option<String> {
     // Fail closed: a structure nested deeper than the bound is refused rather
     // than assumed clean, so a credential cannot hide under nine levels.
@@ -216,7 +216,7 @@ impl ProviderRecord {
             // can read.
             if KNOWN_FIELDS.contains(&name.as_str()) {
                 return Err(InvalidInput::Reserved {
-                    field: InputField::Key,
+                    field: InputField::RecordField,
                     value: name.clone(),
                 });
             }

@@ -21,8 +21,9 @@
 //!   are never cleared by anything but their own next result: a working
 //!   completion says nothing about a broken listing, and that partial outage is
 //!   exactly what `Degraded` is for;
-//! * a probe that **proves the key** (key-only, completion, or an authenticated
-//!   non-public catalog) clears a rejected-key failure in every lane;
+//! * a probe that **proves the key** clears a rejected-key failure in the lanes
+//!   shallower than itself (key-only, catalog, completion); only a completion,
+//!   the deepest check, also clears the real-turn lane and a quota failure;
 //! * a passing lane counts as evidence the provider is alive only if it is not
 //!   more than 30 minutes older than the newest failure.
 
@@ -146,17 +147,25 @@ impl HealthSnapshot {
         }
     }
 
-    /// A probe that proved the key clears every failing lane whose reason was a
-    /// rejected credential, except the lane being overwritten right now.
-    fn supersede_rejected_key(&mut self, passed: TestDepth) {
+    /// A probe that passed clears the terminal failures of the lanes it is *at
+    /// least as deep as*, for the reasons `matches` accepts: a deeper lane's
+    /// explicit rejection is never hidden by a shallower pass (a scope-restricted
+    /// key can list models and still be refused a completion), but a passing
+    /// completion, the deepest check, speaks for every lane above it.
+    ///
+    /// Depth order is key-only, catalog, completion; a real turn is as deep as a
+    /// completion. The lane being overwritten right now is left to its own
+    /// result.
+    fn clear_shallower_lanes(&mut self, passed: TestDepth, matches: impl Fn(ReasonCode) -> bool) {
         for (depth, signal) in &mut self.probes {
-            if *depth != passed && !signal.ok && signal.reason == Some(ReasonCode::Auth) {
+            if *depth < passed && !signal.ok && signal.reason.is_some_and(&matches) {
                 signal.superseded = true;
             }
         }
-        if let Some(signal) = self.turn.as_mut()
+        if passed == TestDepth::Completion
+            && let Some(signal) = self.turn.as_mut()
             && !signal.ok
-            && signal.reason == Some(ReasonCode::Auth)
+            && signal.reason.is_some_and(&matches)
         {
             signal.superseded = true;
             self.consecutive_failures = 0;
@@ -243,11 +252,14 @@ impl HealthSnapshot {
         if failure.is_none() {
             if depth == TestDepth::Completion {
                 // A deliberate completion that passed ends a run of failed turns,
-                // terminal or not.
+                // terminal or not, and shows the key and the account work to the
+                // shallower lanes too.
                 self.supersede_chat_failures(true, false, |_| true);
-            }
-            if proves_key {
-                self.supersede_rejected_key(depth);
+                self.clear_shallower_lanes(depth, is_terminal);
+            } else if proves_key {
+                // A key-proving pass at a shallower depth clears only rejected
+                // keys, and only in lanes shallower than itself.
+                self.clear_shallower_lanes(depth, |reason| reason == ReasonCode::Auth);
             }
         }
         self.probes.insert(

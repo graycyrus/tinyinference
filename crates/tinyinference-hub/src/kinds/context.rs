@@ -136,21 +136,22 @@ impl<'a> Target<'a> {
 impl Target<'_> {
     /// The endpoint without a trailing slash, a query or a fragment.
     pub fn base(&self) -> &str {
-        let base = self.base_url.trim();
-        let end = base.find(['?', '#']).unwrap_or(base.len());
+        let base = self.without_fragment();
+        let end = base.find('?').unwrap_or(base.len());
         base[..end].trim_end_matches('/')
     }
 
-    /// The endpoint's own query string (`api-version=preview` on an Azure
-    /// resource), without the `?`.
-    fn base_query(&self) -> Option<&str> {
+    /// The endpoint without a fragment: the part a request can carry.
+    fn without_fragment(&self) -> &str {
         let base = self.base_url.trim();
-        let start = base.find('?')? + 1;
-        let end = base
-            .find('#')
-            .filter(|hash| *hash >= start)
-            .unwrap_or(base.len());
-        Some(&base[start..end]).filter(|query| !query.is_empty())
+        &base[..base.find('#').unwrap_or(base.len())]
+    }
+
+    /// The endpoint's own query string (`api-version=preview` on an Azure
+    /// resource), without the `?`. A `?` inside a fragment is not a query.
+    fn base_query(&self) -> Option<&str> {
+        let (_, query) = self.without_fragment().split_once('?')?;
+        Some(query).filter(|query| !query.is_empty())
     }
 
     /// `path` (with an optional `?query`) appended to the endpoint, keeping the

@@ -40,7 +40,9 @@ pub(super) fn read_listing(response: &HubResponse) -> Result<Fetched, HubError> 
         return Err(HubError::Provider(too_large("the model list")));
     }
     let parsed = parse_openai(&response.body).map_err(HubError::Provider)?;
-    Ok(Fetched::new(parsed.entries))
+    Ok(Fetched::new(
+        parsed.into_usable().map_err(HubError::Provider)?,
+    ))
 }
 
 #[async_trait]

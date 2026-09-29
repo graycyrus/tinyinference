@@ -212,3 +212,13 @@ fn paged_no_total_and_pages_that_never_end_stop_at_the_page_cap_and_say_so() {
         }
     );
 }
+
+#[test]
+fn paged_a_page_whose_every_row_is_unusable_is_an_error_not_an_empty_page() {
+    let body = json!({"success": true, "data": {"total": 2, "data": [{"nope": 1}, {"id": 7}]}})
+        .to_string();
+    let failure = parse_page(&body).unwrap_err();
+    assert_eq!(failure.reason, ReasonCode::Unknown);
+    // An empty page is still the end of the read.
+    assert!(parse_page(&json!({"success": true, "data": {"data": []}}).to_string()).is_ok());
+}

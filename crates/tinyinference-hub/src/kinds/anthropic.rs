@@ -73,7 +73,8 @@ impl KindDriver for AnthropicDriver {
             let envelope: Value = serde_json::from_slice(&response.body)
                 .map_err(|_| HubError::Provider(unreadable("the model list was not JSON")))?;
             let parsed = parse_openai_value(&envelope).map_err(HubError::Provider)?;
-            for entry in parsed.entries {
+            let entries = parsed.into_usable().map_err(HubError::Provider)?;
+            for entry in entries {
                 if seen.insert(entry.id.clone()) {
                     models.push(entry);
                 }

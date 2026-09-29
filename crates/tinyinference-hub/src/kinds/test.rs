@@ -971,3 +971,48 @@ async fn kinds_a_chain_of_fallbacks_shares_one_list_deadline() {
         "the whole read stopped at the deadline"
     );
 }
+
+#[tokio::test]
+async fn kinds_azure_resources_on_an_older_api_version_keep_max_tokens() {
+    for (base, expect) in [
+        (
+            "https://r.openai.azure.com/openai/deployments/d?api-version=2024-06-01",
+            "max_tokens",
+        ),
+        (
+            "https://r.openai.azure.com/openai/deployments/d?api-version=2024-08-01-preview",
+            "max_tokens",
+        ),
+        (
+            "https://r.openai.azure.com/openai/deployments/d?api-version=2024-09-01-preview",
+            "max_completion_tokens",
+        ),
+        (
+            "https://r.openai.azure.com/openai/deployments/d?api-version=2025-03-01",
+            "max_completion_tokens",
+        ),
+        (
+            "https://r.openai.azure.com/openai/v1?api-version=preview",
+            "max_completion_tokens",
+        ),
+        (
+            "https://r.openai.azure.com/openai/v1",
+            "max_completion_tokens",
+        ),
+    ] {
+        let bed = Bed::new();
+        bed.http.route(
+            Match::prefix("https://r.openai.azure.com/"),
+            Scripted::json(200, &json!({})),
+        );
+        let (slug, kind) = (Slug::parse("azure").unwrap(), KindId::new("custom"));
+        let t = target(&slug, &kind, base, &AuthStyle::Bearer, None);
+        OpenAiCompatDriver::custom()
+            .completion_ping(&bed.cx(), &t, &ModelId::parse("d").unwrap())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(bed.http.requests()[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body[expect], 16, "{base}");
+    }
+}

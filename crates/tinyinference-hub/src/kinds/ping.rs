@@ -25,13 +25,40 @@ const PING_PROMPT: &str = "ping";
 /// says so, or an endpoint that is OpenAI itself or an Azure OpenAI resource
 /// however the operator reached it (a `custom` row pointed at api.openai.com
 /// gets the same 400 on its reasoning models).
-fn wants_max_completion_tokens(descriptor: &ProviderDescriptor, base: &str) -> bool {
+fn wants_max_completion_tokens(descriptor: &ProviderDescriptor, target: &Target<'_>) -> bool {
     // Only the OpenAI chat wire has the field; Anthropic's native `/messages`
     // requires `max_tokens` wherever it is hosted.
     descriptor.protocol != Protocol::AnthropicMessages
         && (descriptor.has_quirk(Quirk::MaxCompletionTokens)
-            || crate::catalogue::is_azure_endpoint(base)
-            || endpoint_host(base).is_some_and(|host| host == "api.openai.com"))
+            // The full endpoint, not `base()`: the `api-version` is in its query.
+            || azure_accepts_max_completion_tokens(target.base_url)
+            || endpoint_host(target.base()).is_some_and(|host| host == "api.openai.com"))
+}
+
+/// Azure OpenAI took `max_completion_tokens` from `api-version`
+/// `2024-09-01-preview`; an older pinned version rejects it (a 400), so those
+/// stay on `max_tokens`. No `api-version` at all is the versionless `/openai/v1`
+/// surface, which is current.
+fn azure_accepts_max_completion_tokens(base: &str) -> bool {
+    if !crate::catalogue::is_azure_endpoint(base) {
+        return false;
+    }
+    let version = url::Url::parse(base.trim()).ok().and_then(|url| {
+        url.query_pairs()
+            .find(|(name, _)| name.eq_ignore_ascii_case("api-version"))
+            .map(|(_, value)| value.into_owned())
+    });
+    match version {
+        None => true,
+        // `2024-09-01`, `2024-09-01-preview`, `v1`, `preview`: compare the date
+        // prefix when there is one; a non-date name is a current alias.
+        Some(version) => match version.get(..10) {
+            Some(date) if date.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+                date >= "2024-09-01"
+            }
+            _ => true,
+        },
+    }
 }
 
 /// Pings with the protocol the descriptor names.
@@ -57,7 +84,7 @@ pub(super) async fn ping_by_protocol(
     // OpenAI-compatible servers know only `max_tokens`, and Anthropic's native
     // API requires it, so the switch is its own descriptor quirk (not a proxy
     // such as the Responses-API flag, which says something else).
-    let limit_field = if wants_max_completion_tokens(descriptor, target.base()) {
+    let limit_field = if wants_max_completion_tokens(descriptor, target) {
         "max_completion_tokens"
     } else {
         "max_tokens"
