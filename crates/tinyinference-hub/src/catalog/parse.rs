@@ -165,12 +165,14 @@ pub fn parse_lmstudio_v0(body: &[u8]) -> Result<ParsedCatalog, ProviderFailure> 
     let Some(rows) = value.get("data").and_then(Value::as_array) else {
         return Err(unreadable("the model list had no `data` list"));
     };
-    let mut parsed = finish(rows.iter().map(|row| {
+    // Embedding rows are expected (they cannot chat), so they are not damage and
+    // are filtered out before rows are counted.
+    let chat_rows = rows.iter().filter(|row| {
+        !text(row, "type").is_some_and(|kind| kind.eq_ignore_ascii_case("embeddings"))
+    });
+    let parsed = finish(chat_rows.map(|row| {
         let id = text(row, "id")?;
         let kind = text(row, "type").unwrap_or("llm");
-        if kind.eq_ignore_ascii_case("embeddings") {
-            return None;
-        }
         let mut entry = ModelEntry::new(ModelId::parse(id).ok()?);
         if let Some(window) = row.get("max_context_length").and_then(Value::as_u64) {
             entry.capabilities.context_window = Sourced::new(Some(window), CapSource::LocalProbe);
@@ -184,11 +186,5 @@ pub fn parse_lmstudio_v0(body: &[u8]) -> Result<ParsedCatalog, ProviderFailure> 
         }
         Some(entry)
     }));
-    // Embedding rows are expected; do not report them as damage.
-    let embeddings = rows
-        .iter()
-        .filter(|r| text(r, "type").is_some_and(|t| t.eq_ignore_ascii_case("embeddings")))
-        .count();
-    parsed.skipped = parsed.skipped.saturating_sub(embeddings);
     Ok(parsed)
 }

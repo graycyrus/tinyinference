@@ -326,7 +326,7 @@ impl Http for ScriptedHttp {
         policy: &EndpointPolicy,
     ) -> Result<HubResponse, HttpError> {
         let url = request.url.clone();
-        let result = follow_redirects(request, policy, &self.headers, |hop| {
+        let result = follow_redirects(request, policy, &self.headers, &self.clock, |hop| {
             let result = self.one_hop(hop, policy);
             async move { result }
         })

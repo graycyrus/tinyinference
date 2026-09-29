@@ -535,3 +535,19 @@ proptest! {
         let _ = parse_lmstudio_v0(text.as_bytes());
     }
 }
+
+#[test]
+fn catalog_lm_studio_counts_a_damaged_embeddings_row_once_and_a_healthy_one_not_at_all() {
+    let parsed = parse_lmstudio_v0(&body(&json!({"data": [
+        {"id": "chat", "type": "llm"},
+        {"id": "embed-ok", "type": "embeddings"},
+        {"type": "embeddings"},
+        {"type": "llm"}
+    ]})))
+    .unwrap();
+    assert_eq!(ids(&parsed), ["chat"]);
+    assert_eq!(
+        parsed.skipped, 1,
+        "only the chat row without an id is damage"
+    );
+}

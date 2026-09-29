@@ -191,6 +191,10 @@ async fn drivers_anthropic_has_more_without_a_cursor_stops_instead_of_looping() 
         .await
         .unwrap();
     assert_eq!(ids(&fetched), ["a"]);
+    assert!(
+        fetched.truncated,
+        "a catalog that says there is more but cannot be followed is a prefix"
+    );
     assert_eq!(bed.http.request_count(), 1);
 }
 

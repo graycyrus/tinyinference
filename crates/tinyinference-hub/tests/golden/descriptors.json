@@ -46,7 +46,8 @@
     "needs_key": true,
     "protocol": "open_ai_chat",
     "quirks": [
-      "responses_api"
+      "responses_api",
+      "max_completion_tokens"
     ],
     "test_depths": [
       "catalog",

@@ -65,16 +65,19 @@ impl Lane {
 
     /// Whether a success in this lane says a failure in `other` is over.
     ///
-    /// A rejected credential or an exhausted account is never superseded by a
-    /// success elsewhere: those are `Down` "whatever else passes", and only the
-    /// operator acting (which resets the snapshot) or the same lane passing
-    /// again clears them.
+    /// A rejected credential or an exhausted account is `Down` "whatever else
+    /// passes", so a passive success (a real turn) never clears one. Only a
+    /// **deliberate** completion probe does: the operator re-testing after
+    /// fixing the key or topping up is fresh, current evidence, and without it a
+    /// `Down` provider that is no longer routed to would never produce another
+    /// turn to clear itself. (Changing the key resets the snapshot outright.)
     fn supersedes(&self, other: &Lane) -> bool {
+        let deliberate = self.depth == Some(TestDepth::Completion);
         self.ok
             && self.at_ms >= other.at_ms
             && self.is_chat()
             && other.is_chat()
-            && !other.reason.is_some_and(is_terminal)
+            && (deliberate || !other.reason.is_some_and(is_terminal))
     }
 }
 
@@ -154,6 +157,12 @@ impl HealthSnapshot {
         latency_ms: Option<u64>,
         now_ms: u64,
     ) -> bool {
+        // A passing completion shows chat works again, so an earlier run of
+        // failed turns is over: without this the counter would survive the
+        // recovery and one later blip would read as the fourth in a row.
+        if depth == TestDepth::Completion && failure.is_none() {
+            self.consecutive_failures = 0;
+        }
         self.probes.insert(
             depth,
             ProbeSignal {

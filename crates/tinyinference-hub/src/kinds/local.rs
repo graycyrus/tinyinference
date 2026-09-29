@@ -49,10 +49,6 @@ fn origin_of(base: &str) -> String {
     base.strip_suffix("/v1").unwrap_or(base).to_string()
 }
 
-/// Whether a failed request means "this listing is not here" (so the next one
-/// is worth trying) rather than "nothing is listening" or "the key was
-/// refused". Only a `404` does: a transport failure of any kind is not retried
-/// against a second path.
 /// A body that was answered but is not a listing: `unknown` with no status and
 /// not cut at a cap. Only meaningful for a failure that came from *parsing* an
 /// answer, never from the transport (whose `Other` failures look the same).
@@ -60,6 +56,10 @@ fn is_unreadable(failure: &ProviderFailure) -> bool {
     failure.status.is_none() && failure.reason == ReasonCode::Unknown && !failure.truncated
 }
 
+/// Whether a failed request means "this listing is not here" (so the next one
+/// is worth trying) rather than "nothing is listening" or "the key was
+/// refused". Only a `404` does: a transport failure of any kind is not retried
+/// against a second path.
 fn is_missing(failure: &ProviderFailure) -> bool {
     failure.status == Some(404)
 }

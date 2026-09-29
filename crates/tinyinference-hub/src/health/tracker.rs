@@ -1,5 +1,6 @@
 //! [`HealthTracker`]: health fed by probes and by real turns.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,9 @@ use crate::ports::{Clock, EventSink, HealthStore, HubEvent};
 use crate::probe::ProbeReport;
 
 use super::types::{HealthSnapshot, ProviderHealth};
+
+/// One async lock per `(scope, provider)`.
+type LockMap = HashMap<(ScopeKey, Slug), Arc<Mutex<()>>>;
 
 /// How a real turn went, reported by the host after every turn so a provider
 /// that passes probes but fails turns does not look green.
@@ -29,13 +33,14 @@ pub enum Outcome {
 
 /// Reads and updates health snapshots and tells the host when a status changes.
 ///
-/// Updates are serialised in-process so two turns finishing together cannot lose
-/// one another's signal.
+/// Updates are serialised in-process **per provider** so two turns finishing
+/// together cannot lose one another's signal, while a slow store round trip for
+/// one provider never delays another's.
 pub struct HealthTracker {
     store: Arc<dyn HealthStore>,
     clock: Arc<dyn Clock>,
     events: Arc<dyn EventSink>,
-    write: Mutex<()>,
+    locks: std::sync::Mutex<LockMap>,
 }
 
 impl HealthTracker {
@@ -49,8 +54,17 @@ impl HealthTracker {
             store,
             clock,
             events,
-            write: Mutex::new(()),
+            locks: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The lock for one provider, created on first use.
+    fn lock_for(&self, scope: &ScopeKey, slug: &Slug) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry((scope.clone(), slug.clone())).or_default())
     }
 
     /// The snapshot for a provider (an empty one when nothing was recorded).
@@ -89,7 +103,8 @@ impl HealthTracker {
     where
         F: FnOnce(&mut HealthSnapshot, u64) -> bool,
     {
-        let _serial = self.write.lock().await;
+        let lock = self.lock_for(scope, slug);
+        let _serial = lock.lock().await;
         let mut snapshot = self.snapshot(scope, slug).await?;
         let from = snapshot.health;
         let changed = apply(&mut snapshot, self.clock.wall_ms());
@@ -180,11 +195,20 @@ impl HealthTracker {
     ///
     /// [`HubError::StoreUnreadable`] when the health store fails.
     pub async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), HubError> {
-        let _serial = self.write.lock().await;
-        self.store
+        let lock = self.lock_for(scope, slug);
+        let _serial = lock.lock().await;
+        let forgotten = self
+            .store
             .forget(scope, slug)
             .await
-            .map_err(|e| e.into_hub(PortName::Health))
+            .map_err(|e| e.into_hub(PortName::Health));
+        // The provider is gone; its lock need not outlive it. (A caller already
+        // waiting holds its own `Arc`, so nothing is lost by dropping the entry.)
+        self.locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(scope.clone(), slug.clone()));
+        forgotten
     }
 }
 

@@ -1068,3 +1068,140 @@ mod cache_props {
         }
     }
 }
+
+#[tokio::test]
+async fn cache_a_rejected_credential_stops_the_old_list_being_served_as_if_nothing_happened() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.ok(&["old"])
+        })
+        .await
+        .unwrap();
+    // The Refresh button meets a 401: the key was revoked.
+    let error = cache
+        .read(key("a", true), true, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Auth, Some(401)))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Auth);
+    // The next ordinary read asks again (and hears the same), instead of being
+    // handed the revoked key's list as `Cached`.
+    let again = cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Auth, Some(401)))
+        })
+        .await;
+    assert!(again.is_err(), "the revoked key's list is gone");
+    assert_eq!(counter.calls(), 3);
+}
+
+#[tokio::test]
+async fn cache_pruning_never_drops_a_slot_that_a_read_is_using() {
+    let (built, clock) = cache();
+    let cache = Arc::new(built);
+    let counter = Counter::new();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let hot = || {
+        CatalogKey::new(
+            &scope("a"),
+            &provider(),
+            true,
+            "https://busy.test/v1",
+            CatalogShape::OpenAi,
+        )
+    };
+    let mut readers = Vec::new();
+    for _ in 0..2 {
+        let (cache, counter, gate) = (cache.clone(), counter.clone(), gate.clone());
+        readers.push(tokio::spawn(async move {
+            cache
+                .read(hot(), false, move || async move {
+                    gate.notified().await;
+                    counter.ok(&["m"]).await
+                })
+                .await
+        }));
+    }
+    tokio::task::yield_now().await;
+    // Fill the cache past its cap while one fetch is in flight and one caller
+    // is queued behind it.
+    for n in 0..(MAX_SLOTS + 20) {
+        // Distinct use times, so the oldest (the busy slot) is the first candidate.
+        clock.advance(Duration::from_secs(1));
+        let k = CatalogKey::new(
+            &scope("x"),
+            &provider(),
+            false,
+            &format!("https://e{n}.test/v1"),
+            CatalogShape::OpenAi,
+        );
+        cache
+            .read(k, false, || async { Ok(Fetched::new(models(&["m"]))) })
+            .await
+            .unwrap();
+    }
+    // A third caller arrives after the pruning: it must queue behind the same
+    // slot, not make a slot of its own and a second request.
+    {
+        let (cache, counter, gate) = (cache.clone(), counter.clone(), gate.clone());
+        readers.push(tokio::spawn(async move {
+            cache
+                .read(hot(), false, move || async move {
+                    gate.notified().await;
+                    counter.ok(&["m"]).await
+                })
+                .await
+        }));
+    }
+    tokio::task::yield_now().await;
+    gate.notify_waiters();
+    gate.notify_one();
+    gate.notify_one();
+    for reader in readers {
+        assert!(reader.await.unwrap().is_ok());
+    }
+    assert_eq!(
+        counter.calls(),
+        1,
+        "the in-flight slot survived pruning, so single flight held"
+    );
+}
+
+#[tokio::test]
+async fn cache_slots_that_only_ever_saw_rejections_age_out_too() {
+    let (cache, clock) = cache();
+    for n in 0..MAX_SLOTS {
+        let k = CatalogKey::new(
+            &scope("x"),
+            &provider(),
+            true,
+            &format!("https://bad{n}.test/v1"),
+            CatalogShape::OpenAi,
+        );
+        let _ = cache
+            .read(k, false, || async {
+                Err(failure(ReasonCode::Auth, Some(401)))
+            })
+            .await;
+    }
+    assert_eq!(cache.len(), MAX_SLOTS);
+    clock.advance(STALE_RETENTION + Duration::from_secs(1));
+    let k = CatalogKey::new(
+        &scope("x"),
+        &provider(),
+        false,
+        "https://new.test/v1",
+        CatalogShape::OpenAi,
+    );
+    cache
+        .read(k, false, || async { Ok(Fetched::new(models(&["m"]))) })
+        .await
+        .unwrap();
+    assert_eq!(cache.len(), 1);
+}

@@ -88,9 +88,15 @@ impl KindDriver for AnthropicDriver {
                         truncated: true,
                     });
                 }
-                // `has_more` with no cursor cannot be followed; stop rather
-                // than ask for the first page again.
-                _ => break,
+                // `has_more` with no cursor cannot be followed: stop rather than
+                // ask for the first page again, and say the list is a prefix.
+                (true, None) => {
+                    return Ok(Fetched {
+                        models,
+                        truncated: true,
+                    });
+                }
+                (false, _) => break,
             }
         }
         Ok(Fetched::new(models))

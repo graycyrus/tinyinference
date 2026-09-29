@@ -8,6 +8,7 @@ use crate::policy::{
     EndpointPolicy, HeaderPolicy, check_endpoint_with_credential, check_redirect, resolve_redirect,
 };
 
+use super::clock::Clock;
 use super::http::{HttpError, HubRequest, HubResponse, Method};
 
 /// Whether a status is a redirect that carries a target.
@@ -30,6 +31,10 @@ fn is_redirect(status: u16) -> bool {
 /// * `301`, `302` and `303` turn a `POST` into a `GET` without a body; `307`
 ///   and `308` keep both.
 ///
+/// * the request's timeout is a **total** for the chain: every hop is given the
+///   time left on `clock`, and a chain that has spent it all is
+///   [`HttpError::Timeout`].
+///
 /// A redirect without a usable `Location` is returned as the response it is:
 /// the caller classifies the 3xx as an endpoint problem.
 ///
@@ -41,6 +46,7 @@ pub async fn follow_redirects<F, Fut>(
     mut request: HubRequest,
     policy: &EndpointPolicy,
     headers: &HeaderPolicy,
+    clock: &dyn Clock,
     mut send_one: F,
 ) -> Result<HubResponse, HttpError>
 where
@@ -50,7 +56,16 @@ where
     check_endpoint_with_credential(&request.url, policy, request.credentialed)
         .map_err(|refusal| HttpError::Policy(PolicyViolation::from(refusal)))?;
     let mut hop = 0usize;
+    // `HubRequest::timeout` is the total for the whole chain, redirects
+    // included: each hop gets what is left, so a chain of slow hops cannot hold
+    // a probe (or the cache lock queued behind it) for several timeouts.
+    let (started, total) = (clock.now(), request.timeout);
     loop {
+        let spent = clock.now().saturating_duration_since(started);
+        let Some(remaining) = total.checked_sub(spent).filter(|left| !left.is_zero()) else {
+            return Err(HttpError::Timeout);
+        };
+        request.timeout = remaining;
         let mut response = send_one(request.clone()).await?;
         if !is_redirect(response.status) {
             response.url = request.url;

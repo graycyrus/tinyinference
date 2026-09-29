@@ -25,6 +25,10 @@ pub enum Quirk {
     CatalogKeylessTwin,
     /// The only row with the Responses API (OpenAI; limitation 1).
     ResponsesApi,
+    /// The chat endpoint wants `max_completion_tokens` and rejects the older
+    /// `max_tokens` on its reasoning models (OpenAI). Every other row takes
+    /// `max_tokens`; Anthropic's native API requires it.
+    MaxCompletionTokens,
     /// Attribution headers are expected (OpenRouter).
     AttributionHeaders,
     /// An authenticated listing path exists (`/models/user`) with a public

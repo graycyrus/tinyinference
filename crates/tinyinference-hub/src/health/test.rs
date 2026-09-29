@@ -202,9 +202,33 @@ fn health_the_fold_table() {
             ProviderHealth::Down(ReasonCode::Auth),
         ),
         (
-            "an exhausted account is not hidden by a later passing completion",
-            vec![Turn(Some(ReasonCode::Quota)), Probe(Completion, None)],
+            "a re-test that passes clears a turn's rejected key (the operator fixed it)",
+            vec![Turn(Some(ReasonCode::Auth)), Probe(Completion, None)],
+            ok,
+        ),
+        (
+            "a re-test that passes clears an exhausted account",
+            vec![
+                Probe(Completion, Some(ReasonCode::Quota)),
+                Probe(Completion, None),
+            ],
+            ok,
+        ),
+        (
+            "a passing catalog does not clear an exhausted account",
+            vec![Turn(Some(ReasonCode::Quota)), Probe(Catalog, None)],
             ProviderHealth::Down(ReasonCode::Quota),
+        ),
+        (
+            "one blip after a recovery is degraded, not the fourth failure in a row",
+            vec![
+                Turn(Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+                Probe(Completion, None),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
         ),
         (
             "a failed turn is not superseded by an older completion pass",
@@ -639,4 +663,82 @@ mod health_props {
             prop_assert_ne!(snapshot.health, ProviderHealth::Unknown);
         }
     }
+}
+
+#[tokio::test]
+async fn health_a_slow_store_for_one_provider_does_not_hold_up_another() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_trait::async_trait;
+
+    use crate::ports::HealthStore;
+
+    /// A store whose `put` for one slug never finishes until released.
+    #[derive(Debug)]
+    struct Gated {
+        inner: MemoryHealth,
+        slow: Slug,
+        released: AtomicBool,
+        gate: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl HealthStore for Gated {
+        async fn get(&self, s: &ScopeKey, p: &Slug) -> Result<Option<HealthSnapshot>, PortError> {
+            self.inner.get(s, p).await
+        }
+        async fn put(&self, s: &ScopeKey, p: &Slug, h: HealthSnapshot) -> Result<(), PortError> {
+            if *p == self.slow && !self.released.load(Ordering::SeqCst) {
+                self.gate.notified().await;
+            }
+            self.inner.put(s, p, h).await
+        }
+        async fn forget(&self, s: &ScopeKey, p: &Slug) -> Result<(), PortError> {
+            self.inner.forget(s, p).await
+        }
+    }
+
+    let slow = slug();
+    let fast = Slug::parse("groq").unwrap();
+    let store = Arc::new(Gated {
+        inner: MemoryHealth::new(),
+        slow: slow.clone(),
+        released: AtomicBool::new(false),
+        gate: tokio::sync::Notify::new(),
+    });
+    let clock = FakeClock::new();
+    let tracker = Arc::new(HealthTracker::new(
+        store.clone(),
+        Arc::new(clock),
+        Arc::new(MemoryEvents::new()),
+    ));
+    let slow_call = {
+        let (tracker, slow) = (tracker.clone(), slow.clone());
+        tokio::spawn(async move {
+            tracker
+                .record_outcome(&scope(), &slow, &failure(ReasonCode::Timeout))
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    // The other provider completes while the first is stuck in its store.
+    let status = tracker
+        .record_outcome(
+            &scope(),
+            &fast,
+            &Outcome::Ok {
+                latency: Duration::ZERO,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, ProviderHealth::Ok);
+    store.released.store(true, Ordering::SeqCst);
+    store.gate.notify_one();
+    slow_call.await.unwrap().unwrap();
+    tracker.forget(&scope(), &slow).await.unwrap();
+    assert_eq!(
+        tracker.health(&scope(), &slow).await.unwrap(),
+        ProviderHealth::Unknown
+    );
 }

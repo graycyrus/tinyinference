@@ -275,10 +275,18 @@ impl CatalogCache {
         Arc::clone(slot)
     }
 
-    /// Makes room: drops slots whose data is past the stale retention, then, if
-    /// still full, the least recently used tenth.
+    /// Makes room: drops slots that were not used for the stale retention, then,
+    /// if still full, the least recently used tenth.
+    ///
+    /// A slot somebody holds (a read in flight, possibly mid-fetch) is never
+    /// dropped: removing it would let the next caller create a fresh slot and
+    /// lose the single-flight guarantee. A slot that only ever saw rejections has
+    /// no data, so it ages by when it was last used.
     fn prune(slots: &mut HashMap<CatalogKey, Arc<Slot>>, now: Instant) {
         slots.retain(|_, slot| {
+            if Arc::strong_count(slot) > 1 {
+                return true;
+            }
             let state = slot.state();
             let newest = state
                 .entry
@@ -286,12 +294,14 @@ impl CatalogCache {
                 .map(|e| e.at)
                 .into_iter()
                 .chain(state.failure.as_ref().map(|(at, _)| *at))
+                .chain(state.last_used)
                 .max();
             newest.is_none_or(|at| now.saturating_duration_since(at) < STALE_RETENTION)
         });
         if slots.len() >= MAX_SLOTS {
             let mut by_use: Vec<(CatalogKey, Option<Instant>)> = slots
                 .iter()
+                .filter(|(_, slot)| Arc::strong_count(slot) == 1)
                 .map(|(key, slot)| (key.clone(), slot.state().last_used))
                 .collect();
             by_use.sort_by_key(|(_, used)| *used);
@@ -430,7 +440,13 @@ impl CatalogCache {
             // show).
             Err(HubError::Provider(failure)) if is_credential_failure(&failure) => {
                 let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                slot.state().rejection = Some((generation, failure.clone()));
+                {
+                    let mut state = slot.state();
+                    state.rejection = Some((generation, failure.clone()));
+                    // "A bad key must show": the list read with a key the provider
+                    // now refuses is not served as if nothing happened.
+                    state.entry = None;
+                }
                 Err(HubError::Provider(failure))
             }
             Err(HubError::Provider(failure)) => {

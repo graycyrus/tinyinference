@@ -40,8 +40,9 @@ pub(super) async fn ping_by_protocol(
     // OpenAI's newer (reasoning) models reject `max_tokens` with a 400 and want
     // `max_completion_tokens`, which OpenAI accepts for every chat model. Other
     // OpenAI-compatible servers know only `max_tokens`, and Anthropic's native
-    // API requires it, so the switch is per catalogue row.
-    let limit_field = if descriptor.has_quirk(Quirk::ResponsesApi) {
+    // API requires it, so the switch is its own descriptor quirk (not a proxy
+    // such as the Responses-API flag, which says something else).
+    let limit_field = if descriptor.has_quirk(Quirk::MaxCompletionTokens) {
         "max_completion_tokens"
     } else {
         "max_tokens"

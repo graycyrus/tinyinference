@@ -398,17 +398,23 @@ async fn drive(
 ) -> (Result<HubResponse, HttpError>, Vec<HubRequest>) {
     let sent = Mutex::new(Vec::<HubRequest>::new());
     let cursor = Mutex::new(0usize);
-    let result = follow_redirects(request, policy, &HeaderPolicy::builtin(), |hop| {
-        sent.lock().unwrap().push(hop.clone());
-        let mut i = cursor.lock().unwrap();
-        let (status, location) = answers[(*i).min(answers.len() - 1)];
-        *i += 1;
-        let mut response = HubResponse::new(status, "", hop.url.clone());
-        if let Some(location) = location {
-            response.headers.push(("location".into(), location.into()));
-        }
-        async move { Ok(response) }
-    })
+    let result = follow_redirects(
+        request,
+        policy,
+        &HeaderPolicy::builtin(),
+        &SystemClock,
+        |hop| {
+            sent.lock().unwrap().push(hop.clone());
+            let mut i = cursor.lock().unwrap();
+            let (status, location) = answers[(*i).min(answers.len() - 1)];
+            *i += 1;
+            let mut response = HubResponse::new(status, "", hop.url.clone());
+            if let Some(location) = location {
+                response.headers.push(("location".into(), location.into()));
+            }
+            async move { Ok(response) }
+        },
+    )
     .await;
     let sent = sent.into_inner().unwrap();
     (result, sent)
@@ -605,6 +611,7 @@ async fn ports_a_send_error_from_the_transport_is_passed_through() {
         HubRequest::get("https://api.acme.test/models"),
         &EndpointPolicy::hosted(),
         &HeaderPolicy::builtin(),
+        &SystemClock,
         |_| async { Err(HttpError::Timeout) },
     )
     .await;
@@ -677,6 +684,7 @@ mod redirect_props {
                 request,
                 &policy,
                 &HeaderPolicy::builtin(),
+                &SystemClock,
                 |hop| {
                     sent.lock().unwrap().push(hop.clone());
                     let mut i = cursor.lock().unwrap();
@@ -713,4 +721,45 @@ mod redirect_props {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn ports_the_timeout_is_a_total_for_the_whole_redirect_chain() {
+    use std::time::Duration;
+
+    use crate::testkit::FakeClock;
+
+    let clock = FakeClock::new();
+    let policy = EndpointPolicy::hosted();
+    let request = HubRequest::get("https://a.test/0").with_timeout(Duration::from_secs(10));
+    let seen = Mutex::new(Vec::<Duration>::new());
+    let hops = Mutex::new(0u32);
+    let result = follow_redirects(request, &policy, &HeaderPolicy::builtin(), &clock, |hop| {
+        seen.lock().unwrap().push(hop.timeout);
+        // Every hop takes four fake seconds and redirects again.
+        clock.advance(Duration::from_secs(4));
+        let mut n = hops.lock().unwrap();
+        *n += 1;
+        let mut response = HubResponse::new(302, "", hop.url.clone());
+        response
+            .headers
+            .push(("location".into(), format!("https://a.test/{n}")));
+        async move { Ok(response) }
+    })
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        HttpError::Timeout,
+        "the third hop found nothing left"
+    );
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(
+        seen,
+        [
+            Duration::from_secs(10),
+            Duration::from_secs(6),
+            Duration::from_secs(2)
+        ],
+        "each hop gets what the chain has left"
+    );
 }

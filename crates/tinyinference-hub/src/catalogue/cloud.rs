@@ -65,7 +65,7 @@ fn cloud_rows() -> Vec<CloudRow> {
             "OpenAI",
             "https://api.openai.com/v1",
             Some("sk-..."),
-            &[Quirk::ResponsesApi],
+            &[Quirk::ResponsesApi, Quirk::MaxCompletionTokens],
         ),
         CloudRow {
             slug: "anthropic",

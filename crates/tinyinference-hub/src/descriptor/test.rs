@@ -163,6 +163,10 @@ fn quirks_serialise_snake_case() {
         serde_json::to_value(Quirk::ResponsesApi).unwrap(),
         json!("responses_api")
     );
+    assert_eq!(
+        serde_json::to_value(Quirk::MaxCompletionTokens).unwrap(),
+        json!("max_completion_tokens")
+    );
 }
 
 proptest::proptest! {

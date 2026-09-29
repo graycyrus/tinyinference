@@ -653,13 +653,17 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
                     body["model"], "contract-model",
                     "[{n}] the ping names the model"
                 );
-                let limit = body["max_tokens"]
-                    .as_u64()
-                    .or_else(|| body["max_completion_tokens"].as_u64());
+                let (field, other) =
+                    if descriptor.has_quirk(crate::descriptor::Quirk::MaxCompletionTokens) {
+                        ("max_completion_tokens", "max_tokens")
+                    } else {
+                        ("max_tokens", "max_completion_tokens")
+                    };
                 assert!(
-                    limit.is_some_and(|t| t <= 16),
-                    "[{n}] a ping is one small completion"
+                    body[field].as_u64().is_some_and(|t| t <= 16),
+                    "[{n}] a ping is one small completion in `{field}`"
                 );
+                assert!(body.get(other).is_none(), "[{n}] and never in `{other}`");
             }
         }
     }
