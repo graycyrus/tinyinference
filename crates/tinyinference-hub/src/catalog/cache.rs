@@ -4,21 +4,29 @@
 //! * **keyed on the endpoint, never on the credential.** A credential must not
 //!   become a map key: hashing one to key a cache puts a derivative of it in
 //!   process memory next to the data it guards;
-//! * **partitioned by scope whenever a credential was sent.** An endpoint may
-//!   publish an entitlement-scoped listing, so a base-URL-only key would hand
-//!   one tenant's list to the next. A keyless read is a public property of the
-//!   endpoint and stays shared;
-//! * **a `401`/`403` is never remembered.** It is a fact about the key
-//!   presented, not about the endpoint; memoising it would make a second tenant
-//!   read the first's rejection and make a tenant that just rotated a bad key
-//!   wait out the memo;
+//!   (The key is the endpoint, the shape, and, when a credential was sent, the
+//!   scope and the provider.)
+//! * **partitioned by scope and provider whenever a credential was sent.** An
+//!   endpoint may publish an entitlement-scoped listing, so a base-URL-only key
+//!   would hand one tenant's list to the next, and two providers of one tenant
+//!   on one endpoint (two accounts) must not share one either. A keyless read
+//!   is a public property of the endpoint and stays shared;
+//! * **a rejected credential (`401`, or reason `auth`) and a `403` are never
+//!   remembered.** They are facts about the key presented, not about the
+//!   endpoint; memoising one would make a second tenant read the first's
+//!   rejection and make a tenant that just rotated a bad key wait out the memo.
+//!   Callers already queued behind the request that was rejected share that one
+//!   answer; nobody who arrives later does. A rejection also drops the list read
+//!   with that key ("a bad key must show"); a bare `403` (a WAF, a geo block)
+//!   does not, and the older list is served stale;
 //! * success is fresh for an hour, a failure is remembered for a minute (so an
 //!   unreachable provider costs one attempt a minute, not one per request);
 //! * **single flight**: callers for one endpoint queue on its lock and re-check
 //!   after acquiring it, so a hundred concurrent callers make one request;
 //! * **stale on error**: when a refresh fails and an older list exists, the
 //!   older list is served with a typed warning instead of an error, unless the
-//!   failure was a rejected credential.
+//!   failure was a rejected credential. Neither an empty list nor one older than
+//!   [`STALE_RETENTION`] is served stale.
 //!
 //! Time comes from the [`Clock`] port, so an hour of expiry is a
 //! `FakeClock::advance`, not a sleep.
@@ -188,7 +196,7 @@ impl Slot {
             (Arc::clone(&entry.models), entry.truncated)
         };
         Some(ModelList {
-            models: (*models).clone(),
+            models,
             freshness: Freshness::Cached,
             truncated,
         })
@@ -226,7 +234,7 @@ impl Slot {
         };
         match kept {
             Some((models, truncated)) => Ok(ModelList {
-                models: (*models).clone(),
+                models,
                 freshness: Freshness::Stale { failure },
                 truncated,
             }),
@@ -239,10 +247,19 @@ impl Slot {
     }
 }
 
-/// Whether a failure is about the credential presented rather than the
-/// endpoint. Such a failure is reported and never remembered.
-fn is_credential_failure(failure: &ProviderFailure) -> bool {
-    failure.reason == ReasonCode::Auth || matches!(failure.status, Some(401 | 403))
+/// Whether the provider **rejected the credential** (`401`, or classified
+/// `auth`). Reported, shared with callers already queued, never remembered, and
+/// the list read with that key is dropped.
+fn is_rejection(failure: &ProviderFailure) -> bool {
+    failure.reason == ReasonCode::Auth || failure.status == Some(401)
+}
+
+/// A `403` that is not a rejection (the classifier has no bare-403 rule: a WAF,
+/// a geo block, an entitlement wall all read `unknown`). It is still about the
+/// presented key rather than the endpoint, so it is never remembered, but it
+/// proves nothing about the older list, which is served stale.
+fn is_forbidden(failure: &ProviderFailure) -> bool {
+    failure.status == Some(403) && !is_rejection(failure)
 }
 
 /// The catalog cache: one slot per [`CatalogKey`].
@@ -415,8 +432,9 @@ impl CatalogCache {
                 } else {
                     CATALOG_TTL
                 };
+                let models = Arc::new(fetched.models);
                 let list = ModelList {
-                    models: fetched.models.clone(),
+                    models: Arc::clone(&models),
                     freshness: Freshness::Fresh,
                     truncated: fetched.truncated,
                 };
@@ -425,7 +443,7 @@ impl CatalogCache {
                     state.entry = Some(Entry {
                         at: now,
                         ttl,
-                        models: Arc::new(fetched.models),
+                        models,
                         truncated: fetched.truncated,
                     });
                     // The endpoint answers again; a stale "unreachable" would
@@ -438,16 +456,22 @@ impl CatalogCache {
             // About the presented key: reported to this caller, never
             // remembered, and never answered with an older list (a bad key must
             // show).
-            Err(HubError::Provider(failure)) if is_credential_failure(&failure) => {
+            Err(HubError::Provider(failure)) if is_rejection(&failure) => {
                 let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 {
                     let mut state = slot.state();
                     state.rejection = Some((generation, failure.clone()));
                     // "A bad key must show": the list read with a key the provider
-                    // now refuses is not served as if nothing happened.
+                    // now refuses is not served as if nothing happened, and an
+                    // earlier endpoint failure must not answer instead of the
+                    // rejection this request actually got.
                     state.entry = None;
+                    state.failure = None;
                 }
                 Err(HubError::Provider(failure))
+            }
+            Err(HubError::Provider(failure)) if is_forbidden(&failure) => {
+                slot.stale_or(failure, now)
             }
             Err(HubError::Provider(failure)) => {
                 slot.state().failure = Some((now, failure.clone()));

@@ -894,3 +894,28 @@ async fn drivers_local_a_transport_failure_that_looks_unreadable_is_never_a_reas
         .unwrap_err();
     assert_eq!(error.reason(), ReasonCode::Unknown);
 }
+
+#[tokio::test]
+async fn drivers_local_an_oversize_tags_list_is_reported_as_too_large_not_as_the_earlier_404() {
+    let bed = Bed::desktop();
+    bed.http.route(
+        Match::prefix("http://localhost:11434/v1/models"),
+        Scripted::text(404, "no"),
+    );
+    bed.http.route(
+        Match::prefix("http://localhost:11434/api/tags"),
+        Scripted::Oversize { bytes: 99_999_999 },
+    );
+    let s = local_subject("ollama", "http://localhost:11434/v1", None);
+    match local("ollama")
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap_err()
+    {
+        HubError::Provider(f) => assert!(
+            f.truncated && f.status.is_none() && f.reason == ReasonCode::Unknown,
+            "{f:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}

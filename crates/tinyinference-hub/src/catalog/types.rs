@@ -1,5 +1,7 @@
 //! The data types of a model catalog.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::descriptor::{CapSource, Capabilities, Sourced};
@@ -156,8 +158,9 @@ pub enum Freshness {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelList {
-    /// The models, in the order the provider listed them.
-    pub models: Vec<ModelEntry>,
+    /// The models, in the order the provider listed them. Shared with the
+    /// cache, so a cache hit is a pointer copy however long the list is.
+    pub models: Arc<Vec<ModelEntry>>,
     /// How fresh the list is.
     pub freshness: Freshness,
     /// The listing had more pages than one read follows; the list is a prefix.
@@ -170,7 +173,7 @@ impl ModelList {
     /// picker wants this one.
     #[must_use]
     pub fn sorted(mut self) -> Self {
-        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        Arc::make_mut(&mut self.models).sort_by(|a, b| a.id.cmp(&b.id));
         self
     }
 

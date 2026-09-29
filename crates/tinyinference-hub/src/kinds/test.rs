@@ -656,3 +656,28 @@ async fn kinds_openai_pings_with_max_completion_tokens_because_its_reasoning_mod
     assert_eq!(body["max_completion_tokens"], 16);
     assert!(body.get("max_tokens").is_none());
 }
+
+#[tokio::test]
+async fn kinds_the_ping_asks_for_max_completion_tokens_wherever_the_endpoint_is_openai_or_azure() {
+    for (base, expect) in [
+        ("https://api.openai.com/v1", "max_completion_tokens"),
+        (
+            "https://my-resource.openai.azure.com/openai/v1",
+            "max_completion_tokens",
+        ),
+        ("https://gateway.acme.test/v1", "max_tokens"),
+    ] {
+        let bed = Bed::new();
+        bed.http
+            .route(Match::prefix(base), Scripted::json(200, &json!({})));
+        let (slug, kind) = (Slug::parse("acme").unwrap(), KindId::new("custom"));
+        let t = target(&slug, &kind, base, &AuthStyle::Bearer, None);
+        OpenAiCompatDriver::custom()
+            .completion_ping(&bed.cx(), &t, &ModelId::parse("m").unwrap())
+            .await
+            .unwrap();
+        let sent = &bed.http.requests()[0];
+        let body: serde_json::Value = serde_json::from_str(sent.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body[expect], 16, "{base}");
+    }
+}

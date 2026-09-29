@@ -9,7 +9,8 @@
 //! * failures alongside successes are `Degraded` (the partial-outage case: the
 //!   catalog read fails while completions work);
 //! * a run of [`FAILURES_TO_DOWN`] failed real turns is `Down`, however long ago
-//!   a probe last passed;
+//!   a probe last passed, unless the failure is a rate limit or an unknown model
+//!   (about the request, so `Degraded`);
 //! * with nothing passing, an unreachable endpoint is `Down`; any other failure
 //!   is `Degraded` until it repeats ([`FAILURES_TO_DOWN`] failed turns in a
 //!   row, or several lanes failing) and then `Down`;
@@ -44,6 +45,15 @@ fn severity(reason: ReasonCode) -> u8 {
 
 fn is_terminal(reason: ReasonCode) -> bool {
     matches!(reason, ReasonCode::Auth | ReasonCode::Quota)
+}
+
+/// Whether a repeating failure means the provider is *down*. A rate limit and an
+/// unknown model are about this request, not about the provider: repeating them
+/// says "slow down" or "pick another model", so they stay `Degraded` (a `Down`
+/// provider is no longer routed to and would never produce the turn that clears
+/// it).
+fn repeats_mean_down(reason: ReasonCode) -> bool {
+    !matches!(reason, ReasonCode::RateLimited | ReasonCode::Model)
 }
 
 /// One lane's latest result, for comparison.
@@ -127,14 +137,19 @@ impl HealthSnapshot {
             Some(worst) if is_terminal(worst) => ProviderHealth::Down(worst),
             // Turns are what the operator cares about: a run of failed turns is
             // `Down` however long ago some probe last passed.
-            Some(worst) if turns_failing && self.consecutive_failures >= FAILURES_TO_DOWN => {
+            Some(worst)
+                if turns_failing
+                    && self.consecutive_failures >= FAILURES_TO_DOWN
+                    && repeats_mean_down(worst) =>
+            {
                 ProviderHealth::Down(worst)
             }
             Some(worst) if passing > 0 => ProviderHealth::Degraded(worst),
             Some(worst)
                 if worst == ReasonCode::Endpoint
-                    || self.consecutive_failures >= FAILURES_TO_DOWN
-                    || failing.len() >= 2 =>
+                    || (repeats_mean_down(worst)
+                        && (self.consecutive_failures >= FAILURES_TO_DOWN
+                            || failing.len() >= 2)) =>
             {
                 ProviderHealth::Down(worst)
             }

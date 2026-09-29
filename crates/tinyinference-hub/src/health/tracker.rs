@@ -59,7 +59,7 @@ impl HealthTracker {
     }
 
     /// The lock for one provider, created on first use.
-    fn lock_for(&self, scope: &ScopeKey, slug: &Slug) -> Arc<Mutex<()>> {
+    pub(super) fn lock_for(&self, scope: &ScopeKey, slug: &Slug) -> Arc<Mutex<()>> {
         let mut locks = self
             .locks
             .lock()
@@ -202,12 +202,22 @@ impl HealthTracker {
             .forget(scope, slug)
             .await
             .map_err(|e| e.into_hub(PortName::Health));
-        // The provider is gone; its lock need not outlive it. (A caller already
-        // waiting holds its own `Arc`, so nothing is lost by dropping the entry.)
-        self.locks
+        // The provider is gone; its lock need not outlive it, but only if nobody
+        // else holds or waits on it: dropping the entry under a waiter would
+        // hand the next caller a fresh lock and let two updates run at once.
+        // (`lock` and the map's own copy are the two references when idle.)
+        drop(_serial);
+        let mut locks = self
+            .locks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(scope.clone(), slug.clone()));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (scope.clone(), slug.clone());
+        if locks
+            .get(&key)
+            .is_some_and(|held| Arc::strong_count(held) <= 2)
+        {
+            locks.remove(&key);
+        }
         forgotten
     }
 }

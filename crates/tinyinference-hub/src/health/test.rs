@@ -231,6 +231,25 @@ fn health_the_fold_table() {
             ProviderHealth::Degraded(ReasonCode::Timeout),
         ),
         (
+            "three rate-limited turns are throttling, not an outage",
+            vec![
+                Probe(Catalog, None),
+                Turn(Some(ReasonCode::RateLimited)),
+                Turn(Some(ReasonCode::RateLimited)),
+                Turn(Some(ReasonCode::RateLimited)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::RateLimited),
+        ),
+        (
+            "three turns naming an unknown model are a model problem, not an outage",
+            vec![
+                Turn(Some(ReasonCode::Model)),
+                Turn(Some(ReasonCode::Model)),
+                Turn(Some(ReasonCode::Model)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Model),
+        ),
+        (
             "a failed turn is not superseded by an older completion pass",
             vec![Probe(Completion, None), Turn(Some(ReasonCode::Endpoint))],
             ProviderHealth::Degraded(ReasonCode::Endpoint),
@@ -741,4 +760,26 @@ async fn health_a_slow_store_for_one_provider_does_not_hold_up_another() {
         tracker.health(&scope(), &slow).await.unwrap(),
         ProviderHealth::Unknown
     );
+}
+
+#[tokio::test]
+async fn health_forgetting_never_drops_a_lock_somebody_still_holds() {
+    let bed = bed();
+    let (s, p) = (scope(), slug());
+    bed.tracker
+        .record_outcome(&s, &p, &failure(ReasonCode::Auth))
+        .await
+        .unwrap();
+    // A caller queued behind the forget holds the provider's lock.
+    let held = bed.tracker.lock_for(&s, &p);
+    bed.tracker.forget(&s, &p).await.unwrap();
+    assert!(
+        Arc::ptr_eq(&held, &bed.tracker.lock_for(&s, &p)),
+        "the next caller must meet the same lock, or two updates could run at once"
+    );
+    drop(held);
+    bed.tracker.forget(&s, &p).await.unwrap();
+    // Idle again: the entry went, and a later caller gets a fresh lock.
+    let fresh = bed.tracker.lock_for(&s, &p);
+    assert_eq!(Arc::strong_count(&fresh), 2);
 }

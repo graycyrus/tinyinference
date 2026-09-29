@@ -1045,7 +1045,7 @@ mod cache_props {
                         ));
                         let fetched_now = *fetches.lock().unwrap() > before;
                         if let Ok(list) = &result {
-                            for model in &list.models {
+                            for model in list.models.iter() {
                                 let id = model.id.as_str();
                                 if credentialed {
                                     prop_assert!(id.starts_with(&format!("{name}-true")), "{name} read {id}");
@@ -1204,4 +1204,116 @@ async fn cache_slots_that_only_ever_saw_rejections_age_out_too() {
         .await
         .unwrap();
     assert_eq!(cache.len(), 1);
+}
+
+#[tokio::test]
+async fn cache_a_bare_403_is_not_remembered_and_does_not_destroy_the_list() {
+    // The classifier has no bare-403 rule: a WAF or a geo block reads `unknown`
+    // with the status kept. It is about the key presented, so never memoised,
+    // but it says nothing against the older list, which is served stale.
+    let (cache, clock) = cache();
+    let counter = Counter::new();
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.ok(&["good"])
+        })
+        .await
+        .unwrap();
+    clock.advance(CATALOG_TTL);
+    for _ in 0..2 {
+        let list = cache
+            .read(key("a", true), false, {
+                let c = counter.clone();
+                move || c.err(failure(ReasonCode::Unknown, Some(403)))
+            })
+            .await
+            .unwrap();
+        assert!(list.is_stale());
+        assert_eq!(ids(&list), ["good"]);
+    }
+    assert_eq!(
+        counter.calls(),
+        3,
+        "each caller asked again: a 403 is never remembered"
+    );
+    // With nothing older to serve it is the error.
+    let (cache, _) = cache_pair();
+    let error = cache
+        .read(key("a", true), false, || async {
+            Err(failure(ReasonCode::Unknown, Some(403)))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Unknown);
+}
+
+fn cache_pair() -> (CatalogCache, FakeClock) {
+    cache()
+}
+
+#[tokio::test]
+async fn cache_a_rejection_replaces_an_earlier_endpoint_failure_memo() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Endpoint, Some(503)))
+        })
+        .await
+        .unwrap_err();
+    // Within the minute the Refresh button meets a 401.
+    cache
+        .read(key("a", true), true, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Auth, Some(401)))
+        })
+        .await
+        .unwrap_err();
+    // The next ordinary read must ask, not be answered by the old 503 memo.
+    let error = cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.err(failure(ReasonCode::Auth, Some(401)))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Auth);
+    assert_eq!(counter.calls(), 3);
+}
+
+#[tokio::test]
+async fn cache_a_cache_hit_shares_the_list_instead_of_copying_it() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    let first = cache
+        .read(key("a", false), false, {
+            let c = counter.clone();
+            move || c.ok(&["a", "b", "c"])
+        })
+        .await
+        .unwrap();
+    let second = cache
+        .read(key("a", false), false, unexpected())
+        .await
+        .unwrap();
+    let third = cache
+        .read(key("a", false), false, unexpected())
+        .await
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&first.models, &second.models) && Arc::ptr_eq(&second.models, &third.models)
+    );
+    // Sorting a shared list copies on write and leaves the cached one alone.
+    let sorted = third.clone().sorted();
+    assert!(!Arc::ptr_eq(&sorted.models, &third.models) || sorted.ids() == third.ids());
+    assert_eq!(
+        cache
+            .read(key("a", false), false, unexpected())
+            .await
+            .unwrap()
+            .ids(),
+        ["a", "b", "c"]
+    );
 }

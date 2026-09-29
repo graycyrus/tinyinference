@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::catalog::{Fetched, parse_lmstudio_v0, parse_ollama_tags};
+use crate::catalog::{Fetched, parse_lmstudio_v0, parse_ollama_tags, too_large};
 use crate::descriptor::ProviderDescriptor;
 use crate::error::{HubError, ProviderFailure, ReasonCode};
 use crate::ports::HubRequest;
@@ -64,6 +64,16 @@ fn is_missing(failure: &ProviderFailure) -> bool {
     failure.status == Some(404)
 }
 
+/// Whether an answer from LM Studio's native `/api/v0/*` means "not usable
+/// here" (a proxy or an older build answering 400, 404, 405 or a 5xx for a path
+/// it does not know) rather than a verdict on the key or a transport failure.
+/// The OpenAI-compatible listing is then worth trying.
+fn native_listing_unavailable(failure: &ProviderFailure) -> bool {
+    failure
+        .status
+        .is_some_and(|status| !matches!(status, 401 | 403))
+}
+
 #[async_trait]
 impl KindDriver for LocalDriver {
     fn descriptor(&self) -> &ProviderDescriptor {
@@ -92,7 +102,7 @@ impl KindDriver for LocalDriver {
                     }
                 }
                 Ok(_) => {}
-                Err(HubError::Provider(failure)) if is_missing(&failure) => {}
+                Err(HubError::Provider(failure)) if native_listing_unavailable(&failure) => {}
                 Err(other) => return Err(other),
             }
         }
@@ -110,7 +120,7 @@ impl KindDriver for LocalDriver {
             {
                 let response = cx.call(self, read(format!("{origin}/api/tags"))).await?;
                 if response.truncated {
-                    return Err(HubError::Provider(failure));
+                    return Err(HubError::Provider(too_large("the tags list")));
                 }
                 let parsed = parse_ollama_tags(&response.body).map_err(HubError::Provider)?;
                 Ok(Fetched::new(parsed.entries))

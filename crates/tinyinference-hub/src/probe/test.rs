@@ -617,3 +617,34 @@ async fn probe_an_error_that_is_not_the_providers_stops_the_probe_instead_of_rep
         .unwrap_err();
     assert!(matches!(error, HubError::Conflict), "{error:?}");
 }
+
+#[tokio::test]
+async fn probe_an_oversize_error_page_is_not_a_truncated_catalog() {
+    let bed = Bed::new();
+    bed.http.route(
+        Match::prefix("https://a.test/v1/models"),
+        Scripted::text(502, "<html>bad gateway</html>".repeat(20_000)),
+    );
+    let s = Subject {
+        group: ProviderGroup::Custom,
+        ..Subject::cloud("custom", "https://a.test/v1", None)
+    };
+    let report = run_probe(
+        &bed.cx(),
+        &OpenAiCompatDriver::custom(),
+        &s.target(),
+        TestDepth::Catalog,
+    )
+    .await
+    .unwrap();
+    let failure = report.failure.clone().unwrap();
+    assert!(
+        failure.truncated,
+        "the failure body was cut for classification"
+    );
+    assert_eq!(failure.status, Some(502));
+    assert!(
+        !report.notes.contains(&ProbeNote::CatalogTruncated),
+        "no catalog was read, so none was truncated"
+    );
+}

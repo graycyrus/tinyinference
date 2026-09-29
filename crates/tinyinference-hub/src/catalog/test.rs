@@ -292,7 +292,7 @@ fn catalog_entry_builders_and_list_helpers() {
         (Some("B"), Some(1.0))
     );
     let list = ModelList {
-        models: vec![ModelEntry::new(id("b")), ModelEntry::new(id("a"))],
+        models: std::sync::Arc::new(vec![ModelEntry::new(id("b")), ModelEntry::new(id("a"))]),
         freshness: Freshness::Fresh,
         truncated: false,
     };
@@ -300,7 +300,7 @@ fn catalog_entry_builders_and_list_helpers() {
     assert!(!list.is_stale());
     assert_eq!(list.sorted().ids(), ["a", "b"]);
     let stale = ModelList {
-        models: Vec::new(),
+        models: std::sync::Arc::default(),
         freshness: Freshness::Stale {
             failure: crate::ProviderFailure::new(ReasonCode::Timeout, Retry::Never),
         },

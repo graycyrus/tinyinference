@@ -132,7 +132,9 @@ pub async fn run_probe(
             Ok(report)
         }
         Err(HubError::Provider(failure)) => {
-            if failure.truncated && depth == TestDepth::Catalog {
+            // A listing over its cap has no status; an HTTP error whose *body*
+            // was cut for classification does, and is not a truncated catalog.
+            if failure.truncated && failure.status.is_none() && depth == TestDepth::Catalog {
                 report.notes.push(ProbeNote::CatalogTruncated);
             }
             report.failure = Some(failure);
