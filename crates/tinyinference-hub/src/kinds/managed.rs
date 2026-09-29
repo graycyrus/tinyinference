@@ -2,10 +2,9 @@
 
 use async_trait::async_trait;
 
-use crate::catalog::{Collector, Fetched, NextPage, page_path, parse_page};
-use crate::catalogue::MANAGED_PROXY_PATH;
+use crate::catalog::{Collector, Fetched, NextPage, page_path, parse_page, too_large, unreadable};
 use crate::descriptor::ProviderDescriptor;
-use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
+use crate::error::HubError;
 use crate::ports::HubRequest;
 use crate::taxonomy::CatalogShape;
 
@@ -56,14 +55,6 @@ impl ManagedDriver {
         self.shape
     }
 
-    /// Whether `base_url` is OpenCompany's proxy path, which answers paged.
-    pub fn base_is_paged(base_url: &str) -> bool {
-        base_url
-            .trim()
-            .trim_end_matches('/')
-            .ends_with(MANAGED_PROXY_PATH)
-    }
-
     fn signed_out(target: &Target<'_>) -> Result<(), HubError> {
         if target.key().is_none() {
             return Err(HubError::SignedOut {
@@ -72,10 +63,6 @@ impl ManagedDriver {
         }
         Ok(())
     }
-}
-
-fn unreadable(failure: ProviderFailure) -> HubError {
-    HubError::Provider(failure)
 }
 
 #[async_trait]
@@ -112,19 +99,11 @@ impl KindDriver for ManagedDriver {
             );
             let response = cx.call(self, request).await?;
             if response.truncated {
-                return Err(HubError::Provider(
-                    ProviderFailure::new(ReasonCode::Unknown, Retry::Never)
-                        .with_truncated(true)
-                        .with_raw("a model catalog page is larger than the page cap"),
-                ));
+                return Err(HubError::Provider(too_large("a model catalog page")));
             }
-            let body = String::from_utf8(response.body).map_err(|_| {
-                unreadable(
-                    ProviderFailure::new(ReasonCode::Unknown, Retry::Never)
-                        .with_raw("the model catalog was not UTF-8"),
-                )
-            })?;
-            let page = parse_page(&body).map_err(unreadable)?;
+            let body = String::from_utf8(response.body)
+                .map_err(|_| HubError::Provider(unreadable("the model catalog was not UTF-8")))?;
+            let page = parse_page(&body).map_err(HubError::Provider)?;
             match collector.push(page) {
                 NextPage::At(_) => {}
                 NextPage::Done => break,

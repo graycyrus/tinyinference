@@ -513,6 +513,7 @@ async fn kinds_a_completion_ping_posts_one_small_chat_completion() {
     let body: serde_json::Value = serde_json::from_str(sent.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["model"], "llama-3.3-70b");
     assert_eq!(body["max_tokens"], 16);
+    assert!(body.get("max_completion_tokens").is_none());
     assert_eq!(sent.header("content-type"), Some("application/json"));
 }
 
@@ -624,4 +625,34 @@ fn kinds_the_custom_descriptor_is_an_editable_bearer_endpoint_outside_the_catalo
         "custom is a group, not a catalogue row"
     );
     assert!(d.supports_depth(TestDepth::Catalog) && !d.supports_depth(TestDepth::KeyOnly));
+}
+
+#[tokio::test]
+async fn kinds_openai_pings_with_max_completion_tokens_because_its_reasoning_models_reject_max_tokens()
+ {
+    let bed = Bed::new();
+    bed.http.route(
+        Match::post("https://api.openai.com/v1/chat/completions"),
+        Scripted::json(200, &json!({"choices": []})),
+    );
+    let (slug, kind, key) = (
+        Slug::parse("openai").unwrap(),
+        KindId::new("openai"),
+        Secret::new("sk-fake"),
+    );
+    let t = target(
+        &slug,
+        &kind,
+        "https://api.openai.com/v1",
+        &AuthStyle::Bearer,
+        Some(&key),
+    );
+    driver("openai")
+        .completion_ping(&bed.cx(), &t, &ModelId::parse("gpt-5").unwrap())
+        .await
+        .unwrap();
+    let sent = &bed.http.requests()[0];
+    let body: serde_json::Value = serde_json::from_str(sent.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["max_completion_tokens"], 16);
+    assert!(body.get("max_tokens").is_none());
 }

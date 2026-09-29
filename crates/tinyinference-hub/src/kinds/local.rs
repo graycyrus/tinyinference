@@ -49,11 +49,19 @@ fn origin_of(base: &str) -> String {
     base.strip_suffix("/v1").unwrap_or(base).to_string()
 }
 
-/// Whether a failure means "this listing is not here or not readable" (so the
-/// next one is worth trying) rather than "nothing is listening".
-fn worth_falling_back(failure: &ProviderFailure) -> bool {
+/// Whether a failed request means "this listing is not here" (so the next one
+/// is worth trying) rather than "nothing is listening" or "the key was
+/// refused". Only a `404` does: a transport failure of any kind is not retried
+/// against a second path.
+/// A body that was answered but is not a listing: `unknown` with no status and
+/// not cut at a cap. Only meaningful for a failure that came from *parsing* an
+/// answer, never from the transport (whose `Other` failures look the same).
+fn is_unreadable(failure: &ProviderFailure) -> bool {
+    failure.status.is_none() && failure.reason == ReasonCode::Unknown && !failure.truncated
+}
+
+fn is_missing(failure: &ProviderFailure) -> bool {
     failure.status == Some(404)
-        || (failure.status.is_none() && failure.reason == ReasonCode::Unknown)
 }
 
 #[async_trait]
@@ -84,15 +92,21 @@ impl KindDriver for LocalDriver {
                     }
                 }
                 Ok(_) => {}
-                Err(HubError::Provider(failure)) if worth_falling_back(&failure) => {}
+                Err(HubError::Provider(failure)) if is_missing(&failure) => {}
                 Err(other) => return Err(other),
             }
         }
-        let openai = cx.call(self, read(format!("{base}/models"))).await;
+        // The OpenAI-compatible listing, read and parsed as one step so that a
+        // body that is not a listing (an older build, a proxy's landing page)
+        // can fall back exactly like a missing path.
+        let (openai, answered) = match cx.call(self, read(format!("{base}/models"))).await {
+            Ok(response) => (read_listing(&response), true),
+            Err(error) => (Err(error), false),
+        };
         match openai {
-            Ok(response) => read_listing(&response),
             Err(HubError::Provider(failure))
-                if self.runtime() == Some(LocalRuntime::Ollama) && worth_falling_back(&failure) =>
+                if self.runtime() == Some(LocalRuntime::Ollama)
+                    && (is_missing(&failure) || (answered && is_unreadable(&failure))) =>
             {
                 let response = cx.call(self, read(format!("{origin}/api/tags"))).await?;
                 if response.truncated {
@@ -101,7 +115,7 @@ impl KindDriver for LocalDriver {
                 let parsed = parse_ollama_tags(&response.body).map_err(HubError::Provider)?;
                 Ok(Fetched::new(parsed.entries))
             }
-            Err(other) => Err(other),
+            other => other,
         }
     }
 }

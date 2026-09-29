@@ -108,7 +108,7 @@ impl Rig {
             None => target,
         };
         let cx = DriverContext::new(&*self.http, &self.policy, &self.clock, &self.headers);
-        let cache_key = CatalogKey::new(scope, credentialed, base, descriptor.catalog);
+        let cache_key = CatalogKey::new(scope, slug, credentialed, base, descriptor.catalog);
         self.cache
             .read(cache_key, refresh, || async {
                 driver.list_models(&cx, &target).await

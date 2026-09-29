@@ -3,10 +3,10 @@
 
 use async_trait::async_trait;
 
-use crate::catalog::{Fetched, parse_openai};
+use crate::catalog::{Fetched, parse_openai, too_large};
 use crate::catalogue::{catalog_query, custom_descriptor, scoped_catalog_path};
 use crate::descriptor::{ProviderDescriptor, Quirk};
-use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
+use crate::error::HubError;
 use crate::ports::{HubRequest, HubResponse};
 
 use super::{DriverContext, KindDriver, Target};
@@ -33,20 +33,11 @@ impl OpenAiCompatDriver {
     }
 }
 
-/// Reads a successful listing response.
-///
-/// A body that ran past its cap is refused outright rather than parsed
-/// truncated: a parser cannot tell "malformed" from "cut off", and treating the
-/// second as the first is how a real, valid, hundreds-of-models catalog once
-/// read as a healthy connection with zero models. The failure is `Unknown`, not
-/// `Auth`: a catalog too large to read says nothing about the credential.
+/// Reads a successful listing response; a body past its cap is refused (see
+/// [`too_large`]).
 pub(super) fn read_listing(response: &HubResponse) -> Result<Fetched, HubError> {
     if response.truncated {
-        return Err(HubError::Provider(
-            ProviderFailure::new(ReasonCode::Unknown, Retry::Never)
-                .with_truncated(true)
-                .with_raw("the model list is larger than the size cap"),
-        ));
+        return Err(HubError::Provider(too_large("the model list")));
     }
     let parsed = parse_openai(&response.body).map_err(HubError::Provider)?;
     Ok(Fetched::new(parsed.entries))

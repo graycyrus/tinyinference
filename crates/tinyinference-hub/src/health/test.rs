@@ -178,6 +178,35 @@ fn health_the_fold_table() {
             ProviderHealth::Down(ReasonCode::Auth),
         ),
         (
+            "a run of failed turns is down even though a probe once passed",
+            vec![
+                Probe(Catalog, None),
+                Turn(Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Down(ReasonCode::Timeout),
+        ),
+        (
+            "two failed turns beside a passing probe are still degraded",
+            vec![
+                Probe(Catalog, None),
+                Turn(Some(ReasonCode::Timeout)),
+                Turn(Some(ReasonCode::Timeout)),
+            ],
+            ProviderHealth::Degraded(ReasonCode::Timeout),
+        ),
+        (
+            "a rejected key is not hidden by a later successful turn",
+            vec![Probe(Completion, Some(ReasonCode::Auth)), Turn(None)],
+            ProviderHealth::Down(ReasonCode::Auth),
+        ),
+        (
+            "an exhausted account is not hidden by a later passing completion",
+            vec![Turn(Some(ReasonCode::Quota)), Probe(Completion, None)],
+            ProviderHealth::Down(ReasonCode::Quota),
+        ),
+        (
             "a failed turn is not superseded by an older completion pass",
             vec![Probe(Completion, None), Turn(Some(ReasonCode::Endpoint))],
             ProviderHealth::Degraded(ReasonCode::Endpoint),

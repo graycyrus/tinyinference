@@ -24,11 +24,20 @@ pub struct ParsedCatalog {
     pub skipped: usize,
 }
 
-fn unreadable(text: impl AsRef<str>) -> ProviderFailure {
-    // A listing that connected but did not parse says nothing about the
-    // credential, so it is `Unknown`, never `Auth` (the only class that rolls a
-    // key back).
+/// A listing that connected but did not parse says nothing about the
+/// credential, so it is `Unknown`, never `Auth` (the only class that rolls a
+/// key back). The one place that failure is built.
+pub(crate) fn unreadable(text: impl AsRef<str>) -> ProviderFailure {
     ProviderFailure::new(ReasonCode::Unknown, Retry::Never).with_raw(text)
+}
+
+/// A listing (or one page of it) that ran past its size cap. Refused outright
+/// rather than parsed truncated: a parser cannot tell "malformed" from "cut
+/// off", and treating the second as the first is how a real, valid,
+/// hundreds-of-models catalog once read as a healthy connection with zero
+/// models. `Unknown`, not `Auth`, for the same reason as [`unreadable`].
+pub(crate) fn too_large(what: &str) -> ProviderFailure {
+    unreadable(format!("{what} is larger than the size cap")).with_truncated(true)
 }
 
 fn json(body: &[u8]) -> Result<Value, ProviderFailure> {

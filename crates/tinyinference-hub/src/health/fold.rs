@@ -8,6 +8,8 @@
 //!   at once, whatever else passes: nothing will work until the operator acts;
 //! * failures alongside successes are `Degraded` (the partial-outage case: the
 //!   catalog read fails while completions work);
+//! * a run of [`FAILURES_TO_DOWN`] failed real turns is `Down`, however long ago
+//!   a probe last passed;
 //! * with nothing passing, an unreachable endpoint is `Down`; any other failure
 //!   is `Degraded` until it repeats ([`FAILURES_TO_DOWN`] failed turns in a
 //!   row, or several lanes failing) and then `Down`;
@@ -62,8 +64,17 @@ impl Lane {
     }
 
     /// Whether a success in this lane says a failure in `other` is over.
+    ///
+    /// A rejected credential or an exhausted account is never superseded by a
+    /// success elsewhere: those are `Down` "whatever else passes", and only the
+    /// operator acting (which resets the snapshot) or the same lane passing
+    /// again clears them.
     fn supersedes(&self, other: &Lane) -> bool {
-        self.ok && self.at_ms >= other.at_ms && self.is_chat() && other.is_chat()
+        self.ok
+            && self.at_ms >= other.at_ms
+            && self.is_chat()
+            && other.is_chat()
+            && !other.reason.is_some_and(is_terminal)
     }
 }
 
@@ -102,6 +113,7 @@ impl HealthSnapshot {
             .filter(|failed| !lanes.iter().any(|other| other.supersedes(failed)))
             .collect();
         let passing = lanes.iter().filter(|lane| lane.ok).count();
+        let turns_failing = failing.iter().any(|lane| lane.depth.is_none());
         let next = match failing
             .iter()
             .filter_map(|lane| lane.reason)
@@ -110,6 +122,11 @@ impl HealthSnapshot {
             None if failing.is_empty() => ProviderHealth::Ok,
             None => ProviderHealth::Degraded(ReasonCode::Unknown),
             Some(worst) if is_terminal(worst) => ProviderHealth::Down(worst),
+            // Turns are what the operator cares about: a run of failed turns is
+            // `Down` however long ago some probe last passed.
+            Some(worst) if turns_failing && self.consecutive_failures >= FAILURES_TO_DOWN => {
+                ProviderHealth::Down(worst)
+            }
             Some(worst) if passing > 0 => ProviderHealth::Degraded(worst),
             Some(worst)
                 if worst == ReasonCode::Endpoint

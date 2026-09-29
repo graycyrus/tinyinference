@@ -9,7 +9,7 @@ use futures::future::join_all;
 
 use super::*;
 use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
-use crate::ids::{ModelId, ScopeKey};
+use crate::ids::{ModelId, ScopeKey, Slug};
 use crate::taxonomy::CatalogShape;
 use crate::testkit::FakeClock;
 
@@ -21,6 +21,10 @@ fn entry(name: &str) -> ModelEntry {
 
 fn models(names: &[&str]) -> Vec<ModelEntry> {
     names.iter().map(|n| entry(n)).collect()
+}
+
+fn provider() -> Slug {
+    Slug::parse("openai").unwrap()
 }
 
 fn scope(name: &str) -> ScopeKey {
@@ -35,6 +39,7 @@ fn cache() -> (CatalogCache, FakeClock) {
 fn key(scope_name: &str, credentialed: bool) -> CatalogKey {
     CatalogKey::new(
         &scope(scope_name),
+        &provider(),
         credentialed,
         ENDPOINT,
         CatalogShape::OpenAi,
@@ -307,8 +312,20 @@ async fn cache_a_keyless_and_a_credentialed_read_do_not_share_a_slot() {
 async fn cache_the_shape_is_part_of_the_key() {
     let (cache, _) = cache();
     let counter = Counter::new();
-    let openai = CatalogKey::new(&scope("a"), false, ENDPOINT, CatalogShape::OpenAi);
-    let paged = CatalogKey::new(&scope("a"), false, ENDPOINT, CatalogShape::PagedEnvelope);
+    let openai = CatalogKey::new(
+        &scope("a"),
+        &provider(),
+        false,
+        ENDPOINT,
+        CatalogShape::OpenAi,
+    );
+    let paged = CatalogKey::new(
+        &scope("a"),
+        &provider(),
+        false,
+        ENDPOINT,
+        CatalogShape::PagedEnvelope,
+    );
     cache
         .read(openai, false, {
             let c = counter.clone();
@@ -332,12 +349,14 @@ async fn cache_trailing_slashes_and_spaces_are_the_same_endpoint() {
     let counter = Counter::new();
     let a = CatalogKey::new(
         &scope("a"),
+        &provider(),
         false,
         "https://x.test/v1/",
         CatalogShape::OpenAi,
     );
     let b = CatalogKey::new(
         &scope("a"),
+        &provider(),
         false,
         "  https://x.test/v1 ",
         CatalogShape::OpenAi,
@@ -543,7 +562,7 @@ async fn cache_a_failure_with_nothing_older_is_the_error() {
 }
 
 #[tokio::test]
-async fn cache_stale_data_is_dropped_only_by_pruning_not_by_expiry() {
+async fn cache_a_stale_list_is_served_within_the_retention_and_refused_past_it() {
     let (cache, clock) = cache();
     cache
         .read(key("a", true), false, || async {
@@ -551,15 +570,118 @@ async fn cache_stale_data_is_dropped_only_by_pruning_not_by_expiry() {
         })
         .await
         .unwrap();
-    clock.advance(STALE_RETENTION * 3);
-    // Still served as stale: retention is enforced when room is needed.
-    let list = cache
-        .read(key("a", true), false, || async {
-            Err(failure(ReasonCode::Endpoint, None))
+    let down = || async { Err(failure(ReasonCode::Endpoint, None)) };
+    clock.advance(STALE_RETENTION - Duration::from_secs(1));
+    let within = cache.read(key("a", true), false, down).await.unwrap();
+    assert!(
+        within.is_stale(),
+        "inside a day the older list is the better answer"
+    );
+    clock.advance(Duration::from_secs(2) + FAILURE_TTL);
+    let past = cache.read(key("a", true), false, down).await.unwrap_err();
+    assert_eq!(
+        past.reason(),
+        ReasonCode::Endpoint,
+        "past a day the models may be retired"
+    );
+}
+
+#[tokio::test]
+async fn cache_two_providers_in_one_scope_on_one_endpoint_do_not_share_a_credentialed_list() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    let work = Slug::parse("work-openai").unwrap();
+    let personal = Slug::parse("personal-openai").unwrap();
+    let key_for =
+        |slug: &Slug| CatalogKey::new(&scope("a"), slug, true, ENDPOINT, CatalogShape::OpenAi);
+    let a = cache
+        .read(key_for(&work), false, {
+            let c = counter.clone();
+            move || c.ok(&["work-only"])
         })
         .await
         .unwrap();
-    assert!(list.is_stale());
+    let b = cache
+        .read(key_for(&personal), false, {
+            let c = counter.clone();
+            move || c.ok(&["personal-only"])
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (ids(&a), ids(&b)),
+        (vec!["work-only"], vec!["personal-only"])
+    );
+    // A keyless read still ignores the provider: it is a public property.
+    let public =
+        |slug: &Slug| CatalogKey::new(&scope("a"), slug, false, ENDPOINT, CatalogShape::OpenAi);
+    assert_eq!(public(&work), public(&personal));
+    assert_ne!(key_for(&work), key_for(&personal));
+}
+
+#[tokio::test]
+async fn cache_callers_queued_behind_a_rejected_key_share_one_request_and_it_is_not_remembered() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    let calls: Vec<_> = (0..50)
+        .map(|_| {
+            let c = counter.clone();
+            cache.read(key("a", true), false, move || async move {
+                tokio::task::yield_now().await;
+                c.err(failure(ReasonCode::Auth, Some(401))).await
+            })
+        })
+        .collect();
+    let results = join_all(calls).await;
+    assert!(
+        results
+            .iter()
+            .all(|r| r.as_ref().unwrap_err().reason() == ReasonCode::Auth)
+    );
+    assert_eq!(counter.calls(), 1, "50 waiters, one 401 from the provider");
+    // A caller that arrives afterwards is not answered from a memo: it asks.
+    let later = cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.ok(&["rotated"])
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids(&later), ["rotated"]);
+    assert_eq!(counter.calls(), 2);
+}
+
+#[tokio::test]
+async fn cache_a_refresh_queued_behind_a_rejection_gets_the_rejection_not_the_old_list() {
+    let (cache, _) = cache();
+    let counter = Counter::new();
+    cache
+        .read(key("a", true), false, {
+            let c = counter.clone();
+            move || c.ok(&["old"])
+        })
+        .await
+        .unwrap();
+    let calls: Vec<_> = (0..5)
+        .map(|_| {
+            let c = counter.clone();
+            cache.read(key("a", true), true, move || async move {
+                tokio::task::yield_now().await;
+                c.err(failure(ReasonCode::Auth, Some(401))).await
+            })
+        })
+        .collect();
+    let results = join_all(calls).await;
+    assert!(
+        results
+            .iter()
+            .all(|r| r.as_ref().is_err_and(|e| e.reason() == ReasonCode::Auth))
+    );
+    assert_eq!(
+        counter.calls(),
+        2,
+        "the first fill plus one shared rejected refresh"
+    );
 }
 
 #[tokio::test]
@@ -690,7 +812,7 @@ async fn cache_evicting_an_endpoint_drops_every_scope_and_shape() {
     ] {
         cache
             .read(
-                CatalogKey::new(&scope(s), cred, ENDPOINT, shape),
+                CatalogKey::new(&scope(s), &provider(), cred, ENDPOINT, shape),
                 false,
                 || async { Ok(Fetched::new(models(&["m"]))) },
             )
@@ -701,6 +823,7 @@ async fn cache_evicting_an_endpoint_drops_every_scope_and_shape() {
         .read(
             CatalogKey::new(
                 &scope("a"),
+                &provider(),
                 false,
                 "https://other.test/v1",
                 CatalogShape::OpenAi,
@@ -721,6 +844,7 @@ async fn cache_it_never_holds_more_than_the_slot_cap_and_keeps_the_hot_ones() {
     let (cache, clock) = cache();
     let hot = CatalogKey::new(
         &scope("hot"),
+        &provider(),
         false,
         "https://hot.test/v1",
         CatalogShape::OpenAi,
@@ -744,6 +868,7 @@ async fn cache_it_never_holds_more_than_the_slot_cap_and_keeps_the_hot_ones() {
         }
         let k = CatalogKey::new(
             &scope("x"),
+            &provider(),
             false,
             &format!("https://e{n}.test/v1"),
             CatalogShape::OpenAi,
@@ -764,6 +889,7 @@ async fn cache_pruning_first_drops_slots_past_the_stale_retention() {
     for n in 0..MAX_SLOTS {
         let k = CatalogKey::new(
             &scope("x"),
+            &provider(),
             false,
             &format!("https://old{n}.test/v1"),
             CatalogShape::OpenAi,
@@ -777,6 +903,7 @@ async fn cache_pruning_first_drops_slots_past_the_stale_retention() {
     clock.advance(STALE_RETENTION + Duration::from_secs(1));
     let k = CatalogKey::new(
         &scope("x"),
+        &provider(),
         false,
         "https://new.test/v1",
         CatalogShape::OpenAi,
@@ -796,6 +923,7 @@ async fn cache_pruning_first_drops_slots_past_the_stale_retention() {
 fn cache_debug_never_prints_a_credential_bearing_url() {
     let k = CatalogKey::new(
         &scope("a"),
+        &provider(),
         true,
         "https://user:hunter2@x.test/v1?key=abc123",
         CatalogShape::OpenAi,
@@ -831,6 +959,7 @@ async fn cache_an_older_empty_list_is_not_served_as_a_stale_answer() {
     let other = || {
         CatalogKey::new(
             &scope("a"),
+            &provider(),
             false,
             "https://other.test/v1",
             CatalogShape::OpenAi,
@@ -903,7 +1032,7 @@ mod cache_props {
                         let counter = fetches.clone();
                         let label = format!("{name}-{credentialed}");
                         let result = futures::executor::block_on(cache.read(
-                            CatalogKey::new(&scope(&name), credentialed, ENDPOINT, CatalogShape::OpenAi),
+                            CatalogKey::new(&scope(&name), &provider(), credentialed, ENDPOINT, CatalogShape::OpenAi),
                             refresh,
                             || async move {
                                 *counter.lock().unwrap() += 1;

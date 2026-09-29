@@ -7,7 +7,7 @@ use crate::ids::ModelId;
 use crate::ports::HubRequest;
 use crate::taxonomy::Protocol;
 
-use crate::descriptor::ProviderDescriptor;
+use crate::descriptor::{ProviderDescriptor, Quirk};
 
 use super::context::Classifier;
 use super::{DriverContext, Target};
@@ -37,11 +37,20 @@ pub(super) async fn ping_by_protocol(
         Protocol::AnthropicMessages => "/messages",
         _ => "/chat/completions",
     };
+    // OpenAI's newer (reasoning) models reject `max_tokens` with a 400 and want
+    // `max_completion_tokens`, which OpenAI accepts for every chat model. Other
+    // OpenAI-compatible servers know only `max_tokens`, and Anthropic's native
+    // API requires it, so the switch is per catalogue row.
+    let limit_field = if descriptor.has_quirk(Quirk::ResponsesApi) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
     let request = HubRequest::post_json(
         format!("{}{path}", target.base()),
         &json!({
             "model": model.as_str(),
-            "max_tokens": PING_MAX_TOKENS,
+            limit_field: PING_MAX_TOKENS,
             "messages": [{"role": "user", "content": PING_PROMPT}],
         }),
     );

@@ -33,6 +33,7 @@ pub use paged::{
 pub use parse::{
     ParsedCatalog, parse_lmstudio_v0, parse_ollama_tags, parse_openai, parse_openai_value,
 };
+pub(crate) use parse::{too_large, unreadable};
 pub use registry::{ModelMeta, ModelMetadataSource};
 pub use types::{EntrySource, Freshness, Lifecycle, LifecycleStatus, ModelEntry, ModelList};
 

@@ -447,11 +447,7 @@ async fn drivers_managed_the_openai_shaped_backend_reads_prices_with_the_hosts_q
 }
 
 #[test]
-fn drivers_managed_knows_opencompanys_proxy_path() {
-    assert!(ManagedDriver::base_is_paged(
-        "https://x.test/agent-integrations/openrouter/"
-    ));
-    assert!(!ManagedDriver::base_is_paged("https://x.test/openai/v1"));
+fn drivers_managed_reads_the_shape_it_was_built_for() {
     assert_eq!(managed().shape(), CatalogShape::PagedEnvelope);
 }
 
@@ -840,4 +836,57 @@ fn registry_registering_again_replaces_and_returns_the_old_driver() {
     assert!(format!("{old:?}").contains("PagedEnvelope"));
     assert!(format!("{:?}", registry.resolve("tinyhumans").unwrap()).contains("OpenAi"));
     assert_eq!(registry.len(), 35, "replacing does not grow it");
+}
+
+#[tokio::test]
+async fn drivers_local_ollama_falls_back_to_tags_when_v1_models_answers_with_something_that_is_not_a_listing()
+ {
+    let bed = Bed::desktop();
+    bed.http.route(
+        Match::prefix("http://localhost:11434/v1/models"),
+        Scripted::text(200, "<html>proxy landing page</html>"),
+    );
+    bed.http.route(
+        Match::get("http://localhost:11434/api/tags"),
+        Scripted::json(200, &json!({"models": [{"name": "pulled:latest"}]})),
+    );
+    let s = local_subject("ollama", "http://localhost:11434/v1", None);
+    let fetched = local("ollama")
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap();
+    assert_eq!(ids(&fetched), ["pulled:latest"]);
+}
+
+#[tokio::test]
+async fn drivers_local_a_transport_failure_that_looks_unreadable_is_never_a_reason_to_ask_again() {
+    // `HttpError::Failed` classifies as unknown with no status, exactly like a
+    // body that did not parse; only the latter falls back.
+    struct Failing;
+    #[async_trait::async_trait]
+    impl crate::ports::Http for Failing {
+        async fn send(
+            &self,
+            _r: crate::ports::HubRequest,
+            _p: &EndpointPolicy,
+        ) -> Result<crate::ports::HubResponse, crate::ports::HttpError> {
+            Err(crate::ports::HttpError::Failed(crate::LogOnly::new(
+                "tls handshake eof".into(),
+            )))
+        }
+    }
+    impl std::fmt::Debug for Failing {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Failing")
+        }
+    }
+    let bed = Bed::desktop();
+    let failing = Failing;
+    let cx = DriverContext::new(&failing, &bed.policy, &bed.clock, &bed.headers);
+    let s = local_subject("ollama", "http://localhost:11434/v1", None);
+    let error = local("ollama")
+        .list_models(&cx, &s.target())
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), ReasonCode::Unknown);
 }

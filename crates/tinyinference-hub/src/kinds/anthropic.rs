@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::catalog::{Fetched, ModelEntry, parse_openai_value};
+use crate::catalog::{Fetched, ModelEntry, parse_openai_value, too_large, unreadable};
 use crate::descriptor::ProviderDescriptor;
-use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
+use crate::error::HubError;
 use crate::ports::HubRequest;
 
 use super::{DriverContext, KindDriver, Target};
@@ -37,10 +37,6 @@ impl AnthropicDriver {
     }
 }
 
-fn unreadable(text: &str) -> HubError {
-    HubError::Provider(ProviderFailure::new(ReasonCode::Unknown, Retry::Never).with_raw(text))
-}
-
 #[async_trait]
 impl KindDriver for AnthropicDriver {
     fn descriptor(&self) -> &ProviderDescriptor {
@@ -68,14 +64,10 @@ impl KindDriver for AnthropicDriver {
             );
             let response = cx.call(self, request).await?;
             if response.truncated {
-                return Err(HubError::Provider(
-                    ProviderFailure::new(ReasonCode::Unknown, Retry::Never)
-                        .with_truncated(true)
-                        .with_raw("the model list is larger than the size cap"),
-                ));
+                return Err(HubError::Provider(too_large("the model list")));
             }
             let envelope: Value = serde_json::from_slice(&response.body)
-                .map_err(|_| unreadable("the model list was not JSON"))?;
+                .map_err(|_| HubError::Provider(unreadable("the model list was not JSON")))?;
             let parsed = parse_openai_value(&envelope).map_err(HubError::Provider)?;
             for entry in parsed.entries {
                 if !models.iter().any(|m| m.id == entry.id) {

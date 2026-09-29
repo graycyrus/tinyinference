@@ -653,8 +653,11 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
                     body["model"], "contract-model",
                     "[{n}] the ping names the model"
                 );
+                let limit = body["max_tokens"]
+                    .as_u64()
+                    .or_else(|| body["max_completion_tokens"].as_u64());
                 assert!(
-                    body["max_tokens"].as_u64().is_some_and(|t| t <= 16),
+                    limit.is_some_and(|t| t <= 16),
                     "[{n}] a ping is one small completion"
                 );
             }

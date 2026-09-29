@@ -34,7 +34,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::endpoint::redact_endpoint;
 use crate::error::{HubError, ProviderFailure, ReasonCode};
-use crate::ids::ScopeKey;
+use crate::ids::{ScopeKey, Slug};
 use crate::ports::Clock;
 use crate::taxonomy::CatalogShape;
 
@@ -67,6 +67,7 @@ type FetchFuture<'a> =
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CatalogKey {
     scope: Option<ScopeKey>,
+    provider: Option<Slug>,
     endpoint: String,
     shape: CatalogShape,
 }
@@ -74,15 +75,26 @@ pub struct CatalogKey {
 impl CatalogKey {
     /// The key for reading `endpoint` in `shape`.
     ///
-    /// `scope` is the caller's scope and is used **only when `credentialed`**:
-    /// a read that presented nothing has nothing tenant-specific to leak, and
-    /// sharing it keeps one fetch serving every scope on a public endpoint.
+    /// `scope` and `provider` are used **only when `credentialed`**: a read that
+    /// presented nothing has nothing tenant-specific to leak, and sharing it
+    /// keeps one fetch serving every scope on a public endpoint. A credentialed
+    /// read is partitioned by provider as well as scope, because two providers
+    /// in one scope may point at one endpoint with different keys (a work and a
+    /// personal account) and an entitlement-scoped listing must not cross
+    /// between them.
     /// Trailing slashes and surrounding space do not make a different endpoint.
     /// The shape is part of the key because one URL can be read two ways and
     /// must not serve a paged envelope to an OpenAI-shaped reader.
-    pub fn new(scope: &ScopeKey, credentialed: bool, endpoint: &str, shape: CatalogShape) -> Self {
+    pub fn new(
+        scope: &ScopeKey,
+        provider: &Slug,
+        credentialed: bool,
+        endpoint: &str,
+        shape: CatalogShape,
+    ) -> Self {
         Self {
             scope: credentialed.then(|| scope.clone()),
+            provider: credentialed.then(|| provider.clone()),
             endpoint: endpoint.trim().trim_end_matches('/').to_string(),
             shape,
         }
@@ -98,6 +110,7 @@ impl fmt::Debug for CatalogKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CatalogKey")
             .field("scope", &self.scope)
+            .field("provider", &self.provider)
             .field("endpoint", &redact_endpoint(&self.endpoint))
             .field("shape", &self.shape)
             .finish()
@@ -127,7 +140,8 @@ impl Fetched {
 struct Entry {
     at: Instant,
     ttl: Duration,
-    models: Vec<ModelEntry>,
+    /// Shared, so a read clones a pointer under the lock and the list outside it.
+    models: Arc<Vec<ModelEntry>>,
     truncated: bool,
 }
 
@@ -135,6 +149,10 @@ struct Entry {
 struct SlotState {
     entry: Option<Entry>,
     failure: Option<(Instant, ProviderFailure)>,
+    /// The last rejected-credential failure and the generation it completed in.
+    /// Never replayed to a later caller; only to callers that were already
+    /// queued behind the fetch that produced it.
+    rejection: Option<(u64, ProviderFailure)>,
     last_used: Option<Instant>,
 }
 
@@ -161,13 +179,25 @@ impl Slot {
     }
 
     fn fresh(&self, now: Instant) -> Option<ModelList> {
-        let state = self.state();
-        let entry = state.entry.as_ref()?;
-        (now.saturating_duration_since(entry.at) < entry.ttl).then(|| ModelList {
-            models: entry.models.clone(),
+        let (models, truncated) = {
+            let state = self.state();
+            let entry = state.entry.as_ref()?;
+            if now.saturating_duration_since(entry.at) >= entry.ttl {
+                return None;
+            }
+            (Arc::clone(&entry.models), entry.truncated)
+        };
+        Some(ModelList {
+            models: (*models).clone(),
             freshness: Freshness::Cached,
-            truncated: entry.truncated,
+            truncated,
         })
+    }
+
+    fn rejection_at(&self, generation: u64) -> Option<ProviderFailure> {
+        let state = self.state();
+        let (at, failure) = state.rejection.as_ref()?;
+        (*at == generation).then(|| failure.clone())
     }
 
     fn fresh_failure(&self, now: Instant) -> Option<ProviderFailure> {
@@ -176,21 +206,29 @@ impl Slot {
         (now.saturating_duration_since(*at) < FAILURE_TTL).then(|| failure.clone())
     }
 
-    /// The remembered list (however old) as a stale answer, or the failure.
+    /// The remembered list as a stale answer, or the failure.
     ///
-    /// An **empty** remembered list is not an answer worth serving: "no models
-    /// (as of some time ago)" beside a warning hides the failure that matters.
-    fn stale_or(&self, failure: ProviderFailure) -> Result<ModelList, HubError> {
-        let state = self.state();
-        match state
-            .entry
-            .as_ref()
-            .filter(|entry| !entry.models.is_empty())
-        {
-            Some(entry) => Ok(ModelList {
-                models: entry.models.clone(),
+    /// An **empty** remembered list is not an answer worth serving ("no models,
+    /// as of some time ago" beside a warning hides the failure that matters),
+    /// and neither is one older than [`STALE_RETENTION`]: past a day the picker
+    /// would be offering models that may have been retired.
+    fn stale_or(&self, failure: ProviderFailure, now: Instant) -> Result<ModelList, HubError> {
+        let kept = {
+            let state = self.state();
+            state
+                .entry
+                .as_ref()
+                .filter(|entry| {
+                    !entry.models.is_empty()
+                        && now.saturating_duration_since(entry.at) < STALE_RETENTION
+                })
+                .map(|entry| (Arc::clone(&entry.models), entry.truncated))
+        };
+        match kept {
+            Some((models, truncated)) => Ok(ModelList {
+                models: (*models).clone(),
                 freshness: Freshness::Stale { failure },
-                truncated: entry.truncated,
+                truncated,
             }),
             None => Err(HubError::Provider(failure)),
         }
@@ -335,20 +373,27 @@ impl CatalogCache {
                 return Ok(list);
             }
             if let Some(failure) = slot.fresh_failure(now) {
-                return slot.stale_or(failure);
+                return slot.stale_or(failure, self.clock.now());
             }
         }
         let _flight = slot.fetch.lock().await;
         // A fetch completed while this caller waited for the lock: use its
         // answer instead of asking the provider again.
-        if slot.generation.load(Ordering::SeqCst) != generation_seen {
+        let generation_now = slot.generation.load(Ordering::SeqCst);
+        if generation_now != generation_seen {
+            // The fetch they queued behind was rejected: they share that answer
+            // (one request, not one per waiter), but it is never replayed to a
+            // caller that arrives later.
+            if let Some(failure) = slot.rejection_at(generation_now) {
+                return Err(HubError::Provider(failure));
+            }
             let now = self.clock.now();
             if let Some(mut list) = slot.fresh(now) {
                 list.freshness = Freshness::Cached;
                 return Ok(list);
             }
             if let Some(failure) = slot.fresh_failure(now) {
-                return slot.stale_or(failure);
+                return slot.stale_or(failure, self.clock.now());
             }
         }
         let outcome = fetch().await;
@@ -370,7 +415,7 @@ impl CatalogCache {
                     state.entry = Some(Entry {
                         at: now,
                         ttl,
-                        models: fetched.models,
+                        models: Arc::new(fetched.models),
                         truncated: fetched.truncated,
                     });
                     // The endpoint answers again; a stale "unreachable" would
@@ -384,12 +429,14 @@ impl CatalogCache {
             // remembered, and never answered with an older list (a bad key must
             // show).
             Err(HubError::Provider(failure)) if is_credential_failure(&failure) => {
+                let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                slot.state().rejection = Some((generation, failure.clone()));
                 Err(HubError::Provider(failure))
             }
             Err(HubError::Provider(failure)) => {
                 slot.state().failure = Some((now, failure.clone()));
                 slot.generation.fetch_add(1, Ordering::SeqCst);
-                slot.stale_or(failure)
+                slot.stale_or(failure, now)
             }
             // A policy refusal, an unreadable store, a bad input: deterministic
             // or about something other than the endpoint, so not memoised.

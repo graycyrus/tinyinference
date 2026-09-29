@@ -10,9 +10,10 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::descriptor::{CapSource, Sourced};
-use crate::error::{ProviderFailure, ReasonCode, Retry};
+use crate::error::ProviderFailure;
 use crate::ids::ModelId;
 
+use super::parse::unreadable;
 use super::types::ModelEntry;
 
 /// Page size requested. The backend clamps `limit` to `[1, 500]`.
@@ -58,12 +59,6 @@ pub enum NextPage {
     },
 }
 
-fn unreadable(text: String) -> ProviderFailure {
-    // Connected, but the body did not parse: says nothing about the credential,
-    // so `Unknown`, never `Auth`.
-    ProviderFailure::new(ReasonCode::Unknown, Retry::Never).with_raw(text)
-}
-
 fn field(row: &Value, key: &str) -> Option<String> {
     row.get(key)
         .and_then(Value::as_str)
@@ -95,12 +90,12 @@ pub fn parse_page(body: &str) -> Result<Page, ProviderFailure> {
     }
     let Some(data) = value.get("data").filter(|d| d.is_object()) else {
         return Err(unreadable(
-            "the model catalog was not in the `{success, data}` envelope".to_string(),
+            "the model catalog was not in the `{success, data}` envelope",
         ));
     };
     let Some(rows) = data.get("data").and_then(Value::as_array) else {
         return Err(unreadable(
-            "the model catalog envelope carried no `data` list".to_string(),
+            "the model catalog envelope carried no `data` list",
         ));
     };
     let entries = rows
