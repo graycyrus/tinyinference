@@ -206,8 +206,8 @@ fn redact_json_credentials(text: &str, quote: &str) -> String {
 }
 
 /// The index of the `\"` that closes a string inside a JSON document carried as
-/// a string value: the first `\"` preceded by exactly one backslash (three
-/// backslashes before a quote is an escaped quote *inside* the value).
+/// a string value: the first quote preceded by a run of backslashes whose length
+/// is 1 modulo 4.
 fn escaped_quote_end(text: &str, from: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut i = from;
@@ -218,7 +218,10 @@ fn escaped_quote_end(text: &str, from: usize) -> Option<usize> {
                 .rev()
                 .take_while(|b| **b == b'\\')
                 .count();
-            if backslashes == 1 {
+            // Once-more-escaped JSON: a bare closing quote is `\"` (1), an escaped
+            // quote inside the value is `\\\"` (3), and a literal backslash
+            // before the closing quote adds 4 (5, 9, ...).
+            if backslashes % 4 == 1 {
                 return Some(i - 1);
             }
         }

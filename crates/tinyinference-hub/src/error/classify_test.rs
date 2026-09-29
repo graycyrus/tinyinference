@@ -1116,3 +1116,18 @@ fn a_secret_containing_an_escaped_quote_inside_an_escaped_json_string_is_redacte
     );
     assert_eq!(scrubbed, r#"{"error":"{\"token\":\"<redacted>\"}"}"#);
 }
+
+#[test]
+fn a_secret_ending_in_a_backslash_inside_an_escaped_json_string_keeps_the_structure() {
+    // Regression (review round 8): a secret ending in `\\` closes with five
+    // backslashes before the quote, which the "exactly one" rule skipped,
+    // over-redacting into the next member.
+    let text = r#"{"error":"{\"token\":\"ab\\\\\",\"x\":\"keep\"}"}"#;
+    let scrubbed = scrub_log_text(text);
+    assert!(!scrubbed.contains("ab\\"), "{scrubbed}");
+    assert!(scrubbed.contains(r#"\"x\":\"keep\""#), "{scrubbed}");
+    assert_eq!(
+        scrubbed,
+        r#"{"error":"{\"token\":\"<redacted>\",\"x\":\"keep\"}"}"#
+    );
+}

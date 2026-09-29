@@ -187,9 +187,13 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
     let in_word = parts.iter().any(|w| {
         COMPOUNDS.iter().any(|c| w.contains(c)) || (w.contains("secret") && !w.contains("secretar"))
     });
+    // The second word may carry a plural or a number (`api_keys`, `api_key2`).
     let joined = parts.windows(2).any(|pair| {
-        let both = format!("{}{}", pair[0], pair[1]);
-        COMPOUNDS.contains(&both.as_str())
+        let second = pair[1].trim_end_matches(|c: char| c.is_ascii_digit());
+        let singular = second.strip_suffix('s').unwrap_or(second);
+        [second, singular]
+            .iter()
+            .any(|tail| COMPOUNDS.contains(&format!("{}{tail}", pair[0]).as_str()))
     });
     if in_word || joined {
         return true;

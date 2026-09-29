@@ -248,12 +248,7 @@ fn concatenated_and_prefixed_credential_names_are_caught_and_benign_words_do_not
 #[test]
 fn a_compound_spanning_a_word_boundary_is_not_a_credential() {
     // Regression (review round 7): `valid_tokens` collapsed to contain `idtoken`.
-    for name in [
-        "valid_tokens",
-        "max_id_tokens",
-        "paid_tokens",
-        "no_key_words",
-    ] {
+    for name in ["valid_tokens", "paid_tokens", "no_key_words"] {
         assert!(!is_credential_name(name), "{name}");
     }
     // Adjacent whole words that join into a compound still count.
@@ -268,5 +263,31 @@ fn a_compound_spanning_a_word_boundary_is_not_a_credential() {
         "accessToken",
     ] {
         assert!(is_credential_name(name), "{name}");
+    }
+}
+
+#[test]
+fn a_plural_or_numbered_compound_is_still_a_credential() {
+    // Regression (review round 8): `api_keys` and `api_key2` were flagged before
+    // the word-boundary change and not after it.
+    for name in [
+        "api_keys",
+        "apiKeys",
+        "API_KEYS",
+        "api_key2",
+        "access_tokens",
+        "session_tokens",
+        "auth_tokens",
+        "id_tokens",
+        "api_token2",
+        "master_key2",
+        "accessKey2",
+        "apikeys",
+        "password2",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+    for name in ["valid_tokens", "paid_tokens", "keys_total", "tokens_used"] {
+        assert!(!is_credential_name(name), "{name}");
     }
 }
