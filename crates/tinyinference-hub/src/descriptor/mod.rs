@@ -11,7 +11,7 @@ mod record;
 mod types;
 
 pub use capabilities::{CapSource, Capabilities, Sourced, Tri};
-pub use record::{LegacyFields, ProviderRecord, RecordOrigin};
+pub use record::{ExtractedCredential, LegacyFields, ProviderRecord, RecordOrigin};
 pub use types::{ProviderDescriptor, Quirk};
 
 #[cfg(test)]

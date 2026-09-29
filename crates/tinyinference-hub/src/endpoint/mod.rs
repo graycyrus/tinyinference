@@ -9,7 +9,8 @@ mod redact;
 
 pub use normalize::{endpoint_host, normalize_local_endpoint};
 pub use redact::{
-    REDACTED_USERINFO, endpoint_has_credentials, redact_endpoint, scrub_endpoint_credential,
+    REDACTED_USERINFO, endpoint_has_credentials, endpoint_query_has_credential, redact_endpoint,
+    scrub_endpoint_credential,
 };
 
 /// What an operator is told when an endpoint they typed carries a credential.

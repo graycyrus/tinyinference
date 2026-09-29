@@ -103,12 +103,14 @@ fn map_urls(text: &str, mut f: impl FnMut(&str) -> String) -> String {
         }
         out.push_str(&text[at..start]);
         let tail = &text[start..];
+        // A URL ends at whitespace, a double quote or an angle bracket. `,`, `)`
+        // and `'` are legal inside userinfo (`user:pa,ss@host`), so they do not
+        // end it; trailing ones are trimmed back below as sentence punctuation.
         let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<' | ','))
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '>' | '<'))
             .unwrap_or(tail.len());
-        // Trailing sentence punctuation is not part of the URL.
         let end = tail[..end]
-            .trim_end_matches(['.', ';', ':', '!', '?'])
+            .trim_end_matches(['.', ';', ':', '!', '?', ',', ')', '\''])
             .len();
         out.push_str(&f(&tail[..end]));
         at = start + end;
@@ -188,7 +190,19 @@ fn redact_json_member(text: &str, name: &str) -> String {
             continue;
         };
         let value_start = text.len() - body.len();
-        let close = body.find('"').unwrap_or(body.len());
+        // The closing quote is the first one not escaped by a backslash.
+        let mut close = body.len();
+        let mut escaped = false;
+        for (index, c) in body.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                close = index;
+                break;
+            }
+        }
         out.push_str(&text[at..value_start]);
         out.push_str("<redacted>");
         at = value_start + close;
@@ -197,33 +211,39 @@ fn redact_json_member(text: &str, name: &str) -> String {
     out
 }
 
-/// Replaces the run of non-whitespace, non-quote characters after each
-/// case-insensitive occurrence of `marker` with `<redacted>`.
+/// Replaces the value after each case-insensitive occurrence of `marker` with
+/// `<redacted>`.
+///
+/// After `bearer ` / `basic ` the value is one token. After a header name
+/// (`authorization:`, `x-api-key:`, `api-key:`) it is the rest of the line up to
+/// a quote, `}` or `,`, because a scheme other than Bearer/Basic
+/// (`Authorization: Token abc123`) has a second word that is the secret.
 fn redact_after(text: &str, marker: &str) -> String {
+    let header = marker.ends_with(':');
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     while let Some(offset) = lower[at..].find(marker) {
         let value_start = at + offset + marker.len();
         out.push_str(&text[at..value_start]);
-        // Skip spaces after a header colon, then take the value.
         let rest = &text[value_start..];
         let spaces = rest.len() - rest.trim_start_matches(' ').len();
         out.push_str(&rest[..spaces]);
         let value = &rest[spaces..];
-        let len = value
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '}' | ')'))
-            .unwrap_or(value.len());
+        let len = if header {
+            value
+                .find(['\n', '\r', '"', '}', ','])
+                .unwrap_or(value.len())
+        } else {
+            value
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '}' | ')'))
+                .unwrap_or(value.len())
+        };
         let word = &value[..len];
-        // `Authorization: Bearer <token>`: the scheme word stays (the `bearer `
-        // marker redacts the token itself), and a value already redacted stays.
-        let already = word.starts_with("<redacted>")
-            || word.eq_ignore_ascii_case("bearer")
-            || word.eq_ignore_ascii_case("basic");
-        if len > 0 && !already {
+        if len > 0 && !word.starts_with("<redacted>") {
             out.push_str("<redacted>");
         } else {
-            out.push_str(&value[..len]);
+            out.push_str(word);
         }
         at = value_start + spaces + len;
     }
@@ -317,6 +337,9 @@ fn has_rate_marker(haystack: &str) -> bool {
         "try again in",
         "slow_down",
         "too many requests",
+        // Google's RESOURCE_EXHAUSTED is a rate limit on a 429.
+        "resource_exhausted",
+        "resource has been exhausted",
     ];
     MARKERS.iter().any(|m| haystack.contains(m))
         || contains_token(haystack, "tpm")
@@ -363,7 +386,10 @@ fn says_context_window_exceeded(haystack: &str) -> bool {
 fn says_model_missing(haystack: &str) -> bool {
     haystack.contains("model_not_found")
         || (haystack.contains("not found") && haystack.contains("model"))
-        || haystack.contains("does not exist")
+        || (haystack.contains("does not exist")
+            && ["model", "deployment", "engine"]
+                .iter()
+                .any(|word| haystack.contains(word)))
         || haystack.contains("is not available")
         || haystack.contains("unknown model")
         || haystack.contains("invalid model")
@@ -457,7 +483,11 @@ pub(crate) fn classify_text(
         None => contains_token(&haystack, &code.to_string()),
     };
     let is_5xx = status.is_some_and(|s| (500..600).contains(&s) || s == 408);
-    let later = if is_5xx || has_retry_after {
+    // A server-side failure says nothing about the model id or the account, so
+    // the body-phrase rules for those do not run under a 5xx: "Service is not
+    // available" is an outage, not a missing model.
+    let server_error = is_5xx;
+    let later = if is_5xx || has_status(429) || has_retry_after {
         Retry::Later(None)
     } else {
         Retry::Never
@@ -517,12 +547,16 @@ pub(crate) fn classify_text(
     // limit).
     if status == Some(402)
         || says_spend_is_exhausted(&haystack)
-        || (says_soft_quota(&haystack) && !has_rate_marker(&haystack) && !has_retry_after)
+        || (!server_error
+            && !has_status(429)
+            && says_soft_quota(&haystack)
+            && !has_rate_marker(&haystack)
+            && !has_retry_after)
     {
         return done(ReasonCode::Quota, Retry::Never);
     }
 
-    if says_context_window_exceeded(&haystack) {
+    if !server_error && says_context_window_exceeded(&haystack) {
         return done(ReasonCode::Model, Retry::Never).with_provider_code("context_length_exceeded");
     }
     if status == Some(400) && haystack.contains("no models loaded") {
@@ -533,7 +567,7 @@ pub(crate) fn classify_text(
     // found", which would otherwise claim every provider that phrases a missing
     // model as "model not found" and send the operator to check their base URL
     // instead of their model id.
-    if says_model_missing(&haystack) {
+    if !server_error && says_model_missing(&haystack) {
         return done(ReasonCode::Model, Retry::Never);
     }
 

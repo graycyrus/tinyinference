@@ -826,3 +826,48 @@ fn an_absolute_host_name_and_a_mixed_case_entry_still_match_first_party() {
     assert!(policy.allows_product_header_to("https://api.example.org/v1"));
     assert!(!policy.allows_product_header_to("https://example.org.evil.test/v1"));
 }
+
+#[test]
+fn only_an_ipv4_mapped_loopback_counts_as_this_host_for_cleartext() {
+    // Regression (review round 3): NAT64, 6to4 and IPv4-compatible forms of
+    // 127.0.0.1 leave the machine, so a key must not go to them over http.
+    let p = local_offered();
+    for url in [
+        "http://[64:ff9b::7f00:1]/v1",
+        "http://[2002:7f00:1::]/v1",
+        "http://[::7f00:1]/v1",
+    ] {
+        assert!(
+            check_endpoint_with_credential(url, &p, true).is_err(),
+            "{url}"
+        );
+    }
+    assert_eq!(
+        check_endpoint_with_credential("http://[::ffff:127.0.0.1]/v1", &p, true),
+        Ok(())
+    );
+    assert_eq!(
+        check_endpoint_with_credential("http://[::1]/v1", &p, true),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_credential_named_query_parameter_is_refused_like_userinfo() {
+    for url in [
+        "https://generativelanguage.test/v1?key=AIzaFAKE",
+        "https://h.test/v1?api_key=x",
+        "https://h.test/v1?access_token=x&a=1",
+        "https://h.test/v1?a=1&Signature=x",
+    ] {
+        assert_eq!(
+            check_endpoint(url, &server_side()),
+            Err(EndpointRefusal::CredentialInUrl),
+            "{url}"
+        );
+    }
+    assert_eq!(
+        check_endpoint("https://h.test/v1?version=2&limit=5", &server_side()),
+        Ok(())
+    );
+}

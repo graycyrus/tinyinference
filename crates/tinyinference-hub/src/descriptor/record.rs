@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::endpoint::endpoint_has_credentials;
+use crate::endpoint::{endpoint_has_credentials, endpoint_query_has_credential};
 use crate::error::{InputField, InvalidInput};
 use crate::ids::{KindId, ModelId, Slug};
+use crate::secret::{Secret, is_credential_name};
 use crate::taxonomy::AuthStyle;
 
 /// Fields a record carries that the hub does not interpret (for example
@@ -72,6 +73,18 @@ pub struct ProviderRecord {
     pub legacy: LegacyFields,
 }
 
+/// A credential pulled off a stored record by
+/// [`ProviderRecord::extract_credentials`], to be written to the credential
+/// store.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedCredential {
+    /// The field it was stored under (a name, not a value).
+    pub field: String,
+    /// The credential; redacts itself in `Debug`.
+    pub value: Secret,
+}
+
 /// The deserialisation shape of [`ProviderRecord`]: the same fields, converted
 /// through [`ProviderRecord::validate`].
 #[derive(Deserialize)]
@@ -117,44 +130,19 @@ impl TryFrom<ProviderRecordWire> for ProviderRecord {
     }
 }
 
-/// Whether a field name marks its value as a credential.
-///
-/// Deliberately narrow so ordinary fields (`max_tokens`, `tokenizer`, `tiers`)
-/// are not caught: the substrings `api_key`, `apikey`, `access_key`,
-/// `private_key`, `secret`, `password`, `passwd`, `passphrase`, `authorization`
-/// and `bearer`, the suffix `_token`, and the exact names `key`, `token`,
-/// `credential` and `credentials`. `-` and case are ignored.
-fn is_credential_field(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase().replace('-', "_");
-    const SUBSTRINGS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "access_key",
-        "private_key",
-        "secret",
-        "password",
-        "passwd",
-        "passphrase",
-        "authorization",
-        "bearer",
-    ];
-    const EXACT: &[&str] = &["key", "token", "credential", "credentials"];
-    SUBSTRINGS.iter().any(|s| lower.contains(s))
-        || lower.ends_with("_token")
-        || EXACT.contains(&lower.as_str())
-}
-
 /// The first credential-shaped field name anywhere in `value`, looking through
 /// nested objects and arrays (a secret under `tiers` or `headers` is still a
 /// secret on the record). Depth-bounded so a hostile file cannot recurse
 /// without limit.
 fn find_credential_field(value: &serde_json::Value, depth: usize) -> Option<String> {
+    // Fail closed: a structure nested deeper than the bound is refused rather
+    // than assumed clean, so a credential cannot hide under nine levels.
     if depth > 8 {
-        return None;
+        return Some("(nested too deeply to check)".to_string());
     }
     match value {
         serde_json::Value::Object(map) => map.iter().find_map(|(name, inner)| {
-            if is_credential_field(name) {
+            if is_credential_name(name) {
                 Some(name.clone())
             } else {
                 find_credential_field(inner, depth + 1)
@@ -189,8 +177,14 @@ impl ProviderRecord {
                 reason: "the endpoint carries a username or password",
             });
         }
+        if endpoint_query_has_credential(&self.base_url) {
+            return Err(InvalidInput::Malformed {
+                field: InputField::Endpoint,
+                reason: "the endpoint carries a credential in its query string",
+            });
+        }
         for (name, value) in &self.legacy {
-            let found = if is_credential_field(name) {
+            let found = if is_credential_name(name) {
                 Some(name.clone())
             } else {
                 find_credential_field(value, 0)
@@ -200,6 +194,37 @@ impl ProviderRecord {
             }
         }
         Ok(())
+    }
+
+    /// The migration path for a stored record that predates the credential
+    /// rule: removes every top-level credential-shaped string field from
+    /// `value` and returns it beside the cleaned value, so an import reader can
+    /// move each one into the credential store and then deserialise the rest.
+    ///
+    /// Only top-level string fields are extracted. A credential nested deeper
+    /// (or a userinfo endpoint) is left in place, so deserialising the cleaned
+    /// value still fails loudly rather than persisting it.
+    pub fn extract_credentials(
+        value: serde_json::Value,
+    ) -> (serde_json::Value, Vec<ExtractedCredential>) {
+        let serde_json::Value::Object(mut map) = value else {
+            return (value, Vec::new());
+        };
+        let names: Vec<String> = map
+            .iter()
+            .filter(|(name, inner)| is_credential_name(name) && inner.is_string())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut extracted = Vec::new();
+        for name in names {
+            if let Some(serde_json::Value::String(text)) = map.remove(&name) {
+                extracted.push(ExtractedCredential {
+                    field: name,
+                    value: Secret::new(text),
+                });
+            }
+        }
+        (serde_json::Value::Object(map), extracted)
     }
 
     /// A new enabled, non-synthetic record.

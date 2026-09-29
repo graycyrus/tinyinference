@@ -582,10 +582,7 @@ fn the_raw_body_is_kept_log_only_and_never_displayed() {
     let secretish = "Authorization: Bearer sk-not-a-real-key rejected";
     let failure = body(401, secretish);
     // The raw text is scrubbed on the way in: the echoed credential is gone.
-    assert_eq!(
-        failure.raw.expose(),
-        "Authorization: Bearer <redacted> rejected"
-    );
+    assert_eq!(failure.raw.expose(), "Authorization: <redacted>");
     assert!(!format!("{failure}").contains("sk-not"));
     assert!(!format!("{failure:?}").contains("sk-not"));
     let error = HubError::Provider(failure);
@@ -919,4 +916,109 @@ proptest! {
         prop_assert!(!scrubbed.contains("?key="));
         let _ = strip_urls(&text);
     }
+}
+
+// ---- round 3 review regressions --------------------------------------------------------
+
+#[test]
+fn a_url_password_containing_url_punctuation_is_still_redacted() {
+    for (text, secret) in [
+        ("call https://user:pa,ss@host.test/v1 failed", "pa,ss"),
+        ("call https://user:pa)ss@host.test/v1 failed", "pa)ss"),
+        ("call https://user:pa'ss@host.test/v1 failed", "pa'ss"),
+    ] {
+        let scrubbed = scrub_log_text(text);
+        assert!(!scrubbed.contains(secret), "{scrubbed}");
+        assert!(scrubbed.contains("host.test"), "{scrubbed}");
+    }
+    // Trailing punctuation is still trimmed back off the URL.
+    assert_eq!(
+        scrub_log_text("see (https://a.test/x), then"),
+        "see (https://a.test/x), then"
+    );
+    assert_eq!(
+        strip_urls("see (https://a.test/x), then"),
+        "see (<url>), then"
+    );
+}
+
+#[test]
+fn a_non_bearer_authorization_scheme_and_escaped_quotes_are_redacted_whole() {
+    let a = scrub_log_text("Authorization: Token abc123 was rejected");
+    assert!(!a.contains("abc123"), "{a}");
+    let b = scrub_log_text(r#"{"password":"ab\"cd-secret","other":"ok"}"#);
+    assert!(
+        !b.contains("cd-secret") && b.contains(r#""other":"ok""#),
+        "{b}"
+    );
+    let c = scrub_log_text("x-api-key: sk one two\nnext line");
+    assert!(!c.contains("one two") && c.contains("next line"), "{c}");
+}
+
+#[test]
+fn a_server_error_is_never_read_as_a_missing_model_or_an_empty_account() {
+    // Regression (review round 3): body phrases ran under an authoritative 5xx.
+    for (status, text) in [
+        (503, "Service is not available, please retry"),
+        (500, "internal error: billing service unavailable"),
+        (502, "the model gateway does not exist right now"),
+        (504, "upstream said: maximum context length"),
+    ] {
+        let f = body(status, text);
+        assert!(
+            !matches!(f.reason, ReasonCode::Model | ReasonCode::Quota),
+            "{status} {text}: {:?}",
+            f.reason
+        );
+        assert!(
+            matches!(f.retry, Retry::Later(_)),
+            "{status} {text}: {:?}",
+            f.retry
+        );
+    }
+    // A 404 about the endpoint is an endpoint failure; one about a model is a model failure.
+    assert_eq!(
+        body(404, "The requested endpoint does not exist").reason,
+        ReasonCode::Endpoint
+    );
+    assert_eq!(
+        body(404, "The model `x` does not exist").reason,
+        ReasonCode::Model
+    );
+    assert_eq!(
+        body(404, "The API deployment for this resource does not exist").reason,
+        ReasonCode::Model
+    );
+    // Explicit spend codes still win on any status.
+    assert_eq!(body(500, "insufficient_quota").reason, ReasonCode::Quota);
+}
+
+#[test]
+fn a_429_is_a_rate_limit_unless_it_says_the_spend_is_gone() {
+    // Regression: a bare "quota" on a 429 (Google RESOURCE_EXHAUSTED) was a
+    // permanent stop.
+    let f = body(429, "Resource has been exhausted (e.g. check quota).");
+    assert_eq!(f.reason, ReasonCode::RateLimited);
+    assert_eq!(f.retry, Retry::Later(None));
+    assert_eq!(
+        body(429, r#"{"error":{"status":"RESOURCE_EXHAUSTED"}}"#).reason,
+        ReasonCode::RateLimited
+    );
+    assert_eq!(
+        body(429, "please check your quota").reason,
+        ReasonCode::RateLimited
+    );
+    // Hard phrases still win, and the same soft wording off a 429 is still credit.
+    assert_eq!(
+        body(429, "You exceeded your current quota").reason,
+        ReasonCode::Quota
+    );
+    assert_eq!(
+        body(403, "check your quota and billing").reason,
+        ReasonCode::Quota
+    );
+    // A proxy-page 429 (Cloudflare 1015) is retryable, not a permanent Unknown.
+    let f = body(429, "cloudflare error 1015");
+    assert_eq!(f.reason, ReasonCode::Unknown);
+    assert!(matches!(f.retry, Retry::Later(_)));
 }

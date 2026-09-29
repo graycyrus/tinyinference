@@ -301,13 +301,119 @@ fn credentials_nested_or_spelled_differently_are_refused_too() {
             "{name}: {error}"
         );
     }
-    // A too-deep structure is not walked without bound, and ordinary nested data loads.
+    // A too-deep structure is not walked without bound (and is refused), and ordinary nested data loads.
     let mut deep = json!({"leaf": 1});
     for _ in 0..20 {
         deep = json!({ "n": deep });
     }
-    assert!(serde_json::from_value::<ProviderRecord>(stored(json!({"tiers": deep}))).is_ok());
+    // Fail closed: nesting beyond the bound is refused, not assumed clean.
+    assert!(serde_json::from_value::<ProviderRecord>(stored(json!({"tiers": deep}))).is_err());
     let ok =
         json!({"tiers": {"chat-v1": "gpt-5", "list": [1, {"max_tokens": 5, "tokenizer": "x"}]}});
     assert!(serde_json::from_value::<ProviderRecord>(stored(ok)).is_ok());
+}
+
+// ---- round 3 review regressions --------------------------------------------------------
+
+#[test]
+fn a_credential_hidden_below_the_depth_bound_is_refused_not_assumed_clean() {
+    let mut nested = json!({"password": "x"});
+    for _ in 0..9 {
+        nested = json!({ "wrap": nested });
+    }
+    let error =
+        serde_json::from_value::<ProviderRecord>(stored(json!({"tiers": nested}))).unwrap_err();
+    assert!(error.to_string().contains("credential"), "{error}");
+}
+
+#[test]
+fn camel_case_credential_names_are_recognised() {
+    for name in [
+        "accessToken",
+        "authToken",
+        "refreshToken",
+        "sessionToken",
+        "accessKey",
+        "privateKey",
+        "apiKey",
+        "clientSecret",
+        "auth",
+        "Signature",
+        "APIKEY",
+    ] {
+        assert!(
+            serde_json::from_value::<ProviderRecord>(stored(json!({ name: "x" }))).is_err(),
+            "{name}"
+        );
+    }
+    for name in [
+        "maxTokens",
+        "tokenizer",
+        "keywords",
+        "displayName",
+        "authors",
+        "oauthRedirect",
+    ] {
+        assert!(
+            serde_json::from_value::<ProviderRecord>(stored(json!({ name: "x" }))).is_ok(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_credential_in_the_endpoint_query_string_is_refused() {
+    for url in [
+        "http://h.test/v1?api_key=sk-not-a-real-key",
+        "https://h.test/v1?key=AIzaFAKE",
+        "https://h.test/v1?x=1&access_token=abc",
+        "https://h.test/v1?Signature=abc",
+    ] {
+        let error = serde_json::from_value::<ProviderRecord>(stored(json!({"base_url": url})))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("query string"), "{url}: {error}");
+        assert!(
+            !error.contains("sk-not-a-real-key") && !error.contains("AIza"),
+            "{error}"
+        );
+    }
+    assert!(
+        serde_json::from_value::<ProviderRecord>(stored(
+            json!({"base_url": "https://h.test/v1?version=2&limit=10"})
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn extract_credentials_is_the_migration_path_for_an_old_record() {
+    // Regression (review round 3): a stored record from before the rule could
+    // neither load nor be migrated.
+    let old = stored(json!({
+        "api_key": "sk-not-a-real-key", "accessToken": "tok", "tiers": {"chat-v1": "gpt-5"}, "count": 3
+    }));
+    assert!(serde_json::from_value::<ProviderRecord>(old.clone()).is_err());
+    let (clean, extracted) = ProviderRecord::extract_credentials(old);
+    let mut fields: Vec<_> = extracted.iter().map(|e| e.field.as_str()).collect();
+    fields.sort_unstable();
+    assert_eq!(fields, vec!["accessToken", "api_key"]);
+    let key = extracted.iter().find(|e| e.field == "api_key").unwrap();
+    assert_eq!(key.value.expose(), "sk-not-a-real-key");
+    assert!(
+        !format!("{extracted:?}").contains("sk-not-a-real-key"),
+        "Debug redacts"
+    );
+    let record: ProviderRecord = serde_json::from_value(clean).unwrap();
+    assert_eq!(record.legacy["tiers"], json!({"chat-v1": "gpt-5"}));
+    assert!(!record.legacy.contains_key("api_key"));
+    // Nested credentials and non-string values are not extracted: the cleaned
+    // value still fails loudly rather than persisting them.
+    let (still_bad, none) =
+        ProviderRecord::extract_credentials(stored(json!({"tiers": {"api_key": "x"}, "token": 5})));
+    assert!(none.is_empty());
+    assert!(serde_json::from_value::<ProviderRecord>(still_bad).is_err());
+    // A non-object value passes through untouched.
+    let (same, none) = ProviderRecord::extract_credentials(json!(7));
+    assert_eq!((same, none.len()), (json!(7), 0));
 }

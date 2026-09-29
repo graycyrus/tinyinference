@@ -110,6 +110,57 @@ impl<T> fmt::Display for LogOnly<T> {
     }
 }
 
+/// Whether a field, header or query-parameter name marks its value as a
+/// credential.
+///
+/// camelCase is split (`accessToken` is `access_token`) and `-` and case are
+/// ignored. Deliberately narrow so ordinary names (`max_tokens`, `tokenizer`,
+/// `tiers`) are not caught: the substrings `api_key`, `apikey`, `access_key`,
+/// `private_key`, `secret`, `password`, `passwd`, `passphrase`,
+/// `authorization` and `bearer`, the suffix `_token`, and the exact names
+/// `key`, `token`, `auth`, `credential`, `credentials`, `sig` and `signature`.
+pub(crate) fn is_credential_name(name: &str) -> bool {
+    let mut lower = String::with_capacity(name.len() + 4);
+    let mut previous: Option<char> = None;
+    for c in name.trim().chars() {
+        if c.is_ascii_uppercase()
+            && previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+        {
+            lower.push('_');
+        }
+        lower.push(if c == '-' {
+            '_'
+        } else {
+            c.to_ascii_lowercase()
+        });
+        previous = Some(c);
+    }
+    const SUBSTRINGS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "access_key",
+        "private_key",
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "authorization",
+        "bearer",
+    ];
+    const EXACT: &[&str] = &[
+        "key",
+        "token",
+        "auth",
+        "credential",
+        "credentials",
+        "sig",
+        "signature",
+    ];
+    SUBSTRINGS.iter().any(|s| lower.contains(s))
+        || lower.ends_with("_token")
+        || EXACT.contains(&lower.as_str())
+}
+
 #[cfg(test)]
 #[path = "secret_test.rs"]
 mod tests;

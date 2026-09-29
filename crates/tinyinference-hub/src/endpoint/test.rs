@@ -497,3 +497,38 @@ fn a_query_or_fragment_is_not_a_path_when_appending_v1() {
         );
     }
 }
+
+#[test]
+fn a_bare_slash_before_a_query_or_fragment_still_gets_v1() {
+    // Regression (review round 3): `host/?x=1` kept the root path.
+    for (raw, expected) in [
+        ("http://host/?x=1", "http://host/v1?x=1"),
+        ("http://host:11434/#frag", "http://host:11434/v1#frag"),
+        ("http://host//?x=1", "http://host/v1?x=1"),
+        ("http://host/api/?x=1", "http://host/api/?x=1"),
+    ] {
+        let once = normalize_local_endpoint(raw).unwrap();
+        assert_eq!(once, expected, "{raw}");
+        assert_eq!(
+            normalize_local_endpoint(&once),
+            Some(once.clone()),
+            "idempotent {raw}"
+        );
+    }
+}
+
+#[test]
+fn an_endpoint_with_a_credential_query_is_not_storable() {
+    assert!(endpoint_query_has_credential("https://h.test/v1?key=abc"));
+    assert!(endpoint_query_has_credential(
+        "https://h.test/v1?x=1&apiKey=abc"
+    ));
+    assert!(!endpoint_query_has_credential(
+        "https://h.test/v1?version=2"
+    ));
+    assert!(!endpoint_query_has_credential("not a url ?key=abc"));
+    assert_eq!(
+        normalize_local_endpoint("http://h.test:1234/v1?api_key=abc"),
+        None
+    );
+}

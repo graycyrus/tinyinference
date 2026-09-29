@@ -3,7 +3,7 @@
 
 use url::{Host, Url};
 
-use super::redact::endpoint_has_credentials;
+use super::redact::{endpoint_has_credentials, endpoint_query_has_credential};
 
 /// Lowercased authority host of an endpoint URL: scheme, userinfo, port and
 /// path dropped. `None` when no host can be parsed.
@@ -73,7 +73,7 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
 /// the backstop for the ones that do not.
 pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    if endpoint_has_credentials(trimmed) {
+    if endpoint_has_credentials(trimmed) || endpoint_query_has_credential(trimmed) {
         return None;
     }
     let (scheme, rest) = trimmed.split_once("://")?;
@@ -84,8 +84,9 @@ pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     // and fragment are not path: `host?next=/a` has no path, and `/v1` goes
     // before a query, not after it.
     let cut = rest.find(['?', '#']).unwrap_or(rest.len());
-    if !rest[..cut].contains('/') {
-        return Some(format!("{scheme}://{}/v1{}", &rest[..cut], &rest[cut..]));
+    let head = rest[..cut].trim_end_matches('/');
+    if !head.contains('/') {
+        return Some(format!("{scheme}://{head}/v1{}", &rest[cut..]));
     }
     Some(trimmed.to_string())
 }

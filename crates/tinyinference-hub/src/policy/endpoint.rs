@@ -201,7 +201,8 @@ fn is_loopback_name(domain: &str) -> bool {
 ///   broadcast are refused regardless);
 /// * loopback, including `localhost` by name, only where the policy allows it;
 /// * a public name or address only where the policy allows public hosts;
-/// * userinfo (`user:password@`) is refused after the host checks, so the
+/// * userinfo (`user:password@`) and credential-named query parameters
+///   (`?key=`, `?api_key=`) are refused after the host checks, so the
 ///   address answer for a metadata host still wins, but no URL that carries a
 ///   credential is ever accepted (guard G16). OpenCompany refused it on its
 ///   write path; the hub refuses it wherever an endpoint is checked.
@@ -231,7 +232,12 @@ pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), Endpoint
             }
         }
     }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed
+            .query_pairs()
+            .any(|(name, _)| crate::secret::is_credential_name(&name))
+    {
         return Err(EndpointRefusal::CredentialInUrl);
     }
     Ok(())
@@ -265,7 +271,11 @@ pub fn check_endpoint_with_credential(
     let on_this_host = match parsed.host().ok_or(EndpointRefusal::Unparseable)? {
         Host::Domain(name) => is_loopback_name(name),
         Host::Ipv4(v4) => v4.is_loopback(),
-        Host::Ipv6(v6) => v6.is_loopback() || embedded_v4(v6).is_some_and(|v4| v4.is_loopback()),
+        // Only an IPv4-mapped loopback stays on this machine; NAT64, 6to4 and
+        // IPv4-compatible forms leave it through a gateway or relay.
+        Host::Ipv6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
     };
     if on_this_host {
         Ok(())

@@ -88,3 +88,51 @@ proptest! {
         prop_assert!(!raw_text.contains(&value));
     }
 }
+
+#[test]
+fn credential_names_are_recognised_across_spellings_and_ordinary_names_are_not() {
+    for name in [
+        "api_key",
+        "apiKey",
+        "API-KEY",
+        "x-api-key",
+        "openai_api_key",
+        "secret",
+        "clientSecret",
+        "password",
+        "Authorization",
+        "bearer_token",
+        "key",
+        "token",
+        "access_token",
+        "accessToken",
+        "refreshToken",
+        "auth",
+        "credentials",
+        "sig",
+        "Signature",
+        "private_key",
+        "passphrase",
+        "db_passwd",
+        "APIKEY",
+    ] {
+        assert!(is_credential_name(name), "{name}");
+    }
+    for name in [
+        "max_tokens",
+        "maxTokens",
+        "tokenizer",
+        "keywords",
+        "monkey",
+        "tiers",
+        "models",
+        "display_name",
+        "authors",
+        "author",
+        "signal",
+        "design",
+        "",
+    ] {
+        assert!(!is_credential_name(name), "{name}");
+    }
+}

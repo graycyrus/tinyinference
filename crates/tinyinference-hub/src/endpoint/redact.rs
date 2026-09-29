@@ -289,3 +289,14 @@ pub(super) fn base64_standard(input: &[u8]) -> String {
     }
     out
 }
+
+/// Whether an endpoint carries a credential in its **query string**
+/// (`?key=...`, `?api_key=...`, `?access_token=...`), judged by the parameter
+/// name. Gemini-style `?key=` URLs are a common paste; like userinfo, the value
+/// would be stored and echoed to every reader of the configuration.
+pub fn endpoint_query_has_credential(endpoint: &str) -> bool {
+    url::Url::parse(as_url_parser_reads(endpoint).as_str()).is_ok_and(|url| {
+        url.query_pairs()
+            .any(|(name, _)| crate::secret::is_credential_name(&name))
+    })
+}
