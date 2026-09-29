@@ -1,23 +1,38 @@
 //! Endpoint parsing helpers: the host of a URL and local-endpoint
 //! normalisation, ported from OpenCompany's `catalogue.rs`.
 
+use url::{Host, Url};
+
 use super::redact::endpoint_has_credentials;
 
-/// Lowercased authority host of an endpoint URL — scheme, userinfo, port and
+/// Lowercased authority host of an endpoint URL: scheme, userinfo, port and
 /// path dropped. `None` when no host can be parsed.
 ///
-/// Tolerant of a missing scheme and of bracketed IPv6 literals, because the
-/// values it reads include endpoints an operator typed. The console mirror
-/// implements the same rules, so both sides classify a stored endpoint
-/// identically.
+/// An `http` or `https` URL is read with the WHATWG parser, so the answer is the
+/// host a client will actually connect to. A hand-rolled split disagrees with
+/// that parser on `\`, which a special scheme reads as `/`:
+/// `https://evil.test\@tinyhumans.ai/` connects to `evil.test`, and a splitter
+/// that only knew `/`, `?` and `#` would report `tinyhumans.ai` and hand
+/// first-party headers to the attacker. Anything else (a scheme-less
+/// `localhost:1234/v1` an operator typed, or another scheme) falls back to a
+/// tolerant split that treats `\` as a delimiter too.
 pub fn endpoint_host(endpoint: &str) -> Option<String> {
     let trimmed = endpoint.trim();
+    if let Ok(url) = Url::parse(trimmed)
+        && matches!(url.scheme(), "http" | "https")
+    {
+        return url.host().map(|host| match host {
+            // Without the brackets `Host`'s `Display` adds for IPv6.
+            Host::Ipv6(address) => address.to_string(),
+            other => other.to_string().to_ascii_lowercase(),
+        });
+    }
     let after_scheme = trimmed
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(trimmed);
     let authority = after_scheme
-        .split(['/', '?', '#'])
+        .split(['/', '\\', '?', '#'])
         .next()
         .unwrap_or(after_scheme);
     let host_port = authority

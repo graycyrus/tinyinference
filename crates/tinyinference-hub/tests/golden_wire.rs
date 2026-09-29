@@ -44,6 +44,7 @@ fn golden_reason_codes() {
             "policy",
             "invalid",
             "not_found",
+            "already_exists",
             "in_use",
             "conflict",
             "store_unreadable",

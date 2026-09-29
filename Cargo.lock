@@ -1465,11 +1465,11 @@ dependencies = [
 name = "tinyinference-hub"
 version = "0.3.0"
 dependencies = [
+ "httpdate",
  "proptest",
  "serde",
  "serde_json",
  "thiserror",
- "tinyinference-core",
  "tinyinference-embeddings",
  "tinyinference-llm",
  "tinyinference-local",

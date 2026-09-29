@@ -227,10 +227,12 @@ fn userinfo_and_ports_do_not_hide_the_host() {
         check_endpoint("http://user:pw@169.254.169.254:80/v1", &server_side()),
         Err(EndpointRefusal::LinkLocal)
     );
+    // The authority after the last @ is the real host (so this is not the
+    // metadata address), but the URL still carries a credential and is refused
+    // as one (guard G16; review finding).
     assert_eq!(
         check_endpoint("http://169.254.169.254@example.test/v1", &server_side()),
-        Ok(()),
-        "the authority after the last @ is the real host"
+        Err(EndpointRefusal::CredentialInUrl)
     );
 }
 
@@ -664,4 +666,101 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn userinfo_is_refused_everywhere_an_endpoint_is_checked() {
+    for url in [
+        "https://alice:hunter2@api.acme.test/v1",
+        "https://sk-not-a-real-key@api.acme.test/v1",
+        "http://u:pw@lan-host.test/v1",
+        "https://:pw@api.acme.test/v1",
+    ] {
+        for policy in [
+            server_side(),
+            local_offered(),
+            EndpointPolicy::desktop().with_private(true),
+        ] {
+            assert_eq!(
+                check_endpoint(url, &policy),
+                Err(EndpointRefusal::CredentialInUrl),
+                "{url}"
+            );
+            assert_eq!(
+                check_endpoint_with_credential(url, &policy, true),
+                Err(EndpointRefusal::CredentialInUrl),
+                "{url}"
+            );
+        }
+    }
+    // The address answer still wins for a metadata host with userinfo.
+    assert_eq!(
+        check_endpoint("http://u:pw@169.254.169.254/x", &server_side()),
+        Err(EndpointRefusal::LinkLocal)
+    );
+    assert!(
+        EndpointRefusal::CredentialInUrl
+            .to_string()
+            .contains("key field")
+    );
+}
+
+#[test]
+fn a_redirect_target_with_userinfo_is_a_credential_violation() {
+    let p = server_side();
+    assert_eq!(
+        check_redirect(&p, "https://a.test/1", "https://u:pw@a.test/2", false, 1),
+        Err(PolicyViolation::CredentialInEndpoint)
+    );
+}
+
+#[test]
+fn a_custom_credential_header_is_stripped_when_the_policy_knows_its_name() {
+    use crate::taxonomy::AuthStyle;
+    // Regression (review finding): the fixed credential list ignored
+    // `AuthStyle::Custom`, so `x-acme-key` followed a redirect off-origin.
+    let mut headers = vec![
+        ("X-Acme-Key".to_string(), "sk-not-a-real-key".to_string()),
+        ("Content-Type".to_string(), "application/json".to_string()),
+    ];
+    let base = HeaderPolicy::builtin();
+    let mut unaware = headers.clone();
+    base.strip_for_redirect(&mut unaware, "https://a.test/1", "https://b.test/1");
+    assert_eq!(
+        unaware.len(),
+        2,
+        "the built-in list does not know x-acme-key"
+    );
+    let aware = base.with_auth(&AuthStyle::Custom("X-Acme-Key".into()));
+    assert!(aware.is_credential_header("x-acme-key"));
+    aware.strip_for_redirect(&mut headers, "https://a.test/1", "https://b.test/1");
+    assert_eq!(
+        headers,
+        vec![("Content-Type".to_string(), "application/json".to_string())]
+    );
+    // Adding the same style twice does not duplicate the name.
+    let twice = aware
+        .clone()
+        .with_auth(&AuthStyle::Custom("x-acme-key".into()));
+    assert_eq!(twice, aware);
+    // The built-in styles add nothing new.
+    assert_eq!(
+        HeaderPolicy::builtin().with_auth(&AuthStyle::Bearer),
+        HeaderPolicy::builtin()
+    );
+    assert_eq!(
+        HeaderPolicy::builtin().with_auth(&AuthStyle::None),
+        HeaderPolicy::builtin()
+    );
+}
+
+#[test]
+fn a_first_party_check_reads_the_host_a_client_connects_to() {
+    // Regression (review finding): `endpoint_host` used to disagree with the
+    // WHATWG parser on `\`, so this URL (which connects to evil.test) counted
+    // as tinyhumans.ai and received the product header.
+    let policy = HeaderPolicy::builtin();
+    assert!(!policy.allows_product_header_to("https://evil.test\\@tinyhumans.ai/"));
+    assert!(policy.allows_product_header_to("https://tinyhumans.ai\\.evil.test/"));
+    assert!(!policy.allows_product_header_to("https://evil.test:443\\@api.tinyhumans.ai/v1"));
 }

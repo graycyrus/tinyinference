@@ -175,7 +175,7 @@ proptest::proptest! {
         url in "https://[a-z]{3,10}\\.test(/[a-z0-9]{1,6}){0,2}",
         enabled in proptest::bool::ANY,
         synthetic in proptest::bool::ANY,
-        extra_key in "x_[a-z]{1,8}",
+        extra_key in "note_[a-z]{1,4}",
         extra_val in 0i64..1000,
     ) {
         let mut r = ProviderRecord::new(id, Slug::parse(&slug).unwrap(), label, KindId::new(kind), url);
@@ -185,4 +185,96 @@ proptest::proptest! {
         let back: ProviderRecord = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
         proptest::prop_assert_eq!(back, r);
     }
+}
+
+// ---- the record enforces its own invariant (review finding) ---------------------------
+
+fn stored(extra: serde_json::Value) -> serde_json::Value {
+    let mut base = json!({
+        "id": "p_1", "slug": "acme", "label": "Acme", "kind": "custom", "base_url": "https://a.test/v1"
+    });
+    base.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    base
+}
+
+#[test]
+fn a_stored_record_with_a_credential_shaped_field_does_not_load() {
+    // Regression: `#[serde(flatten)] legacy` used to carry an inline key
+    // through every load and save, so "no credential field, ever" was only a
+    // comment.
+    for name in [
+        "api_key",
+        "apiKey",
+        "API-KEY",
+        "openai_api_key",
+        "secret",
+        "client_secret",
+        "password",
+        "authorization",
+        "bearer_token",
+        "key",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "credential",
+        "credentials",
+    ] {
+        let loaded =
+            serde_json::from_value::<ProviderRecord>(stored(json!({ name: "sk-not-a-real-key" })));
+        let error = loaded.expect_err(name).to_string();
+        assert!(error.contains("credential"), "{name}: {error}");
+        assert!(
+            !error.contains("sk-not-a-real-key"),
+            "the value is never echoed: {error}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_legacy_fields_are_not_mistaken_for_credentials() {
+    for name in [
+        "tiers",
+        "max_tokens",
+        "keywords",
+        "models",
+        "monkey",
+        "tokenizer",
+        "note",
+        "display_key_hint_count",
+    ] {
+        let r: ProviderRecord = serde_json::from_value(stored(json!({ name: 1 }))).unwrap();
+        assert!(r.legacy.contains_key(name), "{name}");
+    }
+}
+
+#[test]
+fn a_stored_record_whose_endpoint_carries_userinfo_does_not_load() {
+    let loaded = serde_json::from_value::<ProviderRecord>(stored(
+        json!({"base_url": "https://u:pw@host.test/v1"}),
+    ));
+    let error = loaded.unwrap_err().to_string();
+    assert!(error.contains("username or password"), "{error}");
+    assert!(!error.contains("pw@"), "{error}");
+}
+
+#[test]
+fn validate_checks_a_hand_built_record_too() {
+    let mut r = record();
+    assert_eq!(r.validate(), Ok(()));
+    r.legacy.insert("apikey".into(), json!("sk-not-a-real-key"));
+    assert_eq!(
+        r.validate(),
+        Err(crate::error::InvalidInput::CredentialField {
+            name: "apikey".into()
+        })
+    );
+    r.legacy.clear();
+    r.base_url = "http://alice:hunter2@localhost:8080/v1".into();
+    assert!(matches!(
+        r.validate(),
+        Err(crate::error::InvalidInput::Malformed { .. })
+    ));
 }

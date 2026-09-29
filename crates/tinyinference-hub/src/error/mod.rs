@@ -15,7 +15,8 @@ use std::time::Duration;
 use crate::taxonomy::ProviderGroup;
 
 pub use classify::{
-    MAX_RETRY_AFTER, TransportCondition, classify, classify_for, classify_transport, strip_urls,
+    MAX_RETRY_AFTER, TransportCondition, classify, classify_at, classify_for, classify_transport,
+    strip_urls,
 };
 pub use copy::{describe, describe_refusal};
 pub use types::{
@@ -56,7 +57,8 @@ impl HubError {
             Self::Policy(_) => ReasonCode::Policy,
             Self::Invalid(_) => ReasonCode::Invalid,
             Self::NotFound(_) => ReasonCode::NotFound,
-            Self::AlreadyExists { .. } | Self::InUse(_) => ReasonCode::InUse,
+            Self::AlreadyExists { .. } => ReasonCode::AlreadyExists,
+            Self::InUse(_) => ReasonCode::InUse,
             Self::Conflict => ReasonCode::Conflict,
             Self::StoreUnreadable { .. } => ReasonCode::StoreUnreadable,
             Self::Unresolved(_) => ReasonCode::Unresolved,
@@ -108,10 +110,18 @@ impl From<tinyinference_llm::Error> for HubError {
         match error {
             Error::Provider(provider) => {
                 let has_retry_after = provider.retry_after_ms.is_some();
+                // The structured code is the most reliable signal a provider
+                // gives (`insufficient_quota`, `invalid_api_key`), so it is
+                // classified together with the message.
+                let text = strip_urls(&provider.message);
+                let text = match provider.code.as_deref() {
+                    Some(code) if !code.is_empty() => format!("{code} {text}"),
+                    _ => text,
+                };
                 let mut failure = classify::classify_text(
                     Some(provider.provider.as_str()),
                     provider.status,
-                    &strip_urls(&provider.message),
+                    &text,
                     has_retry_after,
                 );
                 if let Retry::Later(delay) = &mut failure.retry {
@@ -148,10 +158,11 @@ impl From<tinyinference_llm::Error> for HubError {
             Error::Unsupported(text) => Self::Provider(
                 ProviderFailure::new(ReasonCode::Unsupported, Retry::Never).with_raw(text),
             ),
-            Error::Validation(_) => Self::Invalid(InvalidInput::Malformed {
-                field: InputField::Kind,
-                reason: "the request was rejected as invalid",
-            }),
+            // The message can echo the input (a key, a URL), so it is kept
+            // log-only rather than dropped or displayed.
+            Error::Validation(text) => {
+                Self::Invalid(InvalidInput::Rejected(crate::secret::LogOnly::new(text)))
+            }
         }
     }
 }

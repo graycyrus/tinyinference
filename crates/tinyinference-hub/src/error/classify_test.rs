@@ -711,3 +711,140 @@ fn a_malformed_number_in_a_try_again_hint_is_no_hint() {
         Retry::Later(None)
     );
 }
+
+// ---- regressions from the fresh-eyes review (round 1) -----------------------------------
+
+#[test]
+fn a_known_status_decides_the_status_rules_not_a_number_in_the_body() {
+    // A 400 whose body merely contains `401` is not a rejected credential.
+    let f = body(400, "max_tokens must be less than 401");
+    assert_ne!(f.reason, ReasonCode::Auth);
+    assert!(!f.reason.destroys_credential());
+    // Neither is a 400/500 whose body mentions 404, 429 or 407.
+    assert_ne!(
+        body(400, "field 404 is invalid").reason,
+        ReasonCode::Endpoint
+    );
+    assert_ne!(body(400, "max 429 items").reason, ReasonCode::RateLimited);
+    assert!(matches!(
+        body(500, "code 407 in trace").retry,
+        Retry::Later(_)
+    ));
+    // The real statuses still classify.
+    assert_eq!(body(401, "anything").reason, ReasonCode::Auth);
+    assert_eq!(body(404, "anything").reason, ReasonCode::Endpoint);
+    assert_eq!(body(429, "anything").reason, ReasonCode::RateLimited);
+    assert_eq!(body(407, "anything").reason, ReasonCode::Unknown);
+    // With no status (text-only) or a 2xx envelope the whole-token rule stays.
+    assert_eq!(raw("error 401 from upstream"), ReasonCode::Auth);
+    assert_eq!(
+        body(200, r#"{"code":401,"msg":"bad"}"#).reason,
+        ReasonCode::Auth
+    );
+}
+
+#[test]
+fn the_bare_word_unauthorized_is_auth_only_without_a_status() {
+    // 403 entitlement wording must keep the key.
+    for text in [
+        "Unauthorized: model X is not enabled for your region",
+        "unauthorized region",
+    ] {
+        let f = body(403, text);
+        assert!(!f.reason.destroys_credential(), "{text}");
+        assert!(!body(400, text).reason.destroys_credential(), "{text}");
+    }
+    // With no status the word is still a body signal (text-only errors), and a
+    // real 401 needs no word at all.
+    assert_eq!(raw("Unauthorized"), ReasonCode::Auth);
+    assert_eq!(body(401, "Unauthorized").reason, ReasonCode::Auth);
+}
+
+#[test]
+fn insufficient_access_is_never_out_of_credit_in_any_spelling() {
+    for text in [
+        r#"{"error":"insufficient_scope"}"#,
+        r#"{"error":"insufficient_permissions"}"#,
+        "insufficient permission to call this route",
+        "Insufficient access for this resource",
+        "insufficient_privileges",
+    ] {
+        let f = body(403, text);
+        assert_ne!(f.reason, ReasonCode::Quota, "{text}");
+        assert!(!f.reason.destroys_credential(), "{text}");
+    }
+    // A genuine soft credit wording is still quota.
+    assert_eq!(
+        body(403, "insufficient account balance for billing").reason,
+        ReasonCode::Quota
+    );
+}
+
+#[test]
+fn an_id_or_word_containing_404_or_dns_is_not_an_endpoint_failure() {
+    // Regression: bare substring matches read `req_9a404c...` as a 404 and any
+    // word containing "dns" as a DNS failure, which rolls back a good local add.
+    for text in [
+        "unrecognised failure req_9a404cbeef",
+        "trace id 1404 aborted",
+        "the wordsdnsish thing",
+        "ddnsx failure",
+    ] {
+        let f = body(400, text);
+        assert_ne!(f.reason, ReasonCode::Endpoint, "{text}");
+        assert!(
+            !f.rolls_back(crate::taxonomy::ProviderGroup::Local),
+            "{text}"
+        );
+    }
+    // The whole tokens still classify.
+    assert_eq!(raw("dns error: lookup failed"), ReasonCode::Endpoint);
+    assert_eq!(raw("dns: no answer"), ReasonCode::Endpoint);
+    assert_eq!(raw("HTTP 404 page"), ReasonCode::Endpoint);
+}
+
+#[test]
+fn an_http_date_retry_after_is_resolved_against_the_supplied_instant_and_not_capped_at_thirty_seconds()
+ {
+    use std::time::{Duration, SystemTime};
+    // Regression: the date form went through core's 30 s backoff cap.
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_445_412_475); // 2015-10-21 07:27:55 GMT
+    let f = classify_at(
+        now,
+        None,
+        429,
+        &[("Retry-After", "Wed, 21 Oct 2015 07:33:55 GMT")],
+        "",
+    );
+    assert_eq!(f.retry, Retry::Later(Some(Duration::from_secs(360))));
+    // A date in the past is an immediate retry, not a panic.
+    let f = classify_at(
+        now,
+        None,
+        429,
+        &[("retry-after", "Wed, 21 Oct 2015 07:00:00 GMT")],
+        "",
+    );
+    assert_eq!(f.retry, Retry::Later(Some(Duration::ZERO)));
+    // A far-future date is capped at the maximum.
+    let f = classify_at(
+        now,
+        None,
+        429,
+        &[("retry-after", "Fri, 31 Dec 9999 23:59:59 GMT")],
+        "",
+    );
+    assert_eq!(f.retry, Retry::Later(Some(MAX_RETRY_AFTER)));
+    // Garbage is no hint at all.
+    let f = classify_at(now, None, 429, &[("retry-after", "next tuesday")], "");
+    assert_eq!(f.retry, Retry::Later(None));
+    // The default entry points use the real clock and agree on the numeric form.
+    assert_eq!(
+        classify(429, &[("retry-after", "5")], "").retry,
+        Retry::Later(Some(Duration::from_secs(5)))
+    );
+    assert_eq!(
+        classify_for(Some("openai"), 429, &[("retry-after", "5")], "").retry,
+        Retry::Later(Some(Duration::from_secs(5)))
+    );
+}

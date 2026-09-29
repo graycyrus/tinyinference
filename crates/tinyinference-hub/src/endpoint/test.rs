@@ -355,7 +355,9 @@ fn endpoint_host_reads_the_authority_only() {
     );
     assert_eq!(endpoint_host(""), None);
     assert_eq!(endpoint_host("http://"), None);
-    assert_eq!(endpoint_host("http:///path"), None);
+    // WHATWG reads `http:///path` as host `path`, which is what a client
+    // connects to.
+    assert_eq!(endpoint_host("http:///path").as_deref(), Some("path"));
 }
 
 #[test]
@@ -428,4 +430,46 @@ proptest! {
         let _ = endpoint_has_credentials(&endpoint);
         prop_assert_eq!(scrub_endpoint_credential("https://ok.test/v1", &text), text);
     }
+}
+
+#[test]
+fn endpoint_host_agrees_with_the_host_a_client_connects_to() {
+    // Regression (review finding): a special scheme reads `\` as `/`, so this
+    // URL connects to evil.test. A splitter that only knew `/ ? #` reported
+    // `tinyhumans.ai` and let first-party headers go to the attacker.
+    assert_eq!(
+        endpoint_host("https://evil.test\\@tinyhumans.ai/").as_deref(),
+        Some("evil.test")
+    );
+    assert_eq!(
+        endpoint_host("https://tinyhumans.ai\\.evil.test/x").as_deref(),
+        Some("tinyhumans.ai")
+    );
+    assert_eq!(
+        endpoint_host("http://user:pw@Host.TEST:8080/a?b#c").as_deref(),
+        Some("host.test")
+    );
+    assert_eq!(
+        endpoint_host("http://[2001:db8::1]:80/").as_deref(),
+        Some("2001:db8::1")
+    );
+    assert_eq!(
+        endpoint_host("HTTPS://EXAMPLE.com").as_deref(),
+        Some("example.com")
+    );
+    // IDN hosts are compared in their ASCII form, as a client resolves them.
+    assert_eq!(
+        endpoint_host("https://b\u{fc}cher.example/").as_deref(),
+        Some("xn--bcher-kva.example")
+    );
+    // The tolerant fallback (no scheme, other schemes) also treats `\` as a
+    // delimiter.
+    assert_eq!(
+        endpoint_host("host.test\\@other.test/x").as_deref(),
+        Some("host.test")
+    );
+    assert_eq!(
+        endpoint_host("ftp://host.test/x").as_deref(),
+        Some("host.test")
+    );
 }

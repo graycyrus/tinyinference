@@ -49,6 +49,8 @@ pub enum ReasonCode {
     Invalid,
     /// A named provider, model, agent or workload does not exist.
     NotFound,
+    /// The slug is already taken by a provider in this scope.
+    AlreadyExists,
     /// The target is referenced and the caller did not confirm.
     InUse,
     /// The stored configuration changed concurrently.
@@ -62,7 +64,7 @@ pub enum ReasonCode {
 impl ReasonCode {
     /// Every code, in wire order. Used by tests and by hosts that render a
     /// legend.
-    pub const ALL: [ReasonCode; 16] = [
+    pub const ALL: [ReasonCode; 17] = [
         Self::Auth,
         Self::Model,
         Self::Quota,
@@ -75,6 +77,7 @@ impl ReasonCode {
         Self::Policy,
         Self::Invalid,
         Self::NotFound,
+        Self::AlreadyExists,
         Self::InUse,
         Self::Conflict,
         Self::StoreUnreadable,
@@ -96,6 +99,7 @@ impl ReasonCode {
             Self::Policy => "policy",
             Self::Invalid => "invalid",
             Self::NotFound => "not_found",
+            Self::AlreadyExists => "already_exists",
             Self::InUse => "in_use",
             Self::Conflict => "conflict",
             Self::StoreUnreadable => "store_unreadable",
@@ -200,6 +204,18 @@ pub enum InvalidInput {
         /// A fixed, secret-free reason.
         reason: &'static str,
     },
+    /// A record carries a field whose name marks it as a credential. A
+    /// credential is never stored on a record (invariant 1); it belongs in the
+    /// credential store.
+    #[error("record field `{name}` looks like a credential and cannot be stored on a record")]
+    CredentialField {
+        /// The offending field name (a name, never a value).
+        name: String,
+    },
+    /// A lower layer rejected the request and its own message may echo the
+    /// input, so the detail is log-only.
+    #[error("the request was rejected as invalid")]
+    Rejected(LogOnly<String>),
 }
 
 /// Why the endpoint policy refused something.
@@ -221,6 +237,18 @@ pub enum PolicyViolation {
     /// A credentialed request was redirected to another origin.
     #[error("a credentialed request cannot follow a redirect to another origin")]
     CrossOriginRedirect,
+}
+
+impl From<EndpointRefusal> for PolicyViolation {
+    /// A URL that carries a credential maps to
+    /// [`PolicyViolation::CredentialInEndpoint`]; every other refusal is wrapped
+    /// as [`PolicyViolation::Endpoint`].
+    fn from(refusal: EndpointRefusal) -> Self {
+        match refusal {
+            EndpointRefusal::CredentialInUrl => Self::CredentialInEndpoint,
+            other => Self::Endpoint(other),
+        }
+    }
 }
 
 /// What was looked up and not found.

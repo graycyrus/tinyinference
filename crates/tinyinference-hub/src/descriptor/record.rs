@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::endpoint::endpoint_has_credentials;
+use crate::error::{InputField, InvalidInput};
 use crate::ids::{KindId, ModelId, Slug};
 use crate::taxonomy::AuthStyle;
 
@@ -30,9 +32,14 @@ pub enum RecordOrigin {
 /// A configured provider instance.
 ///
 /// **There is no credential field, ever** (invariant 1): a key lives in the
-/// `CredentialStore` under [`Slug::key_slot`] and is read per request.
+/// `CredentialStore` under [`Slug::key_slot`] and is read per request. The type
+/// enforces it rather than only documenting it: deserialising (and
+/// [`ProviderRecord::validate`]) refuse a `base_url` that carries userinfo and
+/// any [`legacy`](ProviderRecord::legacy) field whose name marks it as a
+/// credential, so plaintext cannot re-enter through a stored file.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ProviderRecordWire")]
 pub struct ProviderRecord {
     /// Opaque id (OpenCompany `prv_<32hex>`, OpenHuman `p_<slug>_<rand>`).
     pub id: String,
@@ -60,9 +67,83 @@ pub struct ProviderRecord {
     /// Where the record came from.
     #[serde(default)]
     pub origin: RecordOrigin,
-    /// Fields the hub does not interpret.
+    /// Fields the hub does not interpret. Never credential-shaped.
     #[serde(default, flatten)]
     pub legacy: LegacyFields,
+}
+
+/// The deserialisation shape of [`ProviderRecord`]: the same fields, converted
+/// through [`ProviderRecord::validate`].
+#[derive(Deserialize)]
+struct ProviderRecordWire {
+    id: String,
+    slug: Slug,
+    label: String,
+    kind: KindId,
+    base_url: String,
+    #[serde(default)]
+    model: Option<ModelId>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    auth_override: Option<AuthStyle>,
+    #[serde(default)]
+    synthetic: bool,
+    #[serde(default)]
+    origin: RecordOrigin,
+    #[serde(default, flatten)]
+    legacy: LegacyFields,
+}
+
+impl TryFrom<ProviderRecordWire> for ProviderRecord {
+    type Error = InvalidInput;
+
+    fn try_from(wire: ProviderRecordWire) -> Result<Self, Self::Error> {
+        let record = Self {
+            id: wire.id,
+            slug: wire.slug,
+            label: wire.label,
+            kind: wire.kind,
+            base_url: wire.base_url,
+            model: wire.model,
+            enabled: wire.enabled,
+            auth_override: wire.auth_override,
+            synthetic: wire.synthetic,
+            origin: wire.origin,
+            legacy: wire.legacy,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+/// Whether a field name marks its value as a credential.
+///
+/// Deliberately narrow so ordinary fields (`max_tokens`, `tiers`) are not
+/// caught: the substrings `api_key`, `apikey`, `secret`, `password`,
+/// `authorization` and `bearer`, plus the exact names `key`, `token`,
+/// `access_token`, `refresh_token`, `id_token`, `credential` and
+/// `credentials`.
+fn is_credential_field(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase().replace('-', "_");
+    const SUBSTRINGS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "authorization",
+        "bearer",
+    ];
+    const EXACT: &[&str] = &[
+        "key",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "credential",
+        "credentials",
+    ];
+    SUBSTRINGS.iter().any(|s| lower.contains(s)) || EXACT.contains(&lower.as_str())
 }
 
 fn default_true() -> bool {
@@ -70,6 +151,29 @@ fn default_true() -> bool {
 }
 
 impl ProviderRecord {
+    /// Checks the invariants the type promises: the endpoint carries no
+    /// userinfo and no legacy field looks like a credential. Run automatically
+    /// when a record is deserialised; call it after building or editing one by
+    /// hand.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidInput::Malformed`] for an endpoint with userinfo, and
+    /// [`InvalidInput::CredentialField`] naming the first credential-shaped
+    /// legacy field (its name only, never its value).
+    pub fn validate(&self) -> Result<(), InvalidInput> {
+        if endpoint_has_credentials(&self.base_url) {
+            return Err(InvalidInput::Malformed {
+                field: InputField::Endpoint,
+                reason: "the endpoint carries a username or password",
+            });
+        }
+        if let Some(name) = self.legacy.keys().find(|name| is_credential_field(name)) {
+            return Err(InvalidInput::CredentialField { name: name.clone() });
+        }
+        Ok(())
+    }
+
     /// A new enabled, non-synthetic record.
     pub fn new(
         id: impl Into<String>,

@@ -112,6 +112,25 @@ impl AuthStyle {
         }
     }
 
+    /// The lowercase names of the request headers that carry this style's
+    /// credential (empty for [`AuthStyle::None`]). A custom style reports the
+    /// header it was configured with.
+    pub fn credential_headers(&self) -> Vec<String> {
+        match self {
+            Self::Bearer | Self::SessionJwt => vec!["authorization".to_string()],
+            Self::XApiKey | Self::Anthropic => vec!["x-api-key".to_string()],
+            Self::None => Vec::new(),
+            Self::Custom(header) => {
+                let name = header.trim().to_ascii_lowercase();
+                if name.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![name]
+                }
+            }
+        }
+    }
+
     /// Whether a request needs a credential to authenticate.
     pub fn needs_credential(&self) -> bool {
         !matches!(self, Self::None)

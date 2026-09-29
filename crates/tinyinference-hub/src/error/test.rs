@@ -62,7 +62,7 @@ fn reason_codes_have_stable_unique_snake_case_wire_strings() {
         );
         assert_eq!(code.to_string(), wire);
     }
-    assert_eq!(seen.len(), 16);
+    assert_eq!(seen.len(), 17);
     // The provider-facing D6 codes plus the D12 split.
     for expected in [
         "auth",
@@ -99,7 +99,7 @@ fn every_error_maps_to_a_reason_and_a_retry() {
         (ReasonCode::Policy, Retry::Never),
         (ReasonCode::Invalid, Retry::Never),
         (ReasonCode::NotFound, Retry::Never),
-        (ReasonCode::InUse, Retry::Never),
+        (ReasonCode::AlreadyExists, Retry::Never),
         (ReasonCode::InUse, Retry::Never),
         (ReasonCode::Conflict, Retry::Now),
         (ReasonCode::StoreUnreadable, Retry::Later(None)),
@@ -610,10 +610,104 @@ fn the_other_llm_variants_map_to_typed_hub_errors() {
     let invalid = HubError::from(tinyinference_llm::Error::Validation(
         "bad temperature sk-not-a-real-key".into(),
     ));
-    assert!(matches!(
-        invalid,
-        HubError::Invalid(InvalidInput::Malformed { .. })
-    ));
-    // The validation text (which can echo input) is not carried into the error.
+    // The validation text can echo input: kept log-only, never displayed.
+    let HubError::Invalid(InvalidInput::Rejected(detail)) = &invalid else {
+        panic!("rejected")
+    };
+    assert!(detail.expose().contains("sk-not-a-real-key"));
     assert!(!format!("{invalid} {invalid:?}").contains("sk-not"));
+    assert_eq!(invalid.reason(), ReasonCode::Invalid);
+}
+
+#[test]
+fn a_structured_code_is_classified_with_the_message() {
+    // Regression (review finding): only the message was classified, so a
+    // spend-cap *code* with a generic message was retried as a cooldown.
+    for (code, message, expected) in [
+        (
+            "enforced_spend_limit_reached",
+            "Request failed",
+            ReasonCode::Quota,
+        ),
+        ("insufficient_quota", "Request failed", ReasonCode::Quota),
+        ("invalid_api_key", "Request failed", ReasonCode::Auth),
+        ("model_not_found", "Request failed", ReasonCode::Model),
+    ] {
+        let error = tinyinference_llm::Error::Provider(Box::new(ProviderError {
+            provider: "openai".into(),
+            status: Some(429),
+            code: Some(code.into()),
+            message: message.into(),
+            retryable: true,
+            ..ProviderError::default()
+        }));
+        let HubError::Provider(failure) = HubError::from(error) else {
+            panic!("provider")
+        };
+        assert_eq!(failure.reason, expected, "{code}");
+        assert_eq!(failure.provider_code.as_deref(), Some(code));
+        if expected != ReasonCode::RateLimited {
+            assert_eq!(failure.retry, Retry::Never, "{code}");
+        }
+    }
+    // An empty code is ignored.
+    let error = tinyinference_llm::Error::Provider(Box::new(ProviderError {
+        provider: "openai".into(),
+        status: Some(429),
+        code: Some(String::new()),
+        message: "slow down".into(),
+        ..ProviderError::default()
+    }));
+    let HubError::Provider(failure) = HubError::from(error) else {
+        panic!("provider")
+    };
+    assert_eq!(failure.reason, ReasonCode::RateLimited);
+}
+
+#[test]
+fn an_already_taken_slug_has_its_own_code_and_copy() {
+    let error = HubError::AlreadyExists { slug: slug("acme") };
+    assert_eq!(error.reason(), ReasonCode::AlreadyExists);
+    assert_eq!(error.retry(), Retry::Never);
+    assert_eq!(
+        serde_json::to_value(error.reason()).unwrap(),
+        json!("already_exists")
+    );
+    // Regression (review finding): it used to share `in_use`, so a host keyed
+    // on that code for its "confirm removal" flow misfired on a duplicate name.
+    assert_ne!(error.reason(), HubError::InUse(UsedBy::default()).reason());
+    assert!(
+        error
+            .user_message(CopyContext::saved("Acme"))
+            .contains("already connected")
+    );
+}
+
+#[test]
+fn credential_and_rejected_input_errors_read_as_sentences() {
+    let said = InvalidInput::CredentialField {
+        name: "api_key".into(),
+    }
+    .to_string();
+    assert!(
+        said.contains("api_key") && said.contains("credential"),
+        "{said}"
+    );
+    assert!(
+        InvalidInput::Rejected(LogOnly::new("secret".into()))
+            .to_string()
+            .contains("rejected")
+    );
+}
+
+#[test]
+fn an_endpoint_refusal_converts_to_the_matching_policy_violation() {
+    assert_eq!(
+        PolicyViolation::from(EndpointRefusal::CredentialInUrl),
+        PolicyViolation::CredentialInEndpoint
+    );
+    assert_eq!(
+        PolicyViolation::from(EndpointRefusal::LinkLocal),
+        PolicyViolation::Endpoint(EndpointRefusal::LinkLocal)
+    );
 }

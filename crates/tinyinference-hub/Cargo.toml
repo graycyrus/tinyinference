@@ -12,8 +12,8 @@ keywords = ["llm", "inference", "providers", "catalogue"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-# Retry-After parsing is shared with the transports.
-tinyinference-core = { version = "0.3.0", path = "../tinyinference-core" }
+# HTTP-date `Retry-After` values, resolved against a supplied instant.
+httpdate = { workspace = true }
 # `HubError` maps llm's error in, and the taxonomy bridges its provider kinds.
 tinyinference-llm = { version = "0.3.0", path = "../tinyinference-llm" }
 # Serialisable taxonomy, descriptors, and (later) the persisted hub config.

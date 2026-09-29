@@ -36,6 +36,7 @@ pub fn describe(reason: ReasonCode, provider: &str) -> String {
         ReasonCode::Policy => "That endpoint is not allowed on this deployment.".to_string(),
         ReasonCode::Invalid => "That input is not valid.".to_string(),
         ReasonCode::NotFound => format!("{provider} was not found."),
+        ReasonCode::AlreadyExists => format!("{provider} is already connected."),
         ReasonCode::InUse => format!("{provider} is still in use."),
         ReasonCode::Conflict => "The settings changed while saving. Try again.".to_string(),
         ReasonCode::StoreUnreadable => "The settings store could not be read.".to_string(),

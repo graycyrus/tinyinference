@@ -39,6 +39,9 @@ pub enum EndpointRefusal {
     Cleartext,
     /// A public host, and this deployment is local-only.
     NonLocal,
+    /// The URL carries `user:password@`. A credential belongs in the key
+    /// field, never in an endpoint (guard G16).
+    CredentialInUrl,
 }
 
 impl fmt::Display for EndpointRefusal {
@@ -57,6 +60,10 @@ impl fmt::Display for EndpointRefusal {
                 "a key cannot be sent to an http endpoint off this host; use https"
             ),
             Self::NonLocal => write!(f, "this deployment only reaches local model runtimes"),
+            Self::CredentialInUrl => write!(
+                f,
+                "an endpoint cannot carry a username or password; put the credential in the key field"
+            ),
         }
     }
 }
@@ -193,7 +200,11 @@ fn is_loopback_name(domain: &str) -> bool {
 ///   unless the policy allows private networks (and unspecified, multicast and
 ///   broadcast are refused regardless);
 /// * loopback, including `localhost` by name, only where the policy allows it;
-/// * a public name or address only where the policy allows public hosts.
+/// * a public name or address only where the policy allows public hosts;
+/// * userinfo (`user:password@`) is refused after the host checks, so the
+///   address answer for a metadata host still wins, but no URL that carries a
+///   credential is ever accepted (guard G16). OpenCompany refused it on its
+///   write path; the hub refuses it wherever an endpoint is checked.
 ///
 /// A hostname is **not resolved** here: resolving would be a DNS lookup in a
 /// pure function, and a check performed before a resolve is defeated by the
@@ -210,18 +221,20 @@ pub fn check_endpoint(url: &str, policy: &EndpointPolicy) -> Result<(), Endpoint
     // A special scheme (`http`, `https`) always has a host once it parses; the
     // `ok_or` keeps the impossible case an error rather than a panic.
     match parsed.host().ok_or(EndpointRefusal::Unparseable)? {
-        Host::Ipv4(v4) => check_address(IpAddr::V4(v4), policy),
-        Host::Ipv6(v6) => check_address(IpAddr::V6(v6), policy),
+        Host::Ipv4(v4) => check_address(IpAddr::V4(v4), policy)?,
+        Host::Ipv6(v6) => check_address(IpAddr::V6(v6), policy)?,
         Host::Domain(name) => {
             if is_loopback_name(name) {
-                loopback(policy)
-            } else if policy.allow_public {
-                Ok(())
-            } else {
-                Err(EndpointRefusal::NonLocal)
+                loopback(policy)?;
+            } else if !policy.allow_public {
+                return Err(EndpointRefusal::NonLocal);
             }
         }
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(EndpointRefusal::CredentialInUrl);
+    }
+    Ok(())
 }
 
 /// [`check_endpoint`], plus the rule that only applies when there is a key.
@@ -429,8 +442,7 @@ pub fn check_redirect(
             max: policy.max_redirects,
         });
     }
-    check_endpoint_with_credential(to_url, policy, credentialed)
-        .map_err(PolicyViolation::Endpoint)?;
+    check_endpoint_with_credential(to_url, policy, credentialed)?;
     if credentialed && !same_origin(from_url, to_url) {
         return Err(PolicyViolation::CrossOriginRedirect);
     }

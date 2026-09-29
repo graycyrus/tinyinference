@@ -7,6 +7,7 @@
 //! strips the whole credential set itself.
 
 use crate::endpoint::endpoint_host;
+use crate::taxonomy::AuthStyle;
 
 use super::endpoint::same_origin;
 
@@ -41,6 +42,21 @@ impl HeaderPolicy {
             .map(|h| (*h).to_string())
             .collect(),
         }
+    }
+
+    /// This policy plus the credential header(s) an [`AuthStyle`] sends, so a
+    /// [`AuthStyle::Custom`] header (Azure's `api-key`, a gateway's
+    /// `x-acme-key`) is stripped on a cross-origin redirect like the built-in
+    /// ones. `reqwest` keeps custom headers across origins, so the hub must
+    /// know the name.
+    #[must_use]
+    pub fn with_auth(mut self, auth: &AuthStyle) -> Self {
+        for name in auth.credential_headers() {
+            if !self.credential_headers.contains(&name) {
+                self.credential_headers.push(name);
+            }
+        }
+        self
     }
 
     /// Whether the product header may be sent to `url`.

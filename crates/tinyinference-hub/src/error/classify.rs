@@ -18,7 +18,7 @@
 //! in `/models` and would make every failure look like a missing model
 //! (guard G19).
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::types::{ProviderFailure, ReasonCode, Retry};
 
@@ -120,7 +120,7 @@ pub fn strip_urls(text: &str) -> String {
 /// non-destructive. `authentication` appears only in compound forms, never as
 /// the bare word: an endpoint answering *"Bearer authentication is not
 /// supported, use x-api-key"* is a 400 about our request shape, with a good key.
-fn says_the_credential_was_refused(haystack: &str) -> bool {
+fn says_the_credential_was_refused(haystack: &str, bare_unauthorized: bool) -> bool {
     const REFUSALS: &[&str] = &[
         // OpenAI, Groq and everything that copied their wording.
         "invalid api key",
@@ -145,11 +145,14 @@ fn says_the_credential_was_refused(haystack: &str) -> bool {
         // OpenHuman's BYO-provider markers (`http_error/auth_failure.rs`).
         "invalid or missing api key",
         "no api key supplied",
-        // Venice's typed code, and the bare word as a body signal.
+        // Venice's typed code.
         "authentication_failed",
-        "unauthorized",
     ];
+    // The bare word is a body signal only when the status is unknown: with a
+    // status in hand, "Unauthorized: model X is not enabled for your region" is
+    // a 403 about entitlement, and a 401 is auth without it.
     REFUSALS.iter().any(|phrase| haystack.contains(phrase))
+        || (bare_unauthorized && haystack.contains("unauthorized"))
 }
 
 /// Phrases that say a spend cap, credit balance or plan quota is exhausted: a
@@ -203,8 +206,12 @@ fn has_rate_marker(haystack: &str) -> bool {
 /// The generic OpenCompany words for "out of credit" that are only trusted
 /// when nothing says the limit is one of pace.
 fn says_soft_quota(haystack: &str) -> bool {
-    let insufficient_access =
-        haystack.contains("insufficient permission") || haystack.contains("insufficient scope");
+    // `insufficient_scope` and `insufficient permissions` are access problems in
+    // either spelling.
+    let spaced = haystack.replace('_', " ");
+    let insufficient_access = ["permission", "scope", "access", "privilege"]
+        .iter()
+        .any(|word| spaced.contains(&format!("insufficient {word}")));
     haystack.contains("quota")
         || (haystack.contains("insufficient") && !insufficient_access)
         || haystack.contains("billing")
@@ -242,15 +249,16 @@ fn says_model_missing(haystack: &str) -> bool {
         || haystack.contains("invalid model")
 }
 
-fn says_endpoint_unreachable(haystack: &str) -> bool {
+fn says_endpoint_unreachable(haystack: &str, is_404: bool) -> bool {
     // "404 / not found / DNS / refused": all four, not the first two. A refused
     // connection and an unresolvable name are the clearest evidence that
-    // nothing is at that address.
-    haystack.contains("404")
+    // nothing is at that address. `dns` is a whole token, like the status codes,
+    // so an id or a word that merely contains it is not read as a DNS failure.
+    is_404
         || haystack.contains("not found")
         || haystack.contains("refused")
         || haystack.contains("unreachable")
-        || haystack.contains("dns")
+        || contains_token(haystack, "dns")
         || haystack.contains("no such host")
         || haystack.contains("could not resolve")
         || haystack.contains("name resolution")
@@ -263,7 +271,7 @@ fn says_endpoint_unreachable(haystack: &str) -> bool {
 /// failure carries `body` as log-only raw text; nothing here interpolates it
 /// into a sentence.
 pub fn classify(status: u16, headers: &[(&str, &str)], body: &str) -> ProviderFailure {
-    classify_for(None, status, headers, body)
+    classify_at(SystemTime::now(), None, status, headers, body)
 }
 
 /// [`classify`] with the provider kind known, for the two rules that depend on
@@ -274,7 +282,20 @@ pub fn classify_for(
     headers: &[(&str, &str)],
     body: &str,
 ) -> ProviderFailure {
-    let retry_after = retry_after(headers, body);
+    classify_at(SystemTime::now(), kind, status, headers, body)
+}
+
+/// [`classify_for`] with the current time supplied, so an HTTP-date
+/// `Retry-After` resolves deterministically (tests and the simulation harness
+/// pass a fixed instant; the two functions above pass `SystemTime::now()`).
+pub fn classify_at(
+    now: SystemTime,
+    kind: Option<&str>,
+    status: u16,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> ProviderFailure {
+    let retry_after = retry_after(headers, body, now);
     let mut failure = classify_text(kind, Some(status), &strip_urls(body), retry_after.is_some());
     if let Retry::Later(delay) = &mut failure.retry {
         *delay = retry_after;
@@ -290,21 +311,26 @@ pub fn classify_for(
 
 /// The classification core, on text that already has its URLs stripped.
 ///
-/// The haystack is `"{status}: {body}"`, lowercased, exactly what OpenCompany's
-/// `build_failure_text` builds, so a bare `401` in a body still counts (as a
-/// whole token).
+/// Works on the lowercased body. OpenCompany classified `"{status}: {body}"` as
+/// one string, which let a bare `401` inside a 400 body read as a rejected
+/// credential; here a known HTTP status decides the status-code rules and the
+/// body only supplies phrases.
 pub(crate) fn classify_text(
     kind: Option<&str>,
     status: Option<u16>,
     body: &str,
     has_retry_after: bool,
 ) -> ProviderFailure {
-    let haystack = match status {
-        Some(s) => format!("{s}: {body}"),
-        None => body.to_string(),
-    }
-    .trim()
-    .to_ascii_lowercase();
+    let haystack = body.trim().to_ascii_lowercase();
+    // A status this hub was handed is authoritative: a body that merely
+    // contains `401` (`max_tokens must be less than 401`) is not a 401. Only
+    // when no status is known, or the HTTP status is 2xx (an error carried in a
+    // 200 envelope), does a whole-token status code in the text count.
+    let http_status = status.filter(|s| !(200..300).contains(s));
+    let has_status = |code: u16| match http_status {
+        Some(s) => s == code,
+        None => contains_token(&haystack, &code.to_string()),
+    };
     let is_5xx = status.is_some_and(|s| (500..600).contains(&s) || s == 408);
     let later = if is_5xx || has_retry_after {
         Retry::Later(None)
@@ -316,7 +342,7 @@ pub(crate) fn classify_text(
     // Network, gateway and proxy rejections are about the CONNECTION, not the
     // key. They must not reach the auth branch, or the add flow deletes a valid
     // key over a corporate proxy, a WAF, or a 407 challenge.
-    if contains_token(&haystack, "407")
+    if has_status(407)
         || haystack.contains("proxy")
         || haystack.contains("cloudflare")
         || haystack.contains("bad gateway")
@@ -338,8 +364,8 @@ pub(crate) fn classify_text(
     let openrouter_unknown_user = kind == Some("openrouter")
         && matches!(status, Some(401 | 403))
         && haystack.contains("user not found");
-    if contains_token(&haystack, "401")
-        || says_the_credential_was_refused(&haystack)
+    if has_status(401)
+        || says_the_credential_was_refused(&haystack, http_status.is_none())
         || openrouter_unknown_user
     {
         return done(ReasonCode::Auth, Retry::Never);
@@ -386,11 +412,7 @@ pub(crate) fn classify_text(
         return done(ReasonCode::Model, Retry::Never);
     }
 
-    if status == Some(429)
-        || contains_token(&haystack, "429")
-        || has_rate_marker(&haystack)
-        || haystack.contains("rate limit")
-    {
+    if has_status(429) || has_rate_marker(&haystack) || haystack.contains("rate limit") {
         return done(ReasonCode::RateLimited, Retry::Later(None));
     }
 
@@ -401,7 +423,7 @@ pub(crate) fn classify_text(
             .with_provider_code("provider_internal_error");
     }
 
-    if says_endpoint_unreachable(&haystack) {
+    if says_endpoint_unreachable(&haystack, has_status(404)) {
         return done(ReasonCode::Endpoint, Retry::Later(None));
     }
 
@@ -470,29 +492,33 @@ fn sanitize_identifier(raw: &str) -> Option<String> {
     ok.then(|| id.to_string())
 }
 
-/// The provider's requested delay: `retry-after-ms`, `retry-after` (seconds, or
-/// an HTTP date bounded by core's 30 s backoff cap), else `retry_after: N` text or a Go-style `try again in 1m30s`
-/// in the body. Capped at [`MAX_RETRY_AFTER`].
-fn retry_after(headers: &[(&str, &str)], body: &str) -> Option<Duration> {
+/// The provider's requested delay: `retry-after-ms`, `retry-after` (seconds or
+/// an HTTP date resolved against `now`), else `retry_after: N` text or a
+/// Go-style `try again in 1m30s` in the body. Every form is capped at
+/// [`MAX_RETRY_AFTER`]. (`tinyinference-core`'s parser is a 30 s *backoff*
+/// bound and would misreport a provider's six-minute cooldown, so it is not
+/// used here.)
+fn retry_after(headers: &[(&str, &str)], body: &str, now: SystemTime) -> Option<Duration> {
     let header = |name: &str| {
         headers
             .iter()
             .find(|(h, _)| h.eq_ignore_ascii_case(name))
-            .map(|(_, v)| *v)
+            .map(|(_, v)| v.trim())
     };
     let numeric = |value: Option<&str>, per_unit_ms: f64| {
         value
-            .and_then(|v| v.trim().parse::<f64>().ok())
+            .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v >= 0.0)
             .map(|v| (v * per_unit_ms) as u64)
     };
-    // Numeric forms are parsed here and capped at [`MAX_RETRY_AFTER`]: core's
-    // helper is a *backoff* bound (30 s) and would misreport a provider's
-    // six-minute cooldown as thirty seconds. Only the HTTP-date form, which
-    // needs the current time, is delegated to it.
+    let http_date = |value: Option<&str>| {
+        let at = httpdate::parse_http_date(value?).ok()?;
+        let delay = at.duration_since(now).unwrap_or_default();
+        Some(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX))
+    };
     let millis = numeric(header("retry-after-ms"), 1.0)
         .or_else(|| numeric(header("retry-after"), 1_000.0))
-        .or_else(|| tinyinference_core::parse_retry_after_ms(header("retry-after")))
+        .or_else(|| http_date(header("retry-after")))
         .or_else(|| tinyinference_llm::parse_retry_after_ms(body))
         .or_else(|| parse_try_again_in(body));
     millis.map(|ms| Duration::from_millis(ms).min(MAX_RETRY_AFTER))

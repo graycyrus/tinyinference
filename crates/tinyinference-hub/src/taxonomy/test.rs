@@ -132,6 +132,30 @@ fn only_none_needs_no_credential() {
 }
 
 #[test]
+fn each_auth_style_names_the_headers_that_carry_its_credential() {
+    assert_eq!(
+        AuthStyle::Bearer.credential_headers(),
+        vec!["authorization"]
+    );
+    assert_eq!(
+        AuthStyle::SessionJwt.credential_headers(),
+        vec!["authorization"]
+    );
+    assert_eq!(AuthStyle::XApiKey.credential_headers(), vec!["x-api-key"]);
+    assert_eq!(AuthStyle::Anthropic.credential_headers(), vec!["x-api-key"]);
+    assert!(AuthStyle::None.credential_headers().is_empty());
+    assert_eq!(
+        AuthStyle::Custom(" API-Key ".into()).credential_headers(),
+        vec!["api-key"]
+    );
+    assert!(
+        AuthStyle::Custom("  ".into())
+            .credential_headers()
+            .is_empty()
+    );
+}
+
+#[test]
 fn cli_kinds_map_option_slugs_to_stored_slugs() {
     assert_eq!(CliKind::ClaudeCode.option_slug(), "claude-code");
     assert_eq!(CliKind::ClaudeCode.stored_slug(), "claude-code");
