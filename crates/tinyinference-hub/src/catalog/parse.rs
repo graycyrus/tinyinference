@@ -53,11 +53,14 @@ impl ParsedCatalog {
     /// # Errors
     ///
     /// A `ProviderFailure` (`unknown`, never retried) naming how many rows were
-    /// unusable.
+    /// unusable. This is a behaviour choice worth knowing: a provider whose
+    /// every row is one the parser drops (including rows llm's envelope parser
+    /// discards) reads as a broken listing, not as an empty one.
     pub fn into_usable(self) -> Result<Vec<ModelEntry>, ProviderFailure> {
         if self.entries.is_empty() && self.skipped > 0 {
             return Err(unreadable(format!(
-                "the model list had {} rows and none was usable",
+                "the model list had {} rows and none produced a usable model id \
+                 (missing, invalid or duplicate)",
                 self.skipped
             )));
         }

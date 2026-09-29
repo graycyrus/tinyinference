@@ -181,7 +181,9 @@ impl ProviderRecord {
     ///
     /// # Errors
     ///
-    /// [`InvalidInput::Malformed`] for an endpoint with userinfo, and
+    /// [`InvalidInput::Malformed`] for an endpoint with userinfo,
+    /// [`InvalidInput::Reserved`] for a legacy field named like one of the
+    /// record's own (it would write a duplicate key nothing can load), and
     /// [`InvalidInput::CredentialField`] naming the first credential-shaped
     /// legacy field (its name only, never its value).
     pub fn validate(&self) -> Result<(), InvalidInput> {

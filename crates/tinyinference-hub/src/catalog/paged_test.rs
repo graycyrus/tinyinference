@@ -214,11 +214,24 @@ fn paged_no_total_and_pages_that_never_end_stop_at_the_page_cap_and_say_so() {
 }
 
 #[test]
-fn paged_a_page_whose_every_row_is_unusable_is_an_error_not_an_empty_page() {
-    let body = json!({"success": true, "data": {"total": 2, "data": [{"nope": 1}, {"id": 7}]}})
+fn paged_a_page_of_unusable_rows_still_moves_the_offset_and_is_judged_over_the_whole_read() {
+    let bad = json!({"success": true, "data": {"total": 4, "data": [{"nope": 1}, {"id": 7}]}})
         .to_string();
-    let failure = parse_page(&body).unwrap_err();
-    assert_eq!(failure.reason, ReasonCode::Unknown);
-    // An empty page is still the end of the read.
-    assert!(parse_page(&json!({"success": true, "data": {"data": []}}).to_string()).is_ok());
+    let page_bad = parse_page(&bad).unwrap();
+    assert!(page_bad.entries.is_empty() && page_bad.raw_len == 2);
+    // Bad page first, good page after: the good rows are kept.
+    let mut collector = Collector::default();
+    assert_eq!(collector.push(page_bad.clone()), NextPage::At(2));
+    assert!(collector.read_only_unusable_rows(), "so far nothing usable");
+    collector.push(page(&["good"], Some(4)));
+    assert!(!collector.read_only_unusable_rows());
+    assert_eq!(collector.finish().len(), 1);
+    // Nothing usable anywhere is what is reported.
+    let mut all_bad = Collector::default();
+    all_bad.push(page_bad);
+    assert!(all_bad.read_only_unusable_rows());
+    // A genuinely empty read is not "unusable rows".
+    let mut empty = Collector::default();
+    empty.push(page(&[], Some(0)));
+    assert!(!empty.read_only_unusable_rows());
 }

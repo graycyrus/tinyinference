@@ -1044,3 +1044,55 @@ async fn drivers_a_200_listing_with_no_usable_rows_fails_the_read_instead_of_pas
     .unwrap();
     assert!(!report.ok() && !report.proves_key);
 }
+
+#[tokio::test]
+async fn drivers_one_bad_late_page_does_not_discard_the_good_pages_before_it() {
+    // Managed: page 1 good, page 2 has only rows with no usable id.
+    let bed = Bed::hosted();
+    bed.http.route(
+        Match::get(format!("{MANAGED}/models?limit=500&offset=0")),
+        page(&["a", "b"], 4),
+    );
+    bed.http.route(
+        Match::get(format!("{MANAGED}/models?limit=500&offset=2")),
+        Scripted::json(
+            200,
+            &json!({"success": true, "data": {"total": 4, "data": [{"nope": 1}, {"id": 5}]}}),
+        ),
+    );
+    let s = managed_subject(Some("th-fake"));
+    let fetched = managed().list_models(&bed.cx(), &s.target()).await.unwrap();
+    assert_eq!(ids(&fetched), ["a", "b"]);
+    // Every page bad: an error, not a passing empty list.
+    let bed = Bed::hosted();
+    bed.http.route(
+        Match::prefix(format!("{MANAGED}/models")),
+        Scripted::json(
+            200,
+            &json!({"success": true, "data": {"total": 2, "data": [{"nope": 1}, {"id": 5}]}}),
+        ),
+    );
+    assert!(managed().list_models(&bed.cx(), &s.target()).await.is_err());
+
+    // Anthropic: the same shape.
+    let bed = Bed::hosted();
+    bed.http.route(
+        Match::prefix("https://api.anthropic.com/v1/models"),
+        Script::Sequence(vec![
+            Scripted::json(
+                200,
+                &json!({"data": [{"id": "keep"}], "has_more": true, "last_id": "keep"}),
+            ),
+            Scripted::json(
+                200,
+                &json!({"data": [{"model": "no-id"}], "has_more": false}),
+            ),
+        ]),
+    );
+    let s = anthropic_subject();
+    let fetched = anthropic()
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap();
+    assert_eq!(ids(&fetched), ["keep"]);
+}

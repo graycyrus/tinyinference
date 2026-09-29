@@ -129,6 +129,11 @@ impl KindDriver for ManagedDriver {
                 }
             }
         }
+        if collector.read_only_unusable_rows() {
+            return Err(HubError::Provider(unreadable(
+                "the model catalog had rows and none was usable",
+            )));
+        }
         Ok(Fetched {
             truncated,
             ..Fetched::new(collector.finish())

@@ -43,21 +43,27 @@ fn azure_accepts_max_completion_tokens(base: &str) -> bool {
     if !crate::catalogue::is_azure_endpoint(base) {
         return false;
     }
-    let version = url::Url::parse(base.trim()).ok().and_then(|url| {
-        url.query_pairs()
+    // Read the query text directly: the endpoint may be scheme-less, which a
+    // URL parser refuses, and the version is all we want from it.
+    let base = base.trim();
+    let base = &base[..base.find('#').unwrap_or(base.len())];
+    let version = base.split_once('?').and_then(|(_, query)| {
+        url::form_urlencoded::parse(query.as_bytes())
             .find(|(name, _)| name.eq_ignore_ascii_case("api-version"))
             .map(|(_, value)| value.into_owned())
     });
-    match version {
-        None => true,
-        // `2024-09-01`, `2024-09-01-preview`, `v1`, `preview`: compare the date
-        // prefix when there is one; a non-date name is a current alias.
-        Some(version) => match version.get(..10) {
-            Some(date) if date.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
-                date >= "2024-09-01"
-            }
-            _ => true,
-        },
+    let Some(version) = version else {
+        return true;
+    };
+    // `2024-09-01`, `2024-09-01-preview`, `2024-06`, `2023-5-15`: compare the
+    // numeric date. A name (`v1`, `preview`) is a current alias.
+    let mut parts = version.split('-').map(|part| part.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(year)), Some(Ok(month))) => {
+            let day = parts.next().and_then(Result::ok).unwrap_or(1);
+            (year, month, day) >= (2024, 9, 1)
+        }
+        _ => true,
     }
 }
 

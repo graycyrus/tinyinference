@@ -59,7 +59,7 @@ impl HealthTracker {
     }
 
     /// The lock for one provider, created on first use.
-    pub(super) fn lock_for(&self, scope: &ScopeKey, slug: &Slug) -> Arc<Mutex<()>> {
+    fn lock_for(&self, scope: &ScopeKey, slug: &Slug) -> Arc<Mutex<()>> {
         let mut locks = self
             .locks
             .lock()
@@ -72,7 +72,7 @@ impl HealthTracker {
     /// dropping the entry under a waiter would hand the next caller a fresh lock
     /// and let two updates run at once. Doing it in `Drop` means a cancelled
     /// future (a timed-out request) cannot skip it.
-    fn lease(&self, scope: &ScopeKey, slug: &Slug) -> LockLease<'_> {
+    pub(super) fn lease(&self, scope: &ScopeKey, slug: &Slug) -> LockLease<'_> {
         LockLease {
             tracker: self,
             key: (scope.clone(), slug.clone()),
@@ -233,10 +233,10 @@ impl HealthTracker {
 /// A provider's lock, given back to the tracker's map when dropped (even if the
 /// future holding it is cancelled) if nobody else holds or waits on it: the
 /// map's copy and the lease's own are the two references when idle.
-struct LockLease<'a> {
+pub(super) struct LockLease<'a> {
     tracker: &'a HealthTracker,
     key: (ScopeKey, Slug),
-    lock: Arc<Mutex<()>>,
+    pub(super) lock: Arc<Mutex<()>>,
 }
 
 impl Drop for LockLease<'_> {

@@ -50,6 +50,7 @@ impl KindDriver for AnthropicDriver {
     ) -> Result<Fetched, HubError> {
         let mut models: Vec<ModelEntry> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut skipped = 0usize;
         let mut after: Option<String> = None;
         let started = cx.clock.now();
         for page in 0..MAX_PAGES {
@@ -73,8 +74,8 @@ impl KindDriver for AnthropicDriver {
             let envelope: Value = serde_json::from_slice(&response.body)
                 .map_err(|_| HubError::Provider(unreadable("the model list was not JSON")))?;
             let parsed = parse_openai_value(&envelope).map_err(HubError::Provider)?;
-            let entries = parsed.into_usable().map_err(HubError::Provider)?;
-            for entry in entries {
+            skipped += parsed.skipped;
+            for entry in parsed.entries {
                 if seen.insert(entry.id.clone()) {
                     models.push(entry);
                 }
@@ -104,6 +105,14 @@ impl KindDriver for AnthropicDriver {
                     });
                 }
             }
+        }
+        // Judged over the whole read: one bad late page must not discard the
+        // good pages before it, but rows with no usable entry at all is not a
+        // healthy empty catalog.
+        if models.is_empty() && skipped > 0 {
+            return Err(HubError::Provider(unreadable(format!(
+                "the model list had {skipped} rows and none was usable"
+            ))));
         }
         Ok(Fetched::new(models))
     }

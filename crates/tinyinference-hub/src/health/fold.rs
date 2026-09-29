@@ -147,28 +147,27 @@ impl HealthSnapshot {
         }
     }
 
-    /// A probe that passed clears the terminal failures of the lanes it is *at
-    /// least as deep as*, for the reasons `matches` accepts: a deeper lane's
+    /// A probe that passed clears the failures of the **probe** lanes shallower
+    /// than itself, for the reasons `matches` accepts (the real-turn lane is
+    /// handled by `supersede_chat_failures`, which is the one place that rule
+    /// lives): a deeper lane's
     /// explicit rejection is never hidden by a shallower pass (a scope-restricted
     /// key can list models and still be refused a completion), but a passing
     /// completion, the deepest check, speaks for every lane above it.
     ///
-    /// Depth order is key-only, catalog, completion; a real turn is as deep as a
-    /// completion. The lane being overwritten right now is left to its own
-    /// result.
+    /// Depth order is key-only, catalog, completion. The lane being overwritten
+    /// right now is left to its own result. A key-only pass therefore clears
+    /// nothing (no lane is shallower), and a catalog pass clears only a
+    /// key-only rejection: to lift a chat lane's rejection the operator re-tests
+    /// with a completion, the only check that shows the key can chat.
+    ///
+    /// Recency is by recording order: a probe that started earlier but finished
+    /// later is treated as newer, because the snapshot keeps no start time.
     fn clear_shallower_lanes(&mut self, passed: TestDepth, matches: impl Fn(ReasonCode) -> bool) {
         for (depth, signal) in &mut self.probes {
             if *depth < passed && !signal.ok && signal.reason.is_some_and(&matches) {
                 signal.superseded = true;
             }
-        }
-        if passed == TestDepth::Completion
-            && let Some(signal) = self.turn.as_mut()
-            && !signal.ok
-            && signal.reason.is_some_and(&matches)
-        {
-            signal.superseded = true;
-            self.consecutive_failures = 0;
         }
     }
 
@@ -240,7 +239,9 @@ impl HealthSnapshot {
     /// report's own verdict that a pass shows the presented credential works (a
     /// key-only or completion pass always does; a catalog pass only where the
     /// listing is not public). A pass that proves the key clears a rejected-key
-    /// failure in every lane. Returns whether the status changed.
+    /// failure in the probe lanes shallower than itself; a completion also
+    /// clears the real-turn lane and a quota failure. Returns whether the
+    /// status changed.
     pub fn record_probe(
         &mut self,
         depth: TestDepth,

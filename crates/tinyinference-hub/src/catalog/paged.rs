@@ -123,12 +123,6 @@ pub fn parse_page(body: &str) -> Result<Page, ProviderFailure> {
             Some(entry)
         })
         .collect();
-    if entries.is_empty() && !rows.is_empty() {
-        return Err(unreadable(format!(
-            "the model catalog page had {} rows and none was usable",
-            rows.len()
-        )));
-    }
     let total = data
         .get("total")
         .and_then(Value::as_u64)
@@ -191,5 +185,12 @@ impl Collector {
     /// The entries collected so far, consuming the collector.
     pub fn finish(self) -> Vec<ModelEntry> {
         self.entries
+    }
+
+    /// Whether rows were read but none produced a usable entry (every id missing
+    /// or invalid). Judged over the **whole** read, never per page: one bad late
+    /// page must not throw away the good pages before it.
+    pub fn read_only_unusable_rows(&self) -> bool {
+        self.entries.is_empty() && self.offset > 0
     }
 }

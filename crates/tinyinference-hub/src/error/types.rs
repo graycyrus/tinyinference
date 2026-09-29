@@ -151,8 +151,8 @@ pub enum InputField {
     Key,
     /// A stored configuration document.
     Config,
-    /// A name inside a provider record (a legacy field must not shadow one of
-    /// the record's own).
+    /// A field name on a provider record's free-form part, which must not
+    /// repeat one of the record's own fields.
     RecordField,
 }
 
@@ -166,7 +166,7 @@ impl fmt::Display for InputField {
             Self::Kind => "a provider kind",
             Self::Key => "a key",
             Self::Config => "the configuration",
-            Self::RecordField => "a record field",
+            Self::RecordField => "a field name (the record already has one of that name)",
         })
     }
 }

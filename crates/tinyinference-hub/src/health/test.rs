@@ -867,17 +867,16 @@ async fn health_forgetting_never_drops_a_lock_somebody_still_holds() {
         .await
         .unwrap();
     // A caller queued behind the forget holds the provider's lock.
-    let held = bed.tracker.lock_for(&s, &p);
+    let held = bed.tracker.lease(&s, &p);
     bed.tracker.forget(&s, &p).await.unwrap();
     assert!(
-        Arc::ptr_eq(&held, &bed.tracker.lock_for(&s, &p)),
+        Arc::ptr_eq(&held.lock, &bed.tracker.lease(&s, &p).lock),
         "the next caller must meet the same lock, or two updates could run at once"
     );
     drop(held);
     bed.tracker.forget(&s, &p).await.unwrap();
-    // Idle again: the entry went, and a later caller gets a fresh lock.
-    let fresh = bed.tracker.lock_for(&s, &p);
-    assert_eq!(Arc::strong_count(&fresh), 2);
+    // Idle again: the entry went.
+    assert_eq!(bed.tracker.kept_locks(), 0);
 }
 
 #[test]
@@ -957,8 +956,8 @@ async fn health_idle_locks_are_dropped_so_the_map_does_not_grow_with_every_provi
             .record_outcome(&scope(), &p, &failure(ReasonCode::Timeout))
             .await
             .unwrap();
-        // Idle after the update: a fresh lock has just the map's and our reference.
-        assert_eq!(Arc::strong_count(&bed.tracker.lock_for(&scope(), &p)), 2);
+        // Idle after the update: nothing is kept.
+        assert_eq!(bed.tracker.kept_locks(), 0, "after {n} providers");
     }
 }
 
