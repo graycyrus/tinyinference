@@ -218,6 +218,16 @@ fn provider_failure(
     }
 }
 
+/// Whether an operation came back as the typed `Unsupported`.
+fn unsupported<T>(result: &Result<T, HubError>) -> bool {
+    matches!(result, Err(HubError::Unsupported { .. }))
+}
+
+/// Whether an operation came back as the typed `SignedOut`.
+fn signed_out<T>(result: &Result<T, HubError>) -> bool {
+    matches!(result, Err(HubError::SignedOut { .. }))
+}
+
 fn ping_path(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::AnthropicMessages => "/messages",
@@ -251,28 +261,24 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
                 "[{n}] a CLI kind supports no test depth"
             );
         }
+        let listed = driver.list_models(&cx, &t).await;
         assert!(
-            matches!(
-                driver.list_models(&cx, &t).await,
-                Err(HubError::Unsupported {
-                    op: Operation::ListModels,
-                    ..
-                })
-            ),
+            unsupported(&listed)
+                && matches!(
+                    &listed,
+                    Err(HubError::Unsupported {
+                        op: Operation::ListModels,
+                        ..
+                    })
+                ),
             "[{n}] list_models is Unsupported"
         );
         assert!(
-            matches!(
-                driver.key_check(&cx, &t).await,
-                Err(HubError::Unsupported { .. })
-            ),
+            unsupported(&driver.key_check(&cx, &t).await),
             "[{n}] key_check is Unsupported"
         );
         assert!(
-            matches!(
-                driver.completion_ping(&cx, &t, &f.model).await,
-                Err(HubError::Unsupported { .. })
-            ),
+            unsupported(&driver.completion_ping(&cx, &t, &f.model).await),
             "[{n}] completion_ping is Unsupported"
         );
         assert_eq!(
@@ -487,20 +493,10 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
         let cx = DriverContext::new(&bed.http, &f.policy, &bed.clock, &bed.headers);
         let mut anonymous = target(f, kind_ref, true);
         anonymous.credential = None;
-        assert!(
-            matches!(
-                driver.list_models(&cx, &anonymous).await,
-                Err(HubError::SignedOut { .. })
-            ),
-            "[{n}] signed out is typed"
-        );
-        assert!(
-            matches!(
-                driver.completion_ping(&cx, &anonymous, &f.model).await,
-                Err(HubError::SignedOut { .. })
-            ),
-            "[{n}] a ping is signed out too"
-        );
+        let listed = driver.list_models(&cx, &anonymous).await;
+        assert!(signed_out(&listed), "[{n}] signed out is typed");
+        let pinged = driver.completion_ping(&cx, &anonymous, &f.model).await;
+        assert!(signed_out(&pinged), "[{n}] a ping is signed out too");
         assert_eq!(
             bed.http.request_count(),
             0,
@@ -532,18 +528,19 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
                 "[{n}] a rejected key fails the key check"
             );
         } else {
-            match run_probe(&cx, driver, &t, TestDepth::KeyOnly).await {
-                Err(HubError::Unsupported {
-                    op: Operation::Test(TestDepth::KeyOnly),
-                    ..
-                }) => {}
-                other => panic!("[{n}] an undeclared depth is typed Unsupported, got {other:?}"),
-            }
+            let probed = run_probe(&cx, driver, &t, TestDepth::KeyOnly).await;
             assert!(
                 matches!(
-                    driver.key_check(&cx, &t).await,
-                    Err(HubError::Unsupported { .. })
+                    &probed,
+                    Err(HubError::Unsupported {
+                        op: Operation::Test(TestDepth::KeyOnly),
+                        ..
+                    })
                 ),
+                "[{n}] an undeclared depth is typed Unsupported"
+            );
+            assert!(
+                unsupported(&driver.key_check(&cx, &t).await),
                 "[{n}] key_check is Unsupported"
             );
         }
@@ -551,10 +548,10 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
 
     // C8: the probe end to end, at every declared depth, and a refused endpoint
     // sends nothing.
-    for depth in [TestDepth::Catalog, TestDepth::Completion] {
-        if !descriptor.supports_depth(depth) {
-            continue;
-        }
+    let declared = [TestDepth::Catalog, TestDepth::Completion]
+        .into_iter()
+        .filter(|depth| descriptor.supports_depth(*depth));
+    for depth in declared {
         let bed = Bed::new();
         let cx = DriverContext::new(&bed.http, &f.policy, &bed.clock, &bed.headers);
         bed.http.route(
@@ -591,15 +588,15 @@ pub async fn run_contract(driver: &dyn KindDriver, f: &ContractFixture) {
         let cx = DriverContext::new(&bed.http, &f.policy, &bed.clock, &bed.headers);
         let mut refused = target(f, kind_ref, true);
         refused.base_url = "http://169.254.169.254/latest/meta-data";
-        let report = run_probe(&cx, driver, &refused, TestDepth::Catalog).await;
-        if let Ok(report) = report {
-            assert_eq!(
-                report.failure.as_ref().map(|x| x.reason),
-                Some(ReasonCode::Endpoint),
-                "[{n}] the metadata address is refused"
-            );
-            assert!(report.refusal.is_some());
-        }
+        let report = run_probe(&cx, driver, &refused, TestDepth::Catalog)
+            .await
+            .unwrap_or_else(|e| panic!("[{n}] the probe could not run: {e:?}"));
+        assert_eq!(
+            report.failure.as_ref().map(|x| x.reason),
+            Some(ReasonCode::Endpoint),
+            "[{n}] the metadata address is refused"
+        );
+        assert!(report.refusal.is_some());
         assert_eq!(
             bed.http.request_count(),
             0,

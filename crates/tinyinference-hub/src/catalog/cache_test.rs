@@ -51,6 +51,12 @@ fn ids(list: &ModelList) -> Vec<&str> {
     list.ids()
 }
 
+/// A fetch that must not run: if it does, the read fails with a conflict and
+/// the `unwrap` after it fails the test.
+fn unexpected() -> impl FnOnce() -> std::future::Ready<Result<Fetched, HubError>> {
+    || std::future::ready(Err(HubError::Conflict))
+}
+
 /// A fetcher that counts calls and answers from a queue.
 struct Counter {
     calls: AtomicUsize,
@@ -158,9 +164,7 @@ async fn cache_a_success_after_a_failure_clears_the_memo() {
         .unwrap();
     assert_eq!(ok.freshness, Freshness::Fresh);
     let cached = cache
-        .read(key("a", false), false, || async {
-            panic!("must be cached")
-        })
+        .read(key("a", false), false, unexpected())
         .await
         .unwrap();
     assert_eq!(cached.freshness, Freshness::Cached);
@@ -251,7 +255,7 @@ async fn cache_an_authenticated_list_is_partitioned_by_scope() {
         "B never reads A's entitlement-scoped list"
     );
     let a_again = cache
-        .read(key("a", true), false, || async { panic!("cached") })
+        .read(key("a", true), false, unexpected())
         .await
         .unwrap();
     assert_eq!(ids(&a_again), ["only-a"]);
@@ -269,7 +273,7 @@ async fn cache_a_keyless_read_is_shared_across_scopes() {
         .await
         .unwrap();
     let b = cache
-        .read(key("b", false), false, || async { panic!("shared") })
+        .read(key("b", false), false, unexpected())
         .await
         .unwrap();
     assert_eq!(ids(&b), ["public"]);
@@ -346,10 +350,7 @@ async fn cache_trailing_slashes_and_spaces_are_the_same_endpoint() {
         })
         .await
         .unwrap();
-    cache
-        .read(b, false, || async { panic!("same endpoint") })
-        .await
-        .unwrap();
+    cache.read(b, false, unexpected()).await.unwrap();
 }
 
 #[tokio::test]
@@ -421,7 +422,7 @@ async fn cache_refresh_bypasses_a_fresh_entry() {
         (Freshness::Fresh, vec!["new"])
     );
     let after = cache
-        .read(key("a", true), false, || async { panic!("cached") })
+        .read(key("a", true), false, unexpected())
         .await
         .unwrap();
     assert_eq!(ids(&after), ["new"]);
@@ -478,7 +479,7 @@ async fn cache_a_failed_refresh_serves_the_older_list_with_a_typed_warning() {
     }
     // Within the memo the stale answer keeps coming without another request.
     let again = cache
-        .read(key("a", true), false, || async { panic!("memo") })
+        .read(key("a", true), false, unexpected())
         .await
         .unwrap();
     assert!(again.is_stale());
@@ -610,7 +611,7 @@ async fn cache_a_truncated_listing_is_flagged_and_stays_flagged_from_the_cache()
     let first = cache.read(key("a", false), false, fetched).await.unwrap();
     assert!(first.truncated);
     let second = cache
-        .read(key("a", false), false, || async { panic!("cached") })
+        .read(key("a", false), false, unexpected())
         .await
         .unwrap();
     assert!(second.truncated);
@@ -671,11 +672,11 @@ async fn cache_evicting_a_scope_drops_only_its_authenticated_slots() {
         .unwrap();
     assert_eq!(ids(&a), ["a2"]);
     cache
-        .read(key("b", true), false, || async { panic!("kept") })
+        .read(key("b", true), false, unexpected())
         .await
         .unwrap();
     cache
-        .read(key("z", false), false, || async { panic!("kept") })
+        .read(key("z", false), false, unexpected())
         .await
         .unwrap();
 }
@@ -753,10 +754,7 @@ async fn cache_it_never_holds_more_than_the_slot_cap_and_keeps_the_hot_ones() {
             .unwrap();
         assert!(cache.len() <= MAX_SLOTS, "{} slots", cache.len());
     }
-    let still_there = cache
-        .read(hot, false, || async { panic!("evicted the hot slot") })
-        .await
-        .unwrap();
+    let still_there = cache.read(hot, false, unexpected()).await.unwrap();
     assert_eq!(ids(&still_there), ["h"]);
 }
 

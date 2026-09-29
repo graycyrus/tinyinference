@@ -473,3 +473,193 @@ async fn testkit_a_rule_that_requires_a_header_does_not_answer_a_request_without
         .send(HubRequest::get("https://a.test/x"), &policy)
         .await;
 }
+
+// ---- the contract suite must fail a driver that breaks the contract --------
+
+mod contract_mutations {
+    use async_trait::async_trait;
+
+    use crate::catalog::Fetched;
+    use crate::catalogue::descriptor;
+    use crate::error::{HubError, ProviderFailure};
+    use crate::kinds::{DriverContext, KindDriver, OpenAiCompatDriver, Target};
+    use crate::testkit::{ContractFixture, run_contract};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Fault {
+        LeakKeyInUrl,
+        EmptyList,
+        Reordered,
+        EverythingIsAuth,
+        Truncates,
+        NoKeyCheckDeclared,
+        SwallowSignedOut,
+    }
+
+    /// A driver that delegates to the OpenAI-compatible one and breaks one rule.
+    #[derive(Debug)]
+    struct Faulty {
+        inner: Box<dyn KindDriver>,
+        fault: Fault,
+    }
+
+    fn faulty(kind: &str, fault: Fault) -> Faulty {
+        let d = descriptor(kind).unwrap().clone();
+        let inner: Box<dyn KindDriver> = if kind == "tinyhumans" {
+            Box::new(crate::kinds::ManagedDriver::paged(d))
+        } else {
+            Box::new(OpenAiCompatDriver::for_descriptor(d))
+        };
+        Faulty { inner, fault }
+    }
+
+    #[async_trait]
+    impl KindDriver for Faulty {
+        fn descriptor(&self) -> &crate::ProviderDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn classify(&self, status: u16, headers: &[(&str, &str)], body: &str) -> ProviderFailure {
+            match self.fault {
+                Fault::EverythingIsAuth => {
+                    ProviderFailure::new(crate::ReasonCode::Auth, crate::Retry::Never)
+                        .with_status(status)
+                }
+                _ => self.inner.classify(status, headers, body),
+            }
+        }
+
+        async fn list_models(
+            &self,
+            cx: &DriverContext<'_>,
+            target: &Target<'_>,
+        ) -> Result<Fetched, HubError> {
+            match self.fault {
+                Fault::LeakKeyInUrl => {
+                    // Puts the key in the query string, where logs will find it.
+                    let leaky = format!("{}?key={}", target.base(), target.key().unwrap_or(""));
+                    let t = Target {
+                        base_url: &leaky,
+                        ..*target
+                    };
+                    self.inner.list_models(cx, &t).await
+                }
+                Fault::EmptyList => Ok(Fetched::new(Vec::new())),
+                Fault::Reordered => {
+                    let mut fetched = self.inner.list_models(cx, target).await?;
+                    fetched.models.sort_by(|a, b| a.id.cmp(&b.id));
+                    Ok(fetched)
+                }
+                Fault::Truncates => {
+                    let mut fetched = self.inner.list_models(cx, target).await?;
+                    fetched.truncated = true;
+                    Ok(fetched)
+                }
+                Fault::SwallowSignedOut if target.key().is_none() => Ok(Fetched::new(Vec::new())),
+                _ => self.inner.list_models(cx, target).await,
+            }
+        }
+
+        async fn key_check(
+            &self,
+            cx: &DriverContext<'_>,
+            target: &Target<'_>,
+        ) -> Result<(), HubError> {
+            self.inner.key_check(cx, target).await
+        }
+    }
+
+    async fn run(kind: &str, fault: Fault, fixture: ContractFixture) {
+        run_contract(&faulty(kind, fault), &fixture).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "list_models failed: Policy(CredentialInEndpoint)")]
+    async fn testkit_a_driver_that_puts_the_key_in_a_url_is_stopped_by_the_transports_own_policy() {
+        // Defence in depth: the driver leaks, and the endpoint policy every
+        // transport applies refuses the URL before anything is sent.
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        run("groq", Fault::LeakKeyInUrl, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "provider order is kept")]
+    async fn testkit_the_contract_fails_a_driver_that_reorders_the_listing() {
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        run("groq", Fault::Reordered, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "provider order is kept")]
+    async fn testkit_the_contract_fails_a_driver_that_loses_the_models() {
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        run("groq", Fault::EmptyList, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "a small listing is not truncated")]
+    async fn testkit_the_contract_fails_a_driver_that_flags_a_small_listing_truncated() {
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        run("groq", Fault::Truncates, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "ping model")]
+    async fn testkit_the_contract_fails_a_driver_that_reads_everything_as_a_bad_key() {
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        run("groq", Fault::EverythingIsAuth, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "declares KeyOnly, so the fixture needs key_check_url")]
+    async fn testkit_the_contract_asks_a_key_only_kind_for_its_check_url() {
+        let f = ContractFixture::openai_shaped("openrouter", "https://openrouter.ai/api/v1");
+        run("openrouter", Fault::NoKeyCheckDeclared, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "signed out is typed")]
+    async fn testkit_the_contract_fails_a_managed_driver_that_answers_an_empty_list_when_signed_out()
+     {
+        let d = descriptor("tinyhumans").unwrap();
+        let f = ContractFixture::for_builtin(d);
+        run("tinyhumans", Fault::SwallowSignedOut, f).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "[groq] list_models failed: Conflict")]
+    async fn testkit_the_contract_names_the_kind_and_check_when_a_driver_fails_for_its_own_reasons()
+    {
+        // A driver whose 401 is not a provider failure at all.
+        #[derive(Debug)]
+        struct Odd(OpenAiCompatDriver);
+        #[async_trait]
+        impl KindDriver for Odd {
+            fn descriptor(&self) -> &crate::ProviderDescriptor {
+                self.0.descriptor()
+            }
+            async fn list_models(
+                &self,
+                _cx: &DriverContext<'_>,
+                _t: &Target<'_>,
+            ) -> Result<Fetched, HubError> {
+                Err(HubError::Conflict)
+            }
+        }
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        let driver = Odd(OpenAiCompatDriver::for_descriptor(
+            descriptor("groq").unwrap().clone(),
+        ));
+        run_contract(&driver, &f).await;
+    }
+
+    #[test]
+    fn testkit_a_fixture_prints_without_the_key_or_the_body_builder() {
+        let f = ContractFixture::openai_shaped("groq", "https://api.groq.com/openai/v1");
+        let debug = format!("{f:?}");
+        assert!(
+            debug.contains("groq") && !debug.contains("sk-not-a-real-key"),
+            "{debug}"
+        );
+    }
+}

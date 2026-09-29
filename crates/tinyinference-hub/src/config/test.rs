@@ -203,3 +203,16 @@ mod config_props {
         }
     }
 }
+
+#[test]
+fn config_an_extra_field_can_never_shadow_a_known_one_on_the_way_out() {
+    let mut config = HubConfig::new();
+    config.schema_version = 1;
+    config.extra.insert("providers".into(), json!("shadow"));
+    config.extra.insert("schema_version".into(), json!(99));
+    config.extra.insert("kept".into(), json!(1));
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(value["providers"], json!([]));
+    assert_eq!(value["schema_version"], json!(1));
+    assert_eq!(value["kept"], json!(1));
+}

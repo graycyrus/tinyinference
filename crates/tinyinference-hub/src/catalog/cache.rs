@@ -57,6 +57,12 @@ pub const STALE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// The most endpoint slots kept; beyond this the least recently used go.
 pub const MAX_SLOTS: usize = 1024;
 
+/// A boxed fetch: what a caller's closure is turned into so the cache's logic
+/// is not duplicated per closure type.
+type FetchFn<'a> = Box<dyn FnOnce() -> FetchFuture<'a> + Send + 'a>;
+type FetchFuture<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<Fetched, HubError>> + Send + 'a>>;
+
 /// What one cache slot is keyed on. Never contains a credential.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CatalogKey {
@@ -307,9 +313,20 @@ impl CatalogCache {
         fetch: F,
     ) -> Result<ModelList, HubError>
     where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Fetched, HubError>>,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<Fetched, HubError>> + Send,
     {
+        // The body is compiled once, not once per caller's closure type.
+        self.read_boxed(key, refresh, Box::new(move || Box::pin(fetch())))
+            .await
+    }
+
+    async fn read_boxed(
+        &self,
+        key: CatalogKey,
+        refresh: bool,
+        fetch: FetchFn<'_>,
+    ) -> Result<ModelList, HubError> {
         let slot = self.slot(key);
         let generation_seen = slot.generation.load(Ordering::SeqCst);
         if !refresh {
