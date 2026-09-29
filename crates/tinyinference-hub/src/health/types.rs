@@ -63,8 +63,14 @@ pub struct ProbeSignal {
     pub superseded: bool,
     /// Why it failed.
     pub reason: Option<ReasonCode>,
-    /// When, in milliseconds since the Unix epoch.
+    /// When it was recorded (it finished), in milliseconds since the Unix epoch.
     pub at_ms: u64,
+    /// When the probe **started**, when known. A pass supersedes only failures
+    /// recorded before this instant: whatever failed while the probe was in
+    /// flight is newer than the probe's evidence. Absent on snapshots written
+    /// before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
     /// How long it took.
     pub latency_ms: Option<u64>,
 }

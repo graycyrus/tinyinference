@@ -85,6 +85,7 @@ pub async fn run_probe(
         failure: None,
         refusal: None,
         latency: std::time::Duration::ZERO,
+        started_ms: cx.clock.wall_ms(),
         models: Vec::new(),
         proves_key: false,
         notes: Vec::new(),

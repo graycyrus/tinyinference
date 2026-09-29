@@ -161,8 +161,9 @@ impl HealthTracker {
         let latency = u64::try_from(report.latency.as_millis()).ok();
         let depth = report.depth;
         let proves_key = report.proves_key;
+        let started_ms = report.started_ms;
         self.update(scope, slug, move |snapshot, now| {
-            snapshot.record_probe(depth, failure, latency, proves_key, now)
+            snapshot.record_probe_started(depth, failure, latency, proves_key, started_ms, now)
         })
         .await
     }

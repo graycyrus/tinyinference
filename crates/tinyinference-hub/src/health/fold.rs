@@ -24,6 +24,9 @@
 //! * a probe that **proves the key** clears a rejected-key failure in the lanes
 //!   shallower than itself (key-only, catalog, completion); only a completion,
 //!   the deepest check, also clears the real-turn lane and a quota failure;
+//! * a passing probe speaks only for failures recorded **before it started**
+//!   (`started_ms`): a failure that landed while the probe was in flight is
+//!   newer than anything the probe saw and is kept;
 //! * a passing lane counts as evidence the provider is alive only if it is not
 //!   more than 30 minutes older than the newest failure.
 
@@ -126,10 +129,12 @@ impl HealthSnapshot {
         turn: bool,
         completion: bool,
         matches: impl Fn(ReasonCode) -> bool,
+        evidence_from_ms: u64,
     ) {
         if turn
             && let Some(signal) = self.turn.as_mut()
             && !signal.ok
+            && signal.at_ms <= evidence_from_ms
             && signal.reason.is_some_and(&matches)
         {
             signal.superseded = true;
@@ -141,6 +146,7 @@ impl HealthSnapshot {
         if completion
             && let Some(signal) = self.probes.get_mut(&TestDepth::Completion)
             && !signal.ok
+            && signal.at_ms <= evidence_from_ms
             && signal.reason.is_some_and(&matches)
         {
             signal.superseded = true;
@@ -161,11 +167,22 @@ impl HealthSnapshot {
     /// key-only rejection: to lift a chat lane's rejection the operator re-tests
     /// with a completion, the only check that shows the key can chat.
     ///
-    /// Recency is by recording order: a probe that started earlier but finished
-    /// later is treated as newer, because the snapshot keeps no start time.
-    fn clear_shallower_lanes(&mut self, passed: TestDepth, matches: impl Fn(ReasonCode) -> bool) {
+    /// Recency is by evidence time: a pass speaks only for failures recorded no
+    /// later than the moment the probe **started** (`evidence_from_ms`). A
+    /// failure recorded while the probe was in flight is newer than anything the
+    /// probe saw, so it stays.
+    fn clear_shallower_lanes(
+        &mut self,
+        passed: TestDepth,
+        matches: impl Fn(ReasonCode) -> bool,
+        evidence_from_ms: u64,
+    ) {
         for (depth, signal) in &mut self.probes {
-            if *depth < passed && !signal.ok && signal.reason.is_some_and(&matches) {
+            if *depth < passed
+                && !signal.ok
+                && signal.at_ms <= evidence_from_ms
+                && signal.reason.is_some_and(&matches)
+            {
                 signal.superseded = true;
             }
         }
@@ -250,17 +267,38 @@ impl HealthSnapshot {
         proves_key: bool,
         now_ms: u64,
     ) -> bool {
+        self.record_probe_started(depth, failure, latency_ms, proves_key, now_ms, now_ms)
+    }
+
+    /// [`record_probe`](Self::record_probe) for a probe that **started** at
+    /// `started_ms` and finished (was recorded) at `now_ms`.
+    ///
+    /// A pass supersedes only failures recorded no later than `started_ms`: one
+    /// that landed while the probe was in flight (a real turn failing during a
+    /// slow completion ping) is newer than anything the probe saw and is kept.
+    /// The start time is stored on the signal, so the snapshot always knows how
+    /// old the evidence behind each lane is.
+    pub fn record_probe_started(
+        &mut self,
+        depth: TestDepth,
+        failure: Option<(ReasonCode, Option<u16>)>,
+        latency_ms: Option<u64>,
+        proves_key: bool,
+        started_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let started_ms = started_ms.min(now_ms);
         if failure.is_none() {
             if depth == TestDepth::Completion {
                 // A deliberate completion that passed ends a run of failed turns,
                 // terminal or not, and shows the key and the account work to the
                 // shallower lanes too.
-                self.supersede_chat_failures(true, false, |_| true);
-                self.clear_shallower_lanes(depth, is_terminal);
+                self.supersede_chat_failures(true, false, |_| true, started_ms);
+                self.clear_shallower_lanes(depth, is_terminal, started_ms);
             } else if proves_key {
                 // A key-proving pass at a shallower depth clears only rejected
                 // keys, and only in lanes shallower than itself.
-                self.clear_shallower_lanes(depth, |reason| reason == ReasonCode::Auth);
+                self.clear_shallower_lanes(depth, |reason| reason == ReasonCode::Auth, started_ms);
             }
         }
         self.probes.insert(
@@ -270,6 +308,7 @@ impl HealthSnapshot {
                 superseded: false,
                 reason: failure.map(|(reason, _)| reason),
                 at_ms: now_ms,
+                started_ms: Some(started_ms),
                 latency_ms,
             },
         );
@@ -285,7 +324,7 @@ impl HealthSnapshot {
         now_ms: u64,
     ) -> bool {
         if failure.is_none() {
-            self.supersede_chat_failures(false, true, |r| !is_terminal(r));
+            self.supersede_chat_failures(false, true, |r| !is_terminal(r), now_ms);
         }
         self.turn = Some(TurnSignal {
             latency_ms,

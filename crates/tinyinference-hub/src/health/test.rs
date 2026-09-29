@@ -668,6 +668,7 @@ async fn health_a_probe_report_feeds_the_tracker_including_its_failure_and_laten
         failure: None,
         refusal: None,
         latency: Duration::from_millis(120),
+        started_ms: 0,
         models: Vec::new(),
         proves_key: true,
         notes: Vec::new(),
@@ -687,6 +688,63 @@ async fn health_a_probe_report_feeds_the_tracker_including_its_failure_and_laten
     assert_eq!(snapshot.last_failure.unwrap().status, Some(401));
     assert!(!snapshot.probes[&TestDepth::Catalog].ok);
     assert_eq!(bed.events.events().len(), 2);
+}
+
+#[test]
+fn health_a_pass_never_clears_a_failure_recorded_while_the_probe_was_in_flight() {
+    // The recorded limitation of run 2: a slow completion ping that started at
+    // t=1000 and finished at t=2000 must not erase a turn that failed at t=1500,
+    // which is newer than anything the probe saw.
+    let mut snapshot = HealthSnapshot::default();
+    snapshot.record_turn(Some((ReasonCode::Timeout, None)), None, 1_500);
+    snapshot.record_probe_started(TestDepth::Completion, None, Some(5), true, 1_000, 2_000);
+    assert!(
+        !snapshot.turn.unwrap().superseded,
+        "the newer failure is kept"
+    );
+    assert_eq!(
+        snapshot.health,
+        ProviderHealth::Degraded(ReasonCode::Timeout)
+    );
+    assert_eq!(
+        snapshot.probes[&TestDepth::Completion].started_ms,
+        Some(1_000)
+    );
+    // The same failure recorded before the probe started is cleared.
+    let mut snapshot = HealthSnapshot::default();
+    snapshot.record_turn(Some((ReasonCode::Timeout, None)), None, 900);
+    snapshot.record_probe_started(TestDepth::Completion, None, Some(5), true, 1_000, 2_000);
+    assert!(snapshot.turn.unwrap().superseded);
+    assert_eq!(snapshot.health, ProviderHealth::Ok);
+}
+
+#[test]
+fn health_a_shallower_pass_keeps_a_deeper_rejection_recorded_during_the_probe() {
+    let mut snapshot = HealthSnapshot::default();
+    snapshot.record_probe(
+        TestDepth::KeyOnly,
+        Some((ReasonCode::Auth, Some(401))),
+        None,
+        false,
+        1_500,
+    );
+    // A catalog pass that proves the key, started before the failure landed.
+    snapshot.record_probe_started(TestDepth::Catalog, None, Some(5), true, 1_000, 2_000);
+    assert_eq!(snapshot.health, ProviderHealth::Down(ReasonCode::Auth));
+    // Started after it: the rejection is cleared.
+    snapshot.record_probe_started(TestDepth::Catalog, None, Some(5), true, 2_100, 2_200);
+    assert_eq!(snapshot.health, ProviderHealth::Ok);
+}
+
+#[test]
+fn health_a_snapshot_without_a_start_time_still_loads_and_compares() {
+    let json =
+        r#"{"probes":{"completion":{"ok":false,"reason":"auth","at_ms":10,"latency_ms":null}}}"#;
+    let mut snapshot: HealthSnapshot = serde_json::from_str(json).unwrap();
+    assert_eq!(snapshot.probes[&TestDepth::Completion].started_ms, None);
+    // A record_probe (started == recorded) clears an older failure.
+    snapshot.record_probe(TestDepth::Completion, None, None, true, 50);
+    assert_eq!(snapshot.health, ProviderHealth::Ok);
 }
 
 #[test]

@@ -39,6 +39,10 @@ pub struct ProbeReport {
     pub refusal: Option<PolicyViolation>,
     /// How long the check took, by the hub's clock.
     pub latency: Duration,
+    /// When the check started, in wall-clock milliseconds by the hub's clock.
+    /// The health tracker uses it so a pass never supersedes a failure that was
+    /// recorded while the probe was still running.
+    pub started_ms: u64,
     /// The models read, for a passing `Catalog` probe.
     pub models: Vec<ModelEntry>,
     /// Whether a pass proves the key works (see [`ProbeNote`]).
