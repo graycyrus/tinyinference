@@ -96,10 +96,13 @@ impl Hub {
             fingerprinted = Some(runtime);
             version = found;
         }
+        // A list served from before because the runtime is down says nothing
+        // about it now, so only a fresh read counts.
         let models = self
             .list_models(scope, slug, true)
             .await
             .ok()
+            .filter(|list| !list.is_stale())
             .map(|list| list.models.len());
         Ok(LocalRuntimeStatus {
             reachable: fingerprinted.is_some() || models.is_some(),

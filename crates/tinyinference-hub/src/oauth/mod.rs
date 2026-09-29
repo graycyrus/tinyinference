@@ -88,3 +88,7 @@ impl Hub {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod tests;

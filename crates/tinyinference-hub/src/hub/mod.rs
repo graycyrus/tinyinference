@@ -10,9 +10,9 @@
 //! pins) are read once before the loop; they are not protected by the
 //! configuration's version and the operations say where that matters.
 //!
-//! **Credentials** live in the [`CredentialStore`](crate::ports::CredentialStore)
+//! **Credentials** live in the [`CredentialStore`]
 //! under [`Slug::key_slot`](crate::Slug::key_slot), never on a record, and are
-//! resolved through a per-kind [`CredentialChain`](crate::credential::CredentialChain)
+//! resolved through a per-kind [`CredentialChain`]
 //! on every request. An operation that writes a key and the record does it in
 //! this order: read the previous slot value, write the new key, save the record;
 //! if the record cannot be saved the previous slot value is put back. Removal
@@ -46,6 +46,10 @@ mod builder;
 pub(crate) mod fixtures;
 mod tx;
 mod types;
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod tests;
 
 pub(crate) use access::Credential;
 pub use builder::{HubBuilder, ManagedConfig};
@@ -109,16 +113,22 @@ pub(crate) struct Inner {
 /// Build one with [`Hub::builder`].
 ///
 /// ```
-/// # tokio_test_block(async {
-/// use std::sync::Arc;
-/// use tinyinference_hub::ports::memory::{MemoryConfig, MemoryCredentials, SystemClock};
-/// use tinyinference_hub::{Hub, ScopeKey};
-/// # use tinyinference_hub::ports::{Http, HttpError, HubRequest, HubResponse};
-/// # use tinyinference_hub::EndpointPolicy;
-/// # #[derive(Debug)] struct NoNet;
-/// # #[async_trait::async_trait] impl Http for NoNet {
-/// #   async fn send(&self, _r: HubRequest, _p: &EndpointPolicy) -> Result<HubResponse, HttpError> { Err(HttpError::ConnectFailed) }
-/// # }
+/// use tinyinference_hub::ports::SystemClock;
+/// use tinyinference_hub::ports::memory::{MemoryConfig, MemoryCredentials};
+/// use tinyinference_hub::ports::{Http, HttpError, HubRequest, HubResponse};
+/// use tinyinference_hub::{EndpointPolicy, Hub, ScopeKey};
+///
+/// // A host with no network: every request fails to connect.
+/// #[derive(Debug)]
+/// struct NoNet;
+///
+/// #[async_trait::async_trait]
+/// impl Http for NoNet {
+///     async fn send(&self, _: HubRequest, _: &EndpointPolicy) -> Result<HubResponse, HttpError> {
+///         Err(HttpError::ConnectFailed)
+///     }
+/// }
+///
 /// let hub = Hub::builder()
 ///     .credentials(MemoryCredentials::new())
 ///     .config(MemoryConfig::new())
@@ -126,13 +136,8 @@ pub(crate) struct Inner {
 ///     .clock(SystemClock)
 ///     .build()
 ///     .expect("every required port is set");
-/// let status = hub.status(&ScopeKey::new("user:local")).await.unwrap();
+/// let status = futures::executor::block_on(hub.status(&ScopeKey::new("user:local"))).unwrap();
 /// assert!(status.providers.is_empty());
-/// # });
-/// # fn tokio_test_block<F: std::future::Future<Output = ()>>(f: F) {
-/// #   let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-/// #   rt.block_on(f);
-/// # }
 /// ```
 #[derive(Clone)]
 pub struct Hub {

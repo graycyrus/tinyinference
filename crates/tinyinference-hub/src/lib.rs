@@ -22,8 +22,8 @@
 //! * [`catalogue`] and [`descriptor`]: every built-in kind as data.
 //! * [`policy`] and [`endpoint`]: the SSRF policy and endpoint credential
 //!   redaction.
-//! * [`config`]: the persisted [`HubConfig`](config::HubConfig) and
-//!   [`ProviderDraft`](config::ProviderDraft).
+//! * [`config`]: the persisted [`HubConfig`] and
+//!   [`ProviderDraft`].
 //! * [`ports`]: the traits a host implements, and in-memory defaults.
 //! * [`credential`]: the ordered credential chain and its sources.
 //! * [`catalog`]: listing parsers, the safe model-list cache, metadata merge.
@@ -88,14 +88,21 @@ pub mod taxonomy;
 #[cfg(any(test, feature = "testing"))]
 pub mod testkit;
 
+pub use config::{DefaultChoice, HubConfig, ModelChoice, ProviderDraft};
 pub use descriptor::{Capabilities, ProviderDescriptor, ProviderRecord, Quirk};
 pub use error::{
     CopyContext, HubError, InvalidInput, NotFound, Operation, PolicyViolation, PortName,
     ProviderFailure, ReasonCode, Result, Retry, Unresolved, UsedBy, classify, classify_for,
     classify_transport,
 };
+pub use hub::{
+    Confirm, ConnectOptions, Hub, HubBuilder, HubPolicy, HubStatus, KeyState, ManagedConfig,
+    Mutation, MutationStatus, ProviderPatch, ProviderStatus, ProviderView, Retested,
+};
 pub use ids::{AgentKey, KindId, ModelId, ScopeKey, Slug, WorkloadKey};
+pub use import::{Imported, LossEntry, LossKind, LossReport};
 pub use policy::{EndpointPolicy, EndpointRefusal, HeaderPolicy};
+pub use route::{ProviderRoute, ResolvedTurn, ResolvedVia, RouteTarget, TurnQuery};
 pub use secret::{LogOnly, Secret};
 pub use taxonomy::{
     AuthStyle, CatalogShape, CliKind, LocalRuntime, Protocol, ProviderGroup, TestDepth, Transport,
@@ -105,4 +112,6 @@ pub use taxonomy::{
 /// host needs one import. Deliberately not a wholesale re-export.
 pub mod llm {
     pub use tinyinference_llm::ProviderKind;
+    pub use tinyinference_llm::catalog::ModelInfo;
+    pub use tinyinference_llm::model::ChatModel;
 }

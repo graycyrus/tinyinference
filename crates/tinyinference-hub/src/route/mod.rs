@@ -16,5 +16,8 @@ pub use resolve::check_route;
 pub use types::{ProviderRoute, ResolvedTurn, ResolvedVia, RouteTarget, Temperature, TurnQuery};
 
 #[cfg(test)]
+#[path = "resolve_test.rs"]
+mod resolve_tests;
+#[cfg(test)]
 #[path = "test.rs"]
 mod tests;

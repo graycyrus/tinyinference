@@ -34,9 +34,14 @@ pub struct CliOutput {
 pub trait ProcessSpawner: Send + Sync + Debug {
     /// Runs `command`, giving up after `timeout`.
     ///
+    /// The contract readiness relies on: a binary that **could not be launched**
+    /// (not installed, not executable) is `Err`; a binary that ran and was
+    /// **killed at the timeout** is `Ok` with `status: None`; anything else is
+    /// `Ok` with its exit status and output. The hub reads the first as "not
+    /// installed" and the second as "unknown", never as "signed out".
+    ///
     /// # Errors
     ///
-    /// [`PortError::Unavailable`] when the binary could not be launched or the
-    /// timeout elapsed.
+    /// [`PortError::Unavailable`] when the binary could not be launched.
     async fn run(&self, command: &CliCommand, timeout: Duration) -> Result<CliOutput, PortError>;
 }

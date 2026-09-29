@@ -1,5 +1,5 @@
 //! Pure readers that turn OpenCompany's and OpenHuman's stored shapes into a
-//! [`HubConfig`](crate::config::HubConfig) and a [`LossReport`].
+//! [`HubConfig`] and a [`LossReport`].
 //!
 //! Nothing here touches a store or a network: a host reads its own records into
 //! the plain input structs (which also `Deserialize` from the stored JSON) and

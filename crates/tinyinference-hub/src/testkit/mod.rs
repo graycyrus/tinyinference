@@ -12,12 +12,16 @@
 mod clock;
 mod contract;
 mod http;
+#[cfg(feature = "cli")]
+mod process;
 mod rig;
 mod script;
 
 pub use clock::FakeClock;
 pub use contract::{ContractFixture, ListingBody, run_contract};
 pub use http::{RecordedRequest, ScriptedHttp};
+#[cfg(feature = "cli")]
+pub use process::{ScriptedSpawner, Spawned};
 pub use rig::MemoryPorts;
 pub use script::{Match, Script, Scripted};
 

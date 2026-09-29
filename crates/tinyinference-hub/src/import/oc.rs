@@ -1,4 +1,4 @@
-//! The OpenCompany reader: `inference/*` records to a [`HubConfig`].
+//! The OpenCompany reader: `inference/*` records to a [`HubConfig`](crate::config::HubConfig).
 //!
 //! Input mirrors what OpenCompany stores per company (see 06-migration-mapping
 //! section 1). Nothing is rewritten in OpenCompany: the reader is pure, and an

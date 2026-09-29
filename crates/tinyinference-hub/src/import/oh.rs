@@ -1,5 +1,5 @@
 //! The OpenHuman reader: `config.toml` cloud providers, primary cloud, role
-//! routes and local AI to a [`HubConfig`].
+//! routes and local AI to a [`HubConfig`](crate::config::HubConfig).
 //!
 //! OpenHuman's shapes are lossy in twelve documented ways (06-migration-mapping
 //! section 3). The reader takes the reading OpenHuman's backend actually ran
@@ -135,7 +135,12 @@ const OLD_OH_PRESETS: &[(&str, &str, &str)] = &[
 ];
 
 fn parse_auth(raw: &str) -> Option<AuthStyle> {
-    match raw.trim().to_ascii_lowercase().replace('_', "").as_str() {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "")
+        .as_str()
+    {
         "" | "bearer" => Some(AuthStyle::Bearer),
         "anthropic" => Some(AuthStyle::Anthropic),
         "none" => Some(AuthStyle::None),
@@ -415,10 +420,26 @@ pub fn import(snapshot: &OhSnapshot) -> Result<Imported, HubError> {
         },
     }
 
-    for (raw_role, text) in &snapshot.routes {
+    // Explicit role names first, aliases after: when both are present the
+    // explicit one wins and the alias is reported dropped.
+    let mut ordered: Vec<(&String, &String)> = snapshot.routes.iter().collect();
+    ordered.sort_by_key(|(raw_role, _)| role_name(raw_role).1);
+    for (raw_role, text) in ordered {
         let (role, aliased) = role_name(raw_role);
         let source = format!("routes/{role}");
         if aliased {
+            if out
+                .config
+                .workload_routes
+                .contains_key(&WorkloadKey::new(role.clone()))
+            {
+                out.loss.push(
+                    &source,
+                    LossKind::Dropped,
+                    "a role alias was ignored because the role itself is set",
+                );
+                continue;
+            }
             out.loss.push(
                 &source,
                 LossKind::Normalised,

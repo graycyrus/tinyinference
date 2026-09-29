@@ -77,6 +77,10 @@ fn prefix_of(runtime: LocalRuntime) -> &'static str {
         LocalRuntime::LmStudio => "lmstudio",
         LocalRuntime::Mlx => "mlx",
         LocalRuntime::Omlx => "omlx",
+        // OpenHuman reads `vllm` and `llamacpp` as its local-openai runtime, so
+        // writing them keeps the hub's more specific runtime through a round trip.
+        LocalRuntime::Vllm => "vllm",
+        LocalRuntime::LlamaCpp => "llamacpp",
         _ => "local-openai",
     }
 }
