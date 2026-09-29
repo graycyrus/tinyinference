@@ -1096,3 +1096,28 @@ async fn drivers_one_bad_late_page_does_not_discard_the_good_pages_before_it() {
         .unwrap();
     assert_eq!(ids(&fetched), ["keep"]);
 }
+
+#[tokio::test]
+async fn drivers_a_spent_list_deadline_stops_a_read_before_it_sends_anything() {
+    let mut bed = Bed::hosted();
+    bed.policy = EndpointPolicy::hosted().with_list_deadline(std::time::Duration::ZERO);
+    let s = managed_subject(Some("th-fake"));
+    match managed()
+        .list_models(&bed.cx(), &s.target())
+        .await
+        .unwrap_err()
+    {
+        HubError::Provider(f) => assert_eq!(f.reason, ReasonCode::Timeout),
+        other => panic!("{other:?}"),
+    }
+    let a = anthropic_subject();
+    assert_eq!(
+        anthropic()
+            .list_models(&bed.cx(), &a.target())
+            .await
+            .unwrap_err()
+            .reason(),
+        ReasonCode::Timeout
+    );
+    assert_eq!(bed.http.request_count(), 0);
+}
