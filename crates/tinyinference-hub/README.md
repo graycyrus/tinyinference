@@ -155,6 +155,14 @@ back to either host by the hub.
   left disabled at the new origin with no key; the caller gets the reason the move
   failed, and the stuck state is logged and announced (`ProviderEdited`,
   `KeyChanged`), `set_enabled` finishing a half-applied move.
+- Operations that change two stores (a key and a record: `add`, `edit`, `remove`,
+  `set_key`, `clear_key`, and above all an endpoint move) are **not
+  cancellation-safe**. A future dropped between their awaits (a request timeout,
+  a `select!`) leaves the state a failure would leave, minus the undo and the
+  announcement. Run them to completion (spawn them; do not race them against a
+  timer). After a failed endpoint move that could not be undone the provider is
+  disabled at the new endpoint with no key: enter a key (`set_key`) before
+  switching it on.
 - Failover, budgets, cooldowns and streaming health are a later crate; the hub
   exposes the signals (`record_outcome`, health, `Retry`).
 

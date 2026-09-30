@@ -278,6 +278,13 @@ impl Hub {
             default_was,
             key_was: None,
         };
+        // Announced as soon as the record is committed, so every later failure
+        // (an undo, another writer's edit or removal) reads as a change to a
+        // provider the host already knows about.
+        self.inner.events.emit(HubEvent::ProviderAdded {
+            scope: scope.clone(),
+            slug: plan.slug.clone(),
+        });
         if let Some(key) = &plan.key {
             // The record is committed; the key goes in under the provider's lock,
             // after confirming the record is still this add's. Without the lock, a
@@ -307,14 +314,7 @@ impl Hub {
                 // Somebody moved it to another endpoint meanwhile: this key was
                 // entered for the one it was added at, so it is not stored. The
                 // record is theirs now and stays as they left it.
-                Ownership::Moved => {
-                    // The add did commit its record; only its key was refused.
-                    self.inner.events.emit(HubEvent::ProviderAdded {
-                        scope: scope.clone(),
-                        slug: plan.slug.clone(),
-                    });
-                    return Err(HubError::Conflict);
-                }
+                Ownership::Moved => return Err(HubError::Conflict),
             }
             // What to put back if this add is undone: read under the lock, so it
             // is the slot as this add found it, not as it was before a removal.
@@ -348,18 +348,10 @@ impl Hub {
             };
             if still != Ownership::Ours {
                 self.delete_orphan_slot(scope, &plan.slug).await;
+                // A key came and went.
+                self.announce_key_state(scope, &plan.slug).await;
                 return Err(match still {
-                    Ownership::Moved => {
-                        // The record this call created exists (the other
-                        // writer's now): announce it, and that a key came and
-                        // went.
-                        self.inner.events.emit(HubEvent::ProviderAdded {
-                            scope: scope.clone(),
-                            slug: plan.slug.clone(),
-                        });
-                        self.announce_key_state(scope, &plan.slug).await;
-                        HubError::Conflict
-                    }
+                    Ownership::Moved => HubError::Conflict,
                     _ => HubError::NotFound(crate::error::NotFound::Provider(plan.slug.clone())),
                 });
             }
@@ -368,10 +360,6 @@ impl Hub {
             // run since the lock was released), not what this add wrote.
             self.announce_key_state(scope, &plan.slug).await;
         }
-        self.inner.events.emit(HubEvent::ProviderAdded {
-            scope: scope.clone(),
-            slug: plan.slug.clone(),
-        });
         Ok(added)
     }
 
@@ -534,6 +522,7 @@ impl Hub {
                 }),
                 Err(error) => {
                     tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
+                    self.announce_key_state(scope, &slug).await;
                 }
             }
         }
@@ -560,9 +549,8 @@ impl Hub {
         if restore_after
             && existed
             && let Some(previous) = added.key_was.clone()
-            && let Err(error) = self.restore_slot(scope, &slug, previous).await
         {
-            tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
+            self.restore_or_announce(scope, &slug, previous).await;
         }
         self.forget_health(scope, &slug).await;
         self.inner.cache.evict_scope(scope);

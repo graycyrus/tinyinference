@@ -42,8 +42,11 @@ impl Hub {
     /// state that cannot send a credential to the wrong origin:** the provider
     /// disabled at the new endpoint with its new key (only switching it back on
     /// failed: call [`Hub::set_enabled`]), or disabled there with no key (the
-    /// move could not be undone). The failure is logged and the change announced
-    /// (`ProviderEdited`, `KeyChanged`) in those cases.
+    /// move could not be undone: enter the key with [`Hub::set_key`] before
+    /// switching it on). The failure is logged and the change announced
+    /// (`ProviderEdited`, `KeyChanged`) in those cases. Like every operation that
+    /// changes two stores this is **not cancellation-safe**: run it to completion
+    /// (do not put it under a timeout or a `select!` that can drop it).
     pub async fn edit(
         &self,
         scope: &ScopeKey,
@@ -257,8 +260,10 @@ impl Hub {
         }
         if let Some(new) = base_url
             && new != record.base_url
+            && !key_set
         {
-            // A different endpoint says nothing about what the old one said.
+            // A different endpoint says nothing about what the old one said. (A
+            // key change, announced above, has already dropped both.)
             self.inner.cache.evict_scope(scope);
             self.forget_health(scope, slug).await;
         }

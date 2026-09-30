@@ -31,8 +31,15 @@
 //! that cannot run stops the undo there; the record stays **disabled at the new
 //! origin** (unusable). The caller's error is the reason the move failed; the
 //! stuck state is logged and announced (`ProviderEdited`, and `KeyChanged` with
-//! what the slot holds), and `Hub::set_enabled` finishes a half-applied move. The
+//! what the slot holds). If only the final "switch back on" failed the key is in
+//! place and `Hub::set_enabled` finishes the move; if the undo failed the
+//! provider has no key, so enter one (`set_key`) **before** switching it on (a
+//! host credential in the chain would otherwise answer at the new endpoint). The
 //! old key is lost only when the stores fail twice in a row.
+//!
+//! Not cancellation-safe: the move is several awaits over two stores. A future
+//! dropped between them (a request timeout, a `select!`) leaves the state a
+//! failure would, minus the undo and the announcement. Run it to completion.
 
 use crate::error::{HubError, NotFound};
 use crate::hub::Hub;
@@ -237,7 +244,11 @@ impl Hub {
                 Ok(())
             })
             .await;
-        if let Err(error) = back {
+        // A store that committed the move back and then reported a failure is
+        // looked at, not assumed away (as after the move's own commit).
+        if let Err(error) = back
+            && self.record_is_at(scope, slug, plan.validated_base).await != Some(true)
+        {
             tracing::warn!(%slug, reason = %error.reason(), "could not move the endpoint back; the provider stays disabled at the new endpoint with no key");
             self.announce_move(scope, slug).await;
             return;

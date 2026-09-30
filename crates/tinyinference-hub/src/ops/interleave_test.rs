@@ -1378,3 +1378,77 @@ async fn ops_a_move_refused_because_another_hub_moved_the_record_does_not_restor
         "the old key is not put back beside a third origin"
     );
 }
+
+#[tokio::test]
+async fn ops_a_removal_the_store_committed_and_then_reported_failed_does_not_bring_the_key_back() {
+    // Round 7: the key was restored beside a record that was in fact gone, for the
+    // next provider of that slug to find.
+    let (bed, _spy) = acme_bed().await;
+    let _fault = bed.ports.config.hold(Hold::after(Call::Save).fail());
+    bed.hub
+        .remove(&bed.scope, &slug("acme"), Confirm::in_use())
+        .await
+        .unwrap_err();
+    assert!(
+        !bed.hub
+            .status(&bed.scope)
+            .await
+            .unwrap()
+            .providers
+            .iter()
+            .any(|p| p.view.record.slug == slug("acme")),
+        "the removal did commit"
+    );
+    assert_eq!(bed.key_of("acme").await, None, "and its key stays gone");
+}
+
+#[tokio::test]
+async fn ops_an_add_that_fails_after_its_record_committed_is_announced_as_an_add_and_its_undoing() {
+    let bed = Bed::new();
+    let slot = slug("acme").key_slot();
+    let _fault = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    bed.hub
+        .add(
+            &bed.scope,
+            ProviderDraft::new("custom")
+                .with_label("Acme")
+                .with_base_url(OLD)
+                .with_key(Secret::new(K_OLD))
+                .with_model(model("m")),
+        )
+        .await
+        .unwrap_err();
+    let events = bed.ports.events.events();
+    let position = |wanted: fn(&crate::ports::HubEvent) -> bool| events.iter().position(wanted);
+    let added = position(|e| matches!(e, crate::ports::HubEvent::ProviderAdded { .. }));
+    let removed = position(|e| matches!(e, crate::ports::HubEvent::ProviderRemoved { .. }));
+    assert!(
+        added.is_some() && removed.is_some() && added < removed,
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn ops_an_undo_whose_move_back_commits_and_then_reports_failure_still_gets_the_old_key_back()
+{
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _write = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    // Saves: the move (#0), then the undo's move back (#1): it lands, then errors.
+    let _back = bed
+        .ports
+        .config
+        .hold(Hold::after(Call::Save).skip(1).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_OLD.into())));
+    assert!(enabled_of(&bed).await);
+}

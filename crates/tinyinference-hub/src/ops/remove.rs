@@ -117,10 +117,25 @@ impl Hub {
             Err(error) => {
                 // A record somebody else removed while this ran took its key with
                 // it: putting the key back would leave a slot no record owns.
-                if !matches!(error, HubError::NotFound(_))
-                    && let Some(previous) = previous
-                {
-                    self.restore_or_announce(scope, slug, Some(previous)).await;
+                // Nor is a store that committed the removal and then reported a
+                // failure a reason to put it back: the record is looked for, and
+                // the key restored only beside a record that is verifiably
+                // still there.
+                if !matches!(error, HubError::NotFound(_)) {
+                    let still_there = self
+                        .read_config(scope)
+                        .await
+                        .ok()
+                        .map(|c| c.provider(slug).is_some_and(|p| p.id == record.id));
+                    match (still_there, previous) {
+                        (Some(true), Some(previous)) => {
+                            self.restore_or_announce(scope, slug, Some(previous)).await;
+                        }
+                        // Gone: the key stays deleted. Unreadable: cannot tell,
+                        // so the slot is left as it is and said so.
+                        (None, Some(_)) => self.announce_key_state(scope, slug).await,
+                        _ => {}
+                    }
                 }
                 return Err(error);
             }
