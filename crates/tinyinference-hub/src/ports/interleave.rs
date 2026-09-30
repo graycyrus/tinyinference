@@ -48,7 +48,7 @@ use tokio::sync::oneshot;
 
 use super::PortError;
 
-/// A store call an [`Interleave`] can hold.
+/// A store call that a [`Hold`] can park or fail.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
