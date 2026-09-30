@@ -751,3 +751,66 @@ fn client_product_and_kind_headers_reach_only_first_party_hosts() {
         AuthStyle::Bearer
     )));
 }
+
+#[tokio::test]
+async fn client_a_kept_model_fails_closed_after_its_provider_moved_was_disabled_or_removed() {
+    let (factory, _fake) = recording(vec![]);
+    let bed = Bed::with(|b| b.model_factory(factory.clone()));
+    bed.hub
+        .add(
+            &bed.scope,
+            crate::config::ProviderDraft::new("custom")
+                .with_label("Acme")
+                .with_base_url("https://llm.acme.test/v1")
+                .with_key(Secret::new("sk-not-a-real-key"))
+                .with_model(model("m")),
+        )
+        .await
+        .unwrap();
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &TurnQuery::new())
+        .await
+        .unwrap();
+    let chat = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+    chat.invoke(&(), ModelRequest::default()).await.unwrap();
+    // The operator moves the provider to another origin with a new key.
+    bed.hub
+        .edit(
+            &bed.scope,
+            &slug("acme"),
+            crate::hub::ProviderPatch::new()
+                .base_url("https://other.test/v1")
+                .key(Secret::new("sk-second-fake")),
+        )
+        .await
+        .unwrap();
+    let built = factory.keys.lock().unwrap().len();
+    let error = chat.invoke(&(), ModelRequest::default()).await.unwrap_err();
+    let Error::Provider(provider) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(provider.code.as_deref(), Some("stale_route"));
+    assert_eq!(
+        factory.keys.lock().unwrap().len(),
+        built,
+        "nothing was built or sent"
+    );
+    // A model resolved afresh works, and a removal stops it too.
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &TurnQuery::new())
+        .await
+        .unwrap();
+    let fresh = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+    fresh.invoke(&(), ModelRequest::default()).await.unwrap();
+    bed.hub
+        .remove(&bed.scope, &slug("acme"), crate::hub::Confirm::in_use())
+        .await
+        .unwrap();
+    let error = fresh
+        .invoke(&(), ModelRequest::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Provider(_)));
+}

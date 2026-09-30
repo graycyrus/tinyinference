@@ -73,6 +73,30 @@ impl HubModel {
     /// The model for this call: the credential chain is resolved **now**, and
     /// the underlying client is rebuilt only when the credential changed.
     async fn current(&self) -> Result<Current> {
+        // A model the host kept must not send whatever key the chain holds now
+        // to an endpoint the record no longer has (G3): the live record must
+        // still be enabled and at the endpoint this model was resolved for.
+        if self.turn.group != crate::taxonomy::ProviderGroup::Managed {
+            let stale = match self.hub.read_config(&self.scope).await {
+                Ok(config) => config
+                    .provider(&self.turn.slug)
+                    .is_none_or(|record| !record.enabled || record.base_url != self.turn.base_url),
+                Err(_) => {
+                    return Err(self.provider_error(
+                        "store_unreadable",
+                        "the settings store could not be read",
+                        true,
+                    ));
+                }
+            };
+            if stale {
+                return Err(self.provider_error(
+                    "stale_route",
+                    "the provider changed or was removed since this model was resolved",
+                    false,
+                ));
+            }
+        }
         let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
         let resolved = self
             .hub

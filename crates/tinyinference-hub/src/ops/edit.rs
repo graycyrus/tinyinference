@@ -93,6 +93,7 @@ impl Hub {
             }));
         }
 
+        let origin_changes_guarded = self.credential(scope, &record).await?.key.is_some();
         let previous = match &key {
             Some(_) => Some(self.read_slot(scope, slug).await?),
             None => None,
@@ -109,6 +110,14 @@ impl Hub {
                     record.label.clone_from(label);
                 }
                 if let Some(url) = &base_url {
+                    // G3 again, against the record as it is now: a concurrent
+                    // edit may have moved the origin since the check above.
+                    if key.is_none()
+                        && !same_origin(&record.base_url, url)
+                        && origin_changes_guarded
+                    {
+                        return Err(HubError::Conflict);
+                    }
                     record.base_url.clone_from(url);
                 }
                 if let Some(model) = &model {

@@ -1,4 +1,4 @@
-//! The OpenCompany reader: `inference/*` records to a [`HubConfig`](crate::config::HubConfig).
+//! The OpenCompany reader: `inference/*` records to a [`HubConfig`].
 //!
 //! Input mirrors what OpenCompany stores per company (see 06-migration-mapping
 //! section 1). Nothing is rewritten in OpenCompany: the reader is pure, and an
@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::catalogue;
-use crate::config::DefaultChoice;
+use crate::config::{DefaultChoice, HubConfig};
 use crate::descriptor::{ProviderRecord, RecordOrigin};
 use crate::error::{HubError, InputField, InvalidInput, NotFound, ReasonCode};
 use crate::health::ProviderHealth;
@@ -101,8 +101,9 @@ fn model_on_row(models: &BTreeMap<String, String>) -> ModelOnRow {
 /// A slug that names the managed provider by a legacy alias (`cloud`) becomes
 /// the managed provider's own slug, so a default, route or health entry that
 /// pointed at a dropped alias row still resolves. Reported when it rewrites.
-fn canon(loss: &mut LossReport, at: &str, slug: Slug) -> Slug {
-    if catalogue::group_of(slug.as_str()) != ProviderGroup::Managed {
+fn canon(loss: &mut LossReport, config: &HubConfig, at: &str, slug: Slug) -> Slug {
+    // A real imported row that happens to be called `cloud` is that row.
+    if config.contains(&slug) || catalogue::group_of(slug.as_str()) != ProviderGroup::Managed {
         return slug;
     }
     let Some(managed) = catalogue::descriptors_in(ProviderGroup::Managed)
@@ -237,6 +238,7 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
             managed_off |= !stored.enabled;
             continue;
         }
+        let mut disabled_by_import = false;
         let preset = descriptor
             .filter(|d| !d.endpoint_editable)
             .and_then(|d| d.default_endpoint);
@@ -246,16 +248,18 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
                 .unwrap_or("")
                 .to_string()
         } else if let Some(preset) = preset
-            && stored.base_url.trim() != preset
+            && !crate::policy::same_origin(stored.base_url.trim(), preset)
         {
-            // G2: a cloud preset's endpoint is data, not something a stored
-            // row can point a key at.
+            // G2/G3: a cloud preset's endpoint is data, and a stored key must not
+            // be repointed at another origin. The row is kept as stored but
+            // disabled, so the operator decides.
             out.loss.push(
                 format!("inference/providers/{}", stored.slug),
-                LossKind::Normalised,
-                "a cloud preset's endpoint is fixed; the stored base_url was replaced by the preset",
+                LossKind::FailClosed,
+                "the stored base_url is not the cloud preset's origin; the row was imported disabled with its stored url",
             );
-            preset.to_string()
+            disabled_by_import = true;
+            stored.base_url.trim().to_string()
         } else {
             stored.base_url.trim().to_string()
         };
@@ -270,7 +274,7 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
             kind,
             base_url,
         );
-        record.enabled = stored.enabled;
+        record.enabled = stored.enabled && !disabled_by_import;
         record.origin = RecordOrigin::Imported;
         match model_on_row(&stored.models) {
             ModelOnRow::None => {}
@@ -366,10 +370,10 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
     if let Some(raw) = &snapshot.default {
         out.config.default = match parse_default(raw)? {
             DefaultChoice::ProviderOnly { provider } => DefaultChoice::ProviderOnly {
-                provider: canon(&mut out.loss, "inference/default", provider),
+                provider: canon(&mut out.loss, &out.config, "inference/default", provider),
             },
             DefaultChoice::Full { provider, model } => DefaultChoice::Full {
-                provider: canon(&mut out.loss, "inference/default", provider),
+                provider: canon(&mut out.loss, &out.config, "inference/default", provider),
                 model,
             },
             other => other,
@@ -387,6 +391,7 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
         if let RouteTarget::Provider(slug) = route.target.clone() {
             route.target = RouteTarget::Provider(canon(
                 &mut out.loss,
+                &out.config,
                 &format!("inference/routes/{tier}"),
                 slug,
             ));
@@ -431,7 +436,7 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
                     ) else {
                         continue;
                     };
-                    let slug = canon(&mut out.loss, "inference/health", slug);
+                    let slug = canon(&mut out.loss, &out.config, "inference/health", slug);
                     out.health.insert(slug, health_state(state));
                 }
                 out.loss.push(

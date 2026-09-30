@@ -853,16 +853,42 @@ fn import_oc_references_to_a_dropped_managed_alias_are_rewritten_to_the_managed_
 }
 
 #[test]
-fn import_oc_a_cloud_presets_stored_endpoint_is_replaced_by_the_preset() {
+fn import_oc_a_cloud_row_on_another_origin_is_imported_disabled_and_a_path_variant_is_kept() {
     let imported = import_oc(&oc(json!({"providers": [
-        {"id": "a", "slug": "openai", "kind": "openai", "base_url": "https://evil.test/v1"}
+        {"id": "a", "slug": "openai", "kind": "openai", "base_url": "https://evil.test/v1"},
+        {"id": "b", "slug": "groq", "kind": "groq", "base_url": "https://api.groq.com/openai/v2/"}
     ]})))
     .unwrap();
     let record = imported.config.provider(&slug("openai")).unwrap();
-    assert_eq!(record.base_url, "https://api.openai.com/v1");
+    assert!(
+        !record.enabled,
+        "a key is never repointed at another origin"
+    );
+    assert_eq!(record.base_url, "https://evil.test/v1");
     assert!(
         imported
             .loss
-            .has("inference/providers/openai", LossKind::Normalised)
+            .has("inference/providers/openai", LossKind::FailClosed)
     );
+    let same = imported.config.provider(&slug("groq")).unwrap();
+    assert!(same.enabled);
+    assert!(
+        !imported
+            .loss
+            .has("inference/providers/groq", LossKind::FailClosed)
+    );
+}
+
+#[test]
+fn import_oc_a_real_row_named_cloud_keeps_its_references() {
+    let imported = import_oc(&oc(json!({
+        "providers": [{"id": "c", "slug": "cloud", "kind": "custom", "base_url": "https://llm.acme.test/v1"}],
+        "default": "{\"provider\":\"cloud\",\"model\":\"m\"}"
+    })))
+    .unwrap();
+    assert!(imported.config.provider(&slug("cloud")).is_some());
+    assert!(matches!(
+        &imported.config.default,
+        DefaultChoice::Full { provider, .. } if provider.as_str() == "cloud"
+    ));
 }

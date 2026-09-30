@@ -10,10 +10,11 @@
 //!
 //! A model the host keeps reflects **credential** changes on its next call
 //! (a rotated key is used, a cleared key fails closed as `no_key`, a rejected
-//! token is refreshed). It does not re-check that the provider is still enabled
-//! or present: that is [`Hub::resolve_for_turn`](crate::Hub::resolve_for_turn)'s
-//! job, so a host that caches a model per agent should resolve again after it
-//! disables or removes a provider.
+//! token is refreshed). It also re-reads the provider's record on each call and
+//! fails closed (`stale_route`) when the provider was removed, disabled, or
+//! moved to another endpoint since the model was resolved, so a key can never
+//! follow an edit to an origin it was not entered for. The cost is one settings
+//! read per call.
 //!
 //! The underlying transport is `tinyinference-llm`'s own, so the hub's
 //! per-redirect policy and address pinning cover probes and catalogs but not

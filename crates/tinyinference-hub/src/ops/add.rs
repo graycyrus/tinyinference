@@ -433,9 +433,9 @@ impl Hub {
         // Put the key slot back while this add's record still owns the slug: no
         // other add of that slug can be writing it, so this cannot clobber a
         // winner's key. A record already gone means the slot is not ours.
-        let existed = match self.read_config(scope).await {
-            Ok(config) => config.providers.iter().any(|p| p.id == id),
-            Err(_) => false,
+        let (existed, pre_read_failed) = match self.read_config(scope).await {
+            Ok(config) => (config.providers.iter().any(|p| p.id == id), false),
+            Err(_) => (false, true),
         };
         if existed && let Some(previous) = added.key_was.clone() {
             let present = previous.is_some();
@@ -451,6 +451,7 @@ impl Hub {
             }
         }
         let mut existed = existed;
+        let restore_after = pre_read_failed;
         let removed = self
             .transact(scope, |config| {
                 existed = config.providers.iter().any(|p| p.id == id);
@@ -468,6 +469,13 @@ impl Hub {
             .await;
         if let Err(error) = &removed {
             tracing::warn!(%slug, reason = %error.reason(), "could not take an undone add's record out");
+        }
+        if restore_after
+            && existed
+            && let Some(previous) = added.key_was.clone()
+            && let Err(error) = self.restore_slot(scope, &slug, previous).await
+        {
+            tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
         }
         self.forget_health(scope, &slug).await;
         self.inner.cache.evict_scope(scope);
