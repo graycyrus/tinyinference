@@ -11,8 +11,11 @@
 //!
 //! This orders the operations of **one** hub value (and its clones). Two hubs
 //! over one store are ordered only by the stores' own guarantees, as before.
-//! The lock is never held across a probe, a catalog read or a chain read for
-//! display, only across the few store calls of a key change.
+//! The lock is never held across a probe or a catalog read. It is held across
+//! the few store calls of a key change or an origin move, and, for an origin
+//! move **without** a key, across one credential-chain read (the guard that
+//! refuses to send a chain credential to a new origin), so a chain source that
+//! hangs blocks that one provider's key operations and nothing else.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};

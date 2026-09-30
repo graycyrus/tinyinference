@@ -483,11 +483,17 @@ impl ScenarioRunner {
             if request.carried(&Secret::new(secret.clone()))
                 && !crate::policy::same_origin(&request.url, entered_for)
             {
+                // Which key, by its number: the value itself is never printed.
+                let number = self
+                    .keys
+                    .iter()
+                    .find(|(s, _)| s == secret)
+                    .map_or(0, |(_, id)| *id);
                 return Err(broken(
                     11,
                     format!(
-                        "a key entered for {entered_for} was sent to {} ({})",
-                        request.url, secret
+                        "key #{number}, entered for {entered_for}, was sent to {}",
+                        request.url
                     ),
                 ));
             }

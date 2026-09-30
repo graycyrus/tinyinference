@@ -11,6 +11,7 @@
 mod add;
 mod default;
 mod edit;
+mod edit_move;
 mod query;
 mod remove;
 

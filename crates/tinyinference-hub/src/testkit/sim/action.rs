@@ -287,9 +287,10 @@ impl ScenarioRunner {
         let scope = self.rng.below(self.scopes.len());
         let prov = self.rng.below(WORLD.len());
         let flag = |rng: &mut super::Rng, p: f64| rng.chance(p);
-        // The first hundred slots are the original mix (kept in this order so the
-        // draws of an older seed still mean what they did); the twelve after them
-        // are the origin-move and kept-model actions.
+        // The first hundred slots are the original mix; the twelve after them are
+        // the origin-move and kept-model actions added in run 4. The modulus
+        // changed with them, so a seed recorded under an earlier mix does not
+        // replay the same trace (the seed file says which mix its seeds are for).
         match self.rng.below(112) {
             0..=17 => Action::Connect {
                 scope,

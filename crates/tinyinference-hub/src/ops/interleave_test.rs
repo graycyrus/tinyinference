@@ -30,6 +30,8 @@ const OLD: &str = "https://llm.acme.test/v1";
 const NEW: &str = "https://llm.acme-two.test/v1";
 const K_OLD: &str = "sk-not-a-real-key-old";
 const K_NEW: &str = "sk-not-a-real-key-new";
+/// A credential the host supplies through another source of the chain.
+const K_HOST: &str = "sk-not-a-real-key-host";
 
 /// A model that answers and remembers nothing; what matters is what the
 /// factory was asked to build it with.
@@ -73,19 +75,33 @@ impl ModelFactory for Spy {
 }
 
 async fn acme_bed() -> (Bed, Arc<Spy>) {
+    acme_bed_with(true).await
+}
+
+/// `stored`: the provider has a stored key (`K_OLD`). Otherwise it has none and
+/// the only credential is the host's own source (`K_HOST`), which answers
+/// whatever the endpoint is.
+async fn acme_bed_with(stored: bool) -> (Bed, Arc<Spy>) {
     let spy = Arc::new(Spy::default());
-    let bed = Bed::with(|b| b.model_factory(spy.clone()));
-    bed.hub
-        .add(
-            &bed.scope,
-            ProviderDraft::new("custom")
-                .with_label("Acme")
-                .with_base_url(OLD)
-                .with_key(Secret::new(K_OLD))
-                .with_model(model("m")),
-        )
-        .await
-        .unwrap();
+    let bed = Bed::with(|b| {
+        let b = b.model_factory(spy.clone());
+        if stored {
+            b
+        } else {
+            b.credential_source(
+                "custom",
+                crate::credential::StaticSource::new(Secret::new(K_HOST)),
+            )
+        }
+    });
+    let mut draft = ProviderDraft::new("custom")
+        .with_label("Acme")
+        .with_base_url(OLD)
+        .with_model(model("m"));
+    if stored {
+        draft = draft.with_key(Secret::new(K_OLD));
+    }
+    bed.hub.add(&bed.scope, draft).await.unwrap();
     (bed, spy)
 }
 
@@ -104,7 +120,9 @@ async fn use_it(hub: &Hub, scope: &ScopeKey, kept: &Arc<dyn ChatModel<()>>) {
 fn assert_no_cross_origin_credential(spy: &Spy, at: &str) {
     for (endpoint, key) in spy.built.lock().unwrap().iter() {
         let allowed = match (endpoint.as_str(), key.as_deref()) {
-            (OLD, Some(K_OLD)) | (NEW, Some(K_NEW)) => true,
+            // A host credential belongs to the host's provider, not to an origin:
+            // it is only ever offered where the provider was when it was added.
+            (OLD, Some(K_OLD | K_HOST)) | (NEW, Some(K_NEW)) => true,
             // No key at all is fail-closed or keyless: never a leak.
             (_, None) => true,
             _ => false,
@@ -118,8 +136,8 @@ fn assert_no_cross_origin_credential(spy: &Spy, at: &str) {
 
 /// Runs `edit` (an origin move with a key entered for the new origin) holding
 /// it at `hold`, using the provider from another task while it is parked.
-async fn move_origin_holding(hold: Option<(bool, Hold)>, label: &str) -> bool {
-    let (bed, spy) = acme_bed().await;
+async fn move_origin_holding(hold: Option<(bool, Hold)>, label: &str, stored: bool) -> bool {
+    let (bed, spy) = acme_bed_with(stored).await;
     let turn = bed
         .hub
         .resolve_for_turn(&bed.scope, &TurnQuery::new())
@@ -201,13 +219,10 @@ async fn ops_race_an_origin_move_never_pairs_a_key_with_an_origin_it_was_not_ent
         ("cred set before", cred(Hold::before(Call::Set).slot(&slot))),
         ("cred set after", cred(Hold::after(Call::Set).slot(&slot))),
         (
-            "cred delete before",
-            cred(Hold::before(Call::Delete).slot(&slot)),
+            "config save before #2",
+            cfg(Hold::before(Call::Save).skip(1)),
         ),
-        (
-            "cred delete after",
-            cred(Hold::after(Call::Delete).slot(&slot)),
-        ),
+        ("config save after #2", cfg(Hold::after(Call::Save).skip(1))),
         ("cred get before", cred(Hold::before(Call::Get).slot(&slot))),
         ("cred get after", cred(Hold::after(Call::Get).slot(&slot))),
         (
@@ -220,16 +235,21 @@ async fn ops_race_an_origin_move_never_pairs_a_key_with_an_origin_it_was_not_ent
         ),
     ];
     let mut missed = Vec::new();
-    for (label, hold) in holds {
-        if !move_origin_holding(Some(hold), label).await {
-            missed.push(label);
+    // Twice: once with the key in the provider's own slot, once with the only
+    // credential coming from another source of the chain (the host's).
+    for stored in [true, false] {
+        for (label, hold) in holds.clone() {
+            if !move_origin_holding(Some(hold), label, stored).await {
+                missed.push(label);
+            }
         }
     }
     // The schedule must actually have happened: a hold the edit never reached
     // proves nothing about that point.
     assert!(missed.is_empty(), "holds never reached: {missed:?}");
     // And the untouched run is fine too.
-    assert!(!move_origin_holding(None, "no hold").await);
+    assert!(!move_origin_holding(None, "no hold", true).await);
+    assert!(!move_origin_holding(None, "no hold", false).await);
 }
 
 #[tokio::test]

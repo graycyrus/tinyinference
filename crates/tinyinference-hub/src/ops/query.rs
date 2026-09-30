@@ -227,9 +227,12 @@ impl Hub {
         let read = self
             .inner
             .cache
-            .read_as(key, refresh, credential.cache_identity(), || async {
-                driver.list_models(&cx, &target).await
-            })
+            .read_as(
+                key,
+                refresh,
+                credential.cache_identity(credentialed),
+                || async { driver.list_models(&cx, &target).await },
+            )
             .await;
         // A key change while the list was being read makes what was cached the
         // old credential's entitlement list: drop it rather than let it serve the

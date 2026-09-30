@@ -33,7 +33,14 @@ impl Credential {
     /// rotates its own token (the platform token, a browser login) has none: the
     /// account owns the list, and a fresh token every minute must not refetch it
     /// every minute.
-    pub(crate) fn cache_identity(&self) -> Option<crate::secret::SecretId> {
+    ///
+    /// `credentialed` is whether the request presents the credential at all: a
+    /// keyless read (an auth style of none, a local runtime) shares one slot
+    /// whatever key happens to be configured, so it has no identity either.
+    pub(crate) fn cache_identity(&self, credentialed: bool) -> Option<crate::secret::SecretId> {
+        if !credentialed {
+            return None;
+        }
         match self.origin {
             Some(
                 CredentialOrigin::InstanceIdentity

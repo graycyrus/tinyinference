@@ -211,7 +211,7 @@ impl Interleave {
         &self,
         call: Call,
         phase: Phase,
-        slot: &str,
+        slot: Option<&str>,
     ) -> Result<(), PortError> {
         let parked = {
             let mut armed = self
@@ -222,7 +222,12 @@ impl Interleave {
                 let h = &mut a.hold;
                 let matches = h.call == call
                     && h.phase == phase
-                    && h.slot.as_deref().is_none_or(|s| s == slot);
+                    && match (h.slot.as_deref(), slot) {
+                        (Some(wanted), Some(actual)) => wanted == actual,
+                        // No filter, or a call that has no slot (a config call):
+                        // the filter does not apply.
+                        _ => true,
+                    };
                 if matches && h.skip > 0 {
                     h.skip -= 1;
                     return false;

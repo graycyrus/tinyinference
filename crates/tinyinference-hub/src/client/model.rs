@@ -136,11 +136,16 @@ impl HubModel {
             }
         };
         // The record again, **after** the key was read: an endpoint move commits
-        // its record before it writes the new key, so a key read here that was
-        // entered for another endpoint implies the record has already moved, and
-        // this second look sees it. (Record, key, record: the pair is only used
-        // if the record did not move across the key read.)
-        self.check_route_is_current().await?;
+        // its record (disabled, at the new endpoint) before it writes the new key,
+        // so a key read here that was entered for another endpoint implies the
+        // record has already moved, and this second look sees it. (Record, key,
+        // record: the pair is only used if the record did not move across the key
+        // read.) Only a key the hub stores per provider is entered for an
+        // endpoint; a host's own source (environment, keychain, a rotating token)
+        // is not, and skips the extra read.
+        if matches!(&key, Some((_, CredentialOrigin::ProviderKey))) {
+            self.check_route_is_current().await?;
+        }
         let (key, origin) = match key {
             Some((secret, origin)) => {
                 let id = secret.id();

@@ -5,7 +5,8 @@
 //! key needs the key entered again), G14 (model ids), G21 (entry zero is
 //! read-only). A key rotation is never guarded (G5). The kind never changes.
 
-use crate::descriptor::RecordOrigin;
+use super::edit_move::MovePlan;
+use crate::descriptor::{ProviderRecord, RecordOrigin};
 use crate::error::{HubError, InputField, InvalidInput, NotFound, Operation};
 use crate::hub::{Hub, Mutation, MutationStatus, ProviderPatch};
 use crate::ids::{ScopeKey, Slug, check_provider_name};
@@ -116,27 +117,32 @@ impl Hub {
             }));
         }
 
-        // A key entered together with an origin move is for the NEW origin, so it
-        // must never be usable against the old one, nor the old key against the
-        // new one, at any moment a request can be built. The order that
-        // guarantees it: clear the old key, move the record, write the new key.
-        // Between those steps a keyed request fails closed (no key). The other
-        // order (new key first, or record first with the old key still there)
-        // has a window in which one origin is paired with the other's key
-        // (finding 5.4).
+        // A key entered together with an origin move is for the NEW origin, so
+        // no credential may ever meet an origin it was not entered for. That takes
+        // more than an order of two writes (the chain has other sources than the
+        // slot), so the move runs as its own sequence: `edit_move.rs`.
         let move_with_key = origin_changes && key.is_some();
         let previous = match &key {
             Some(_) => Some(self.read_slot(scope, slug).await?),
             None => None,
         };
+        if let (Some(key), Some(target), true) = (&key, base_url.as_deref(), move_with_key) {
+            let plan = MovePlan {
+                label: label.as_deref(),
+                model: model.as_ref(),
+                target,
+                validated_base: &record.base_url,
+                key,
+                was_enabled: record.enabled,
+                previous: previous.clone().flatten(),
+            };
+            let changed = self.move_origin_with_key(scope, slug, plan).await?;
+            return self
+                .finish_edit(scope, slug, &record, &base_url, true, changed)
+                .await;
+        }
         if let Some(key) = &key {
-            if move_with_key {
-                if previous.as_ref().is_some_and(Option::is_some) {
-                    self.delete_slot(scope, slug).await?;
-                }
-            } else {
-                self.write_slot(scope, slug, key.clone()).await?;
-            }
+            self.write_slot(scope, slug, key.clone()).await?;
         }
         let validated_base = record.base_url.clone();
         let committed = self
@@ -150,7 +156,7 @@ impl Hub {
                 if let Some(url) = &base_url {
                     // G3 again, against the record as it is now: an edit through
                     // another hub over this store may have moved the origin since
-                    // the check above, and this move was validated against the
+                    // the check above, and this edit was validated against the
                     // old one.
                     if !same_origin(&record.base_url, &validated_base) {
                         return Err(HubError::Conflict);
@@ -170,7 +176,7 @@ impl Hub {
                 // restoring the old one would resurrect it, and the new one just
                 // written belongs to nothing. Anything else puts the old key back.
                 if matches!(error, HubError::NotFound(_)) {
-                    if key.is_some() && !move_with_key {
+                    if key.is_some() {
                         self.delete_slot(scope, slug).await.ok();
                     }
                 } else if let Some(previous) = previous {
@@ -183,51 +189,33 @@ impl Hub {
                 return Err(error);
             }
         };
-        if move_with_key && let Some(key) = &key {
-            // The record is at the new origin with no key: now the key that was
-            // entered for it. If it cannot be written, put the record back first
-            // and the old key second, so the old key is never usable at the new
-            // origin nor the reverse.
-            if let Err(error) = self.write_slot(scope, slug, key.clone()).await {
-                let back = self
-                    .transact(scope, |config| {
-                        if let Some(record) = config.provider_mut(slug)
-                            && base_url.as_deref() == Some(record.base_url.as_str())
-                        {
-                            record.base_url.clone_from(&validated_base);
-                        }
-                        Ok(())
-                    })
-                    .await;
-                match back {
-                    Ok(_) => {
-                        if let Some(previous) = previous
-                            && let Err(restore) = self.restore_slot(scope, slug, previous).await
-                        {
-                            tracing::warn!(%slug, ?restore, "could not restore the previous key");
-                        }
-                    }
-                    // The record stays at the new origin with no key: fail
-                    // closed, and the old key stays cleared.
-                    Err(undo) => {
-                        tracing::warn!(%slug, ?undo, "could not move the endpoint back after a failed key write");
-                    }
-                }
-                return Err(error);
-            }
-        }
+        let changed = committed.changed;
+        self.finish_edit(scope, slug, &record, &base_url, key.is_some(), changed)
+            .await
+    }
 
-        if key.is_some() {
+    /// What every successful edit does last: hooks for a new key or endpoint, the
+    /// event, and the view.
+    async fn finish_edit(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        record: &ProviderRecord,
+        base_url: &Option<String>,
+        key_set: bool,
+        committed_changed: bool,
+    ) -> Result<Mutation, HubError> {
+        if key_set {
             self.after_key_change(scope, slug, true).await;
         }
-        if let Some(new) = &base_url
+        if let Some(new) = base_url
             && *new != record.base_url
         {
             // A different endpoint says nothing about what the old one said.
             self.inner.cache.evict_scope(scope);
             self.forget_health(scope, slug).await;
         }
-        let changed = committed.changed || key.is_some();
+        let changed = committed_changed || key_set;
         if changed {
             self.inner.events.emit(HubEvent::ProviderEdited {
                 scope: scope.clone(),

@@ -285,16 +285,27 @@ impl Hub {
         confirm: Confirm,
     ) -> Result<Mutation, HubError> {
         let config = self.read_config(scope).await?;
-        let record = config
-            .provider(slug)
-            .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
-            .clone();
+        if config.provider(slug).is_none() {
+            return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
+        }
         let host = self.host_used_by(scope, slug).await?;
         let used = Self::merge_used_by(&config, slug, &host);
         if !used.is_empty() && !confirm.in_use {
             return Err(HubError::InUse(used));
         }
         let _guard = self.slot_lock(scope, slug).await;
+        // Everything read before the lock may have changed while this waited for
+        // it (a removal and a new add of the slug, a reference that appeared):
+        // decide again on the provider as it is now.
+        let config = self.read_config(scope).await?;
+        let record = config
+            .provider(slug)
+            .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
+            .clone();
+        let used = Self::merge_used_by(&config, slug, &host);
+        if !used.is_empty() && !confirm.in_use {
+            return Err(HubError::InUse(used));
+        }
         let had_key = self.read_slot(scope, slug).await?.is_some();
         if had_key {
             self.delete_slot(scope, slug).await?;
