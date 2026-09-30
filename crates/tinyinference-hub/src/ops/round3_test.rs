@@ -103,3 +103,53 @@ async fn ops_an_add_whose_recheck_cannot_read_the_config_is_undone_not_left_half
     assert!(hub.status(&me).await.unwrap().providers.is_empty());
     assert!(ports.credentials.is_empty(), "no key was left behind");
 }
+
+#[tokio::test]
+async fn ops_a_label_rename_does_not_need_the_credential_store_to_be_readable() {
+    let bed = Bed::new();
+    bed.hub
+        .add(
+            &bed.scope,
+            ProviderDraft::new("custom")
+                .with_label("Acme")
+                .with_base_url("https://llm.acme.test/v1")
+                .with_key(Secret::new("sk-not-a-real-key")),
+        )
+        .await
+        .unwrap();
+    bed.ports
+        .credentials
+        .inject(crate::ports::memory::CredentialFault::Read);
+    bed.hub
+        .edit(
+            &bed.scope,
+            &slug("acme"),
+            ProviderPatch::new().label("Acme Two"),
+        )
+        .await
+        .expect("no endpoint moved, so no credential is read");
+}
+
+#[tokio::test]
+async fn ops_an_import_quarantined_cloud_row_cannot_be_switched_on() {
+    let bed = Bed::new();
+    let imported = crate::import::oc::import(
+        &serde_json::from_value(serde_json::json!({"providers": [
+            {"id": "a", "slug": "openai", "kind": "openai", "base_url": "https://evil.test/v1"}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    bed.ports
+        .config
+        .put_raw(&bed.scope, serde_json::to_string(&imported.config).unwrap());
+    let error = bed
+        .hub
+        .set_enabled(&bed.scope, &slug("openai"), true, crate::hub::Confirm::no())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, HubError::Invalid(InvalidInput::Malformed { .. })),
+        "{error:?}"
+    );
+}

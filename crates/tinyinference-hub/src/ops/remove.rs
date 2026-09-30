@@ -146,6 +146,19 @@ impl Hub {
                 kind: record.kind.clone(),
             });
         }
+        if on
+            && let Some(descriptor) = crate::catalogue::descriptor(record.kind.as_str())
+            && !descriptor.endpoint_editable
+            && let Some(preset) = descriptor.default_endpoint
+            && !crate::policy::same_origin(&record.base_url, preset)
+        {
+            // An import that found a cloud row on another origin left it
+            // disabled: switching it on would send its key there.
+            return Err(HubError::Invalid(InvalidInput::Malformed {
+                field: InputField::Endpoint,
+                reason: "this cloud provider's stored endpoint is not its preset's; remove it and add it again",
+            }));
+        }
         let host = if on {
             UsedBy::default()
         } else {

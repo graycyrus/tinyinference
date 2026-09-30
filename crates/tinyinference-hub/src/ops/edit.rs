@@ -28,7 +28,9 @@ impl Hub {
     /// [`HubError::NotFound`]; [`HubError::Unsupported`] for the read-only
     /// entry-zero record or a label/endpoint change on the managed provider;
     /// [`HubError::Invalid`] and [`HubError::Policy`] for a patch that fails
-    /// validation; and the stores' errors.
+    /// validation; [`HubError::Conflict`] when the endpoint's origin was moved
+    /// by another writer while a key-less origin change was being applied; and
+    /// the stores' errors.
     pub async fn edit(
         &self,
         scope: &ScopeKey,
@@ -86,14 +88,20 @@ impl Hub {
         let origin_changes = base_url
             .as_deref()
             .is_some_and(|new| !same_origin(&record.base_url, new));
-        if origin_changes && key.is_none() && self.credential(scope, &record).await?.key.is_some() {
+        // Only an origin move without a new key reads the chain: a label rename or
+        // a key rotation must not fail because a source is unreadable.
+        let has_chain_key = if origin_changes && key.is_none() {
+            self.credential(scope, &record).await?.key.is_some()
+        } else {
+            false
+        };
+        if has_chain_key {
             return Err(HubError::Invalid(InvalidInput::Malformed {
                 field: InputField::Endpoint,
                 reason: "changing the endpoint to another origin needs the key entered again",
             }));
         }
 
-        let origin_changes_guarded = self.credential(scope, &record).await?.key.is_some();
         let previous = match &key {
             Some(_) => Some(self.read_slot(scope, slug).await?),
             None => None,
@@ -112,10 +120,7 @@ impl Hub {
                 if let Some(url) = &base_url {
                     // G3 again, against the record as it is now: a concurrent
                     // edit may have moved the origin since the check above.
-                    if key.is_none()
-                        && !same_origin(&record.base_url, url)
-                        && origin_changes_guarded
-                    {
+                    if key.is_none() && !same_origin(&record.base_url, url) && has_chain_key {
                         return Err(HubError::Conflict);
                     }
                     record.base_url.clone_from(url);

@@ -433,7 +433,13 @@ impl Hub {
         // Put the key slot back while this add's record still owns the slug: no
         // other add of that slug can be writing it, so this cannot clobber a
         // winner's key. A record already gone means the slot is not ours.
-        let (existed, pre_read_failed) = match self.read_config(scope).await {
+        // One retry: a transient failure here would otherwise leave the key slot
+        // to be restored only after the record is gone.
+        let first = match self.read_config(scope).await {
+            Ok(config) => Ok(config),
+            Err(_) => self.read_config(scope).await,
+        };
+        let (existed, pre_read_failed) = match first {
             Ok(config) => (config.providers.iter().any(|p| p.id == id), false),
             Err(_) => (false, true),
         };
