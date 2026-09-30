@@ -1236,7 +1236,7 @@ async fn ops_a_rejected_connect_never_undoes_an_edit_another_writer_made_meanwhi
         let (connected, edited, ()) = tokio::join!(connect, edit, mover);
         drop(held);
         let _ = connected;
-        let edited = edited.unwrap_or_else(|| Err(HubError::Conflict));
+        let edited = edited.unwrap_or(Err(HubError::Conflict));
         if edited.is_ok() {
             // The edit went through: what it made is still there, with its key.
             assert_eq!(
