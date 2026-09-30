@@ -708,6 +708,20 @@ async fn sim_origin_moves_kept_models_and_races_by_hand() {
     for action in script {
         r.step(action).await.unwrap_or_else(|f| panic!("{f}"));
     }
+    // A kept model whose provider answers with a rejection, or not at all.
+    for mode in [Mode::AuthFail, Mode::Refused, Mode::Healthy] {
+        r.step(Action::Flip { prov: 3, mode })
+            .await
+            .unwrap_or_else(|f| panic!("{f}"));
+        r.step(Action::Keep { scope: 0 })
+            .await
+            .unwrap_or_else(|f| panic!("{f}"));
+        let sent = r
+            .step(Action::UseKept { scope: 0 })
+            .await
+            .unwrap_or_else(|f| panic!("{f}"));
+        assert_eq!(sent.ok, mode == Mode::Healthy, "{mode:?}: {sent:?}");
+    }
     // Every parking point of the race, both directions of the move.
     for at in 0..16u8 {
         for rotate in [true, false] {

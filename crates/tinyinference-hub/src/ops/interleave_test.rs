@@ -632,3 +632,74 @@ async fn ops_an_origin_move_that_loses_both_the_key_write_and_the_slot_cleanup_n
     }
     assert_no_cross_origin_credential(&spy, "double failure");
 }
+
+async fn enabled_of(bed: &Bed) -> bool {
+    bed.hub
+        .status(&bed.scope)
+        .await
+        .unwrap()
+        .providers
+        .iter()
+        .find(|p| p.view.record.slug == slug("acme"))
+        .unwrap()
+        .view
+        .record
+        .enabled
+}
+
+#[tokio::test]
+async fn ops_an_origin_move_that_cannot_switch_the_provider_back_on_leaves_it_disabled_with_its_new_key()
+ {
+    let (bed, _spy) = acme_bed().await;
+    // Saves: the move (#0), then switching back on (#1).
+    let _fault = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Save).skip(1).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    assert_eq!(state_of(&bed).await, (NEW.to_string(), Some(K_NEW.into())));
+    assert!(!enabled_of(&bed).await, "unusable rather than half usable");
+}
+
+#[tokio::test]
+async fn ops_an_origin_move_whose_record_cannot_be_saved_and_whose_old_key_cannot_come_back_ends_with_no_key()
+ {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _save = bed.ports.config.hold(Hold::before(Call::Save).fail());
+    let _restore = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    // The old origin, enabled, with no key: fail closed, never the wrong pair.
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), None));
+    assert!(enabled_of(&bed).await);
+}
+
+#[tokio::test]
+async fn ops_an_undone_origin_move_whose_old_key_cannot_come_back_ends_with_no_key() {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    // The new key's write fails (Set #0) and so does putting the old one back (#1).
+    let _write = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    let _restore = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).skip(0).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), None));
+    assert!(enabled_of(&bed).await);
+}
