@@ -664,7 +664,7 @@ proptest! {
             prop_assert!(desktop.is_ok(), "{url}");
         }
         // Link-local is refused everywhere, however the policy is tuned.
-        if a == 169 && b == 254 {
+        if use_ip && a == 169 && b == 254 {
             for policy in [EndpointPolicy::hosted(), EndpointPolicy::desktop().with_private(true)] {
                 prop_assert_eq!(check_endpoint(&url, &policy), Err(EndpointRefusal::LinkLocal));
             }
