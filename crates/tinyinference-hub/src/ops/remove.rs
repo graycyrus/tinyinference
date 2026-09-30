@@ -127,8 +127,19 @@ impl Hub {
                     .await
                     .ok()
                     .map(|c| c.provider(slug).is_some_and(|p| p.id == record.id));
+                // What the transaction itself refused did not commit: a record
+                // that is gone then was removed by somebody else.
+                let refused = matches!(
+                    error,
+                    HubError::Conflict | HubError::InUse(_) | HubError::Invalid(_)
+                );
                 match (still_there, previous) {
-                    // It did commit: this removal happened. Carry on as one.
+                    (Some(false), _) if refused => {
+                        return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
+                    }
+                    // A store error is ambiguous: the record is gone, so the
+                    // removal is taken to be this call's (at worst another writer's
+                    // removal is announced twice). Carry on as one.
                     (Some(false), _) => Self::merge_used_by(&now, slug, &host),
                     // Still there: the key goes back beside it.
                     (Some(true), Some(previous)) => {

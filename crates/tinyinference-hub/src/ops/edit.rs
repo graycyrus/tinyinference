@@ -43,10 +43,11 @@ impl Hub {
     /// if only switching the provider back on failed, the edit **succeeds with a
     /// warning** ([`MutationStatus::SavedWithWarning`]; call [`Hub::set_enabled`]);
     /// if the move could not be undone, the caller gets the failure and the
-    /// provider is left disabled at the new endpoint with no key (enter one with
-    /// [`Hub::set_key`] before testing, listing or enabling it: a credential a
-    /// host source supplies would otherwise answer there). Both are logged and
-    /// announced (`ProviderEdited`, `KeyChanged`). Like every operation that
+    /// provider is left disabled at the new endpoint holding at most the key
+    /// entered for it (if it has none, enter one with [`Hub::set_key`] before
+    /// testing, listing or enabling it: a credential a host source supplies would
+    /// otherwise answer there). Both are logged and announced (`ProviderEdited`,
+    /// `KeyChanged`). Like every operation that
     /// changes two stores this is **not cancellation-safe**: run it to completion
     /// (do not put it under a timeout or a `select!` that can drop it).
     pub async fn edit(
@@ -167,7 +168,7 @@ impl Hub {
             };
             let outcome = self.move_origin_with_key(scope, slug, plan).await?;
             drop(slot_guard);
-            let mut mutation = self
+            let finished = self
                 .finish_edit(
                     scope,
                     slug,
@@ -176,17 +177,31 @@ impl Hub {
                     true,
                     outcome.changed,
                 )
-                .await?;
-            if outcome.left_disabled {
-                mutation.status = MutationStatus::SavedWithWarning;
-                mutation.note = format!(
-                    "{} was moved and its key saved, but it could not be switched back on; enable it once the store recovers.",
-                    mutation
-                        .record
-                        .as_ref()
-                        .map_or("The provider", |v| v.record.label.as_str())
-                );
+                .await;
+            if !outcome.left_disabled {
+                return finished;
             }
+            // The edit went through and only the flag could not be restored: it
+            // is a warning on a successful edit, and stays one if reading the
+            // result back fails too (the same outage that stopped the flag).
+            let label = match &finished {
+                Ok(m) => m
+                    .record
+                    .as_ref()
+                    .map_or(record.label.clone(), |v| v.record.label.clone()),
+                Err(_) => record.label.clone(),
+            };
+            let mut mutation = finished.unwrap_or(Mutation {
+                status: MutationStatus::SavedWithWarning,
+                note: String::new(),
+                probe: None,
+                used_by: None,
+                record: None,
+            });
+            mutation.status = MutationStatus::SavedWithWarning;
+            mutation.note = format!(
+                "{label} was moved and its key saved, but it could not be switched back on; enable it once the store recovers."
+            );
             return Ok(mutation);
         }
         if let Some(key) = &key

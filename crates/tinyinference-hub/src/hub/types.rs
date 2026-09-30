@@ -154,7 +154,10 @@ impl fmt::Debug for ProviderPatch {
 pub enum MutationStatus {
     /// Saved, and the check (if any) passed.
     Saved,
-    /// Saved, but the check failed or could not run; see the note.
+    /// Saved, but something needs attention; see the note. A probe that failed or
+    /// could not run ([`Mutation::probe`]), or, for an `edit` that moved the
+    /// endpoint, a provider that could not be switched back on (call
+    /// `Hub::set_enabled`).
     SavedWithWarning,
     /// The request changed nothing.
     Unchanged,

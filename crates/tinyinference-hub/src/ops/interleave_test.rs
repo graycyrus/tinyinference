@@ -881,16 +881,18 @@ async fn ops_a_move_that_cannot_switch_the_provider_on_still_announces_the_chang
         .await
         .unwrap();
     let events = bed.ports.events.events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, crate::ports::HubEvent::ProviderEdited { .. })),
+    // Once each: the change is announced by the finished edit, not also by the
+    // step that failed.
+    let count =
+        |wanted: fn(&crate::ports::HubEvent) -> bool| events.iter().filter(|e| wanted(e)).count();
+    assert_eq!(
+        count(|e| matches!(e, crate::ports::HubEvent::ProviderEdited { .. })),
+        1,
         "{events:?}"
     );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { .. })),
+    assert_eq!(
+        count(|e| matches!(e, crate::ports::HubEvent::KeyChanged { .. })),
+        1,
         "{events:?}"
     );
 }
@@ -1391,13 +1393,14 @@ async fn ops_a_removal_the_store_committed_and_then_reported_failed_does_not_bri
     // Round 7: the key was restored beside a record that was in fact gone, for the
     // next provider of that slug to find.
     let (bed, _spy) = acme_bed().await;
-    let _fault = bed.ports.config.hold(Hold::after(Call::Save).fail());
+    let mut fault = bed.ports.config.hold(Hold::after(Call::Save).fail());
     // The removal did commit, so it is reported as done (and announced), not as a
     // failure the caller would retry.
     let removed = bed
         .hub
         .remove(&bed.scope, &slug("acme"), Confirm::in_use())
         .await;
+    assert!(futures::poll!(std::pin::pin!(fault.reached())).is_ready());
     assert!(removed.is_ok(), "{removed:?}");
     assert!(
         bed.ports
@@ -1458,7 +1461,7 @@ async fn ops_an_undo_whose_move_back_commits_and_then_reports_failure_still_gets
         .credentials
         .hold(Hold::before(Call::Set).slot(&slot).fail());
     // Saves: the move (#0), then the undo's move back (#1): it lands, then errors.
-    let _back = bed
+    let mut back = bed
         .ports
         .config
         .hold(Hold::after(Call::Save).skip(1).fail());
@@ -1466,6 +1469,7 @@ async fn ops_an_undo_whose_move_back_commits_and_then_reports_failure_still_gets
         .edit(&bed.scope, &slug("acme"), move_patch())
         .await
         .unwrap_err();
+    assert!(futures::poll!(std::pin::pin!(back.reached())).is_ready());
     assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_OLD.into())));
     assert!(enabled_of(&bed).await);
 }
@@ -1475,7 +1479,7 @@ async fn ops_an_undo_whose_record_removal_commits_and_then_reports_failure_is_an
     let bed = Bed::new();
     bed.openai_rejects_key();
     // Saves: the add's record (#0), then the undo's removal (#1): it lands, then errors.
-    let _fault = bed
+    let mut fault = bed
         .ports
         .config
         .hold(Hold::after(Call::Save).skip(1).fail());
@@ -1483,6 +1487,8 @@ async fn ops_an_undo_whose_record_removal_commits_and_then_reports_failure_is_an
         .connect(&bed.scope, bed.openai_draft(), ConnectOptions::default())
         .await
         .unwrap_err();
+    // The fault fired: the test is about that failure, not about a clean undo.
+    assert!(futures::poll!(std::pin::pin!(fault.reached())).is_ready());
     assert!(
         bed.ports
             .events
@@ -1520,4 +1526,104 @@ async fn ops_an_add_whose_provider_another_writer_only_re_pathed_still_gets_its_
     let (added, ()) = tokio::join!(add, mover);
     added.unwrap();
     assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_OLD));
+}
+
+#[tokio::test]
+async fn ops_a_switch_back_on_the_store_committed_and_then_reported_failed_is_not_a_warning() {
+    let (bed, _spy) = acme_bed().await;
+    // Saves: the move (#0), then switching back on (#1): it lands, then errors.
+    let mut fault = bed
+        .ports
+        .config
+        .hold(Hold::after(Call::Save).skip(1).fail());
+    let mutation = bed
+        .hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap();
+    assert!(futures::poll!(std::pin::pin!(fault.reached())).is_ready());
+    assert_eq!(mutation.status, crate::hub::MutationStatus::Saved);
+    assert!(enabled_of(&bed).await);
+}
+
+#[tokio::test]
+async fn ops_a_warning_on_a_moved_provider_survives_the_read_back_failing_too() {
+    let (bed, _spy) = acme_bed().await;
+    // The switch back on fails (Save #1), and so do the reads that follow it.
+    let mut off = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Save).skip(1).fail());
+    // Loads: first read #0, lock re-read #1, the move's #2, the switch back on's
+    // #3; then the switch-back check's read-back (#4) and finish_edit's (#5).
+    let _blind1 = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Load).skip(4).fail());
+    let _blind2 = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Load).skip(4).fail());
+    let mutation = bed
+        .hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap();
+    assert!(futures::poll!(std::pin::pin!(off.reached())).is_ready());
+    assert_eq!(
+        mutation.status,
+        crate::hub::MutationStatus::SavedWithWarning
+    );
+    assert!(mutation.note.contains("could not be switched back on"));
+    assert!(
+        mutation.record.is_none(),
+        "the read-back failed, so no view"
+    );
+}
+
+#[tokio::test]
+async fn ops_a_removal_whose_record_another_writer_removed_meanwhile_reports_not_found_at_every_point()
+ {
+    // Whichever config read the removal is parked at, a record another writer
+    // removes there is reported as not found: never as a removal this call made,
+    // and never with its key put back.
+    for n in 0..8usize {
+        let (bed, _spy) = acme_bed().await;
+        let acme = slug("acme");
+        let mut held = bed.ports.config.hold(Hold::before(Call::Load).skip(n));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let removal = async {
+            let result = bed.hub.remove(&bed.scope, &acme, Confirm::in_use()).await;
+            let _ = done_tx.send(());
+            result
+        };
+        let other = async {
+            tokio::select! {
+                () = held.reached() => {
+                    let mut doc: serde_json::Value =
+                        serde_json::from_str(&bed.ports.config.raw(&bed.scope).unwrap()).unwrap();
+                    doc["providers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|row| row["slug"] != "acme");
+                    bed.ports.config.put_raw(&bed.scope, doc.to_string());
+                    held.release();
+                }
+                _ = done_rx => {}
+            }
+        };
+        let (removed, ()) = tokio::join!(removal, other);
+        drop(held);
+        let removed_by_us = removed.is_ok();
+        assert!(
+            !removed_by_us || bed.key_of("acme").await.is_none(),
+            "park point {n}: {removed:?}"
+        );
+        if let Err(error) = &removed {
+            assert!(
+                matches!(error, HubError::NotFound(_)),
+                "park point {n}: {error:?}"
+            );
+        }
+    }
 }

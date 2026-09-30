@@ -34,11 +34,12 @@
 //! what the slot holds). If only the final "switch back on" failed the edit
 //! **succeeds with a warning** (`MutationStatus::SavedWithWarning`): the endpoint
 //! moved and the key is in place, and `Hub::set_enabled` finishes it. If the undo
-//! failed the caller gets the failure and the provider has no key: enter one
-//! (`set_key`) **before** testing, listing or switching it on, because a host
-//! credential in the chain would otherwise answer at the new endpoint (a
-//! disabled record is not probed-protected: `test` and `list_models` do not
-//! check the flag). The old key is lost only when the stores fail twice in a row.
+//! failed the caller gets the failure and the provider is left disabled at the
+//! new endpoint holding at most the key entered for it (no key of the old
+//! endpoint): enter a key (`set_key`) **before** testing, listing or switching it
+//! on if it has none, because a host credential in the chain would otherwise
+//! answer at the new endpoint (a disabled record is not protected: `test` and
+//! `list_models` do not check the flag). The old key is lost only when the stores fail twice in a row.
 //!
 //! Not cancellation-safe: the move is several awaits over two stores. A future
 //! dropped between them (a request timeout, a `select!`) leaves the state a
@@ -192,16 +193,19 @@ impl Hub {
                 })
                 .await
         {
+            // A store that committed the flag and then reported a failure is
+            // looked at, not assumed away.
+            if self.record_is_enabled_at(scope, slug, plan.target).await == Some(true) {
+                return Ok(MoveOutcome {
+                    changed,
+                    left_disabled: false,
+                });
+            }
             // The move and the key are in place; only switching it back on
-            // failed. Unusable rather than half-usable: say so, and do what a
-            // finished edit does (the endpoint and the key did change, so what
-            // was learned about the old ones, cached for them or announced about
-            // them is stale). Switching it on is then `set_enabled`.
+            // failed. Unusable rather than half-usable: warn, on a successful
+            // edit (the caller's `finish_edit` announces the change, once).
+            // Switching it on is then `set_enabled`.
             tracing::warn!(%slug, reason = %error.reason(), "the provider was moved and its key saved but it could not be switched back on");
-            self.announce_move(scope, slug).await;
-            // The edit itself succeeded: the endpoint moved and the key is in
-            // place. Only the flag could not be restored, which is a warning
-            // on a successful edit rather than an error a caller would retry.
             return Ok(MoveOutcome {
                 changed,
                 left_disabled: true,
@@ -225,6 +229,22 @@ impl Hub {
                 scope: scope.clone(),
                 slug: slug.clone(),
             });
+    }
+
+    /// Whether the record is at `target` **and enabled** now: `None` when the
+    /// store cannot say.
+    async fn record_is_enabled_at(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        target: &str,
+    ) -> Option<bool> {
+        let config = self.read_config(scope).await.ok()?;
+        Some(
+            config
+                .provider(slug)
+                .is_some_and(|r| r.base_url == target && r.enabled),
+        )
     }
 
     /// Whether the record is at `target` now: `None` when the store cannot say.
