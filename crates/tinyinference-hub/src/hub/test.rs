@@ -464,3 +464,37 @@ fn hub_a_credential_has_a_cache_identity_only_when_presented_and_not_rotating() 
     };
     assert_eq!(none.cache_identity(true), None);
 }
+
+#[tokio::test]
+async fn hub_a_key_announcement_that_cannot_read_the_slot_makes_no_claim_about_it() {
+    // A store that just failed part-way is often still down: the event must not
+    // say the key is gone (or present) on the strength of a failed read.
+    let bed = Bed::new();
+    bed.hub.add(&bed.scope, bed.openai_draft()).await.unwrap();
+    bed.ports.events.drain();
+    bed.ports
+        .credentials
+        .inject(crate::ports::memory::CredentialFault::Read);
+    bed.hub
+        .announce_key_state(&bed.scope, &crate::hub::fixtures::slug("openai"))
+        .await;
+    assert!(
+        !bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { .. })),
+        "no KeyChanged on an unreadable slot"
+    );
+    bed.ports.credentials.heal();
+    bed.hub
+        .announce_key_state(&bed.scope, &crate::hub::fixtures::slug("openai"))
+        .await;
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { present: true, .. }))
+    );
+}

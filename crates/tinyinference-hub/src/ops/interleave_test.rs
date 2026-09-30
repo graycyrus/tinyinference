@@ -1247,3 +1247,134 @@ async fn ops_a_rejected_connect_never_undoes_an_edit_another_writer_made_meanwhi
         }
     }
 }
+
+#[tokio::test]
+async fn ops_an_undo_whose_record_removal_failed_does_not_announce_a_removal() {
+    // Round 6: `ProviderRemoved` was emitted whatever the removal did.
+    let bed = Bed::new();
+    bed.openai_rejects_key();
+    // Saves: the add's record (#0), then the undo's removal (#1).
+    let _fault = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Save).skip(1).fail());
+    bed.hub
+        .connect(&bed.scope, bed.openai_draft(), ConnectOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        !bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::ProviderRemoved { .. })),
+        "the record is still there"
+    );
+    assert!(
+        bed.hub
+            .status(&bed.scope)
+            .await
+            .unwrap()
+            .providers
+            .iter()
+            .any(|p| p.view.record.slug == slug("openai"))
+    );
+}
+
+#[tokio::test]
+async fn ops_a_key_write_that_commits_and_then_reports_failure_is_put_back() {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _fault = bed
+        .ports
+        .credentials
+        .hold(Hold::after(Call::Set).slot(&slot).fail());
+    bed.hub
+        .set_key(&bed.scope, &slug("acme"), Secret::new(K_NEW))
+        .await
+        .unwrap_err();
+    assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_OLD));
+    // And when the confirmation read after a good write fails, the key is stored
+    // and announced.
+    bed.ports.events.drain();
+    // Loads: the first read (#0), the re-read under the lock (#1), the read after
+    // the write (#2).
+    let _blind = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Load).skip(2).fail());
+    bed.hub
+        .set_key(&bed.scope, &slug("acme"), Secret::new(K_NEW))
+        .await
+        .unwrap_err();
+    assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_NEW));
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { present: true, .. }))
+    );
+}
+
+#[tokio::test]
+async fn ops_a_key_that_cannot_be_put_back_is_announced_as_what_the_slot_holds() {
+    // remove: the key is deleted, the record's removal fails, and putting the key
+    // back fails too. The record stays with no key, and the event says so.
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _save = bed.ports.config.hold(Hold::before(Call::Save).fail());
+    let _restore = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    bed.ports.events.drain();
+    bed.hub
+        .remove(&bed.scope, &slug("acme"), Confirm::in_use())
+        .await
+        .unwrap_err();
+    assert_eq!(bed.key_of("acme").await, None);
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { present: false, .. })),
+        "{:?}",
+        bed.ports.events.events()
+    );
+}
+
+#[tokio::test]
+async fn ops_a_move_refused_because_another_hub_moved_the_record_does_not_restore_the_key_beside_it()
+ {
+    // Round 6: the old key was put back beside a record another hub had moved to
+    // a third origin. Only a record verifiably at the endpoint the key was
+    // entered for gets it back.
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    // Loads: the first read (#0), the re-read under the lock (#1), the
+    // transaction's (#2).
+    let mut held = bed.ports.config.hold(Hold::before(Call::Load).skip(2));
+    let edit = bed.hub.edit(&bed.scope, &acme, move_patch());
+    let other_hub = async {
+        held.reached().await;
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&bed.ports.config.raw(&bed.scope).unwrap()).unwrap();
+        for row in doc["providers"].as_array_mut().unwrap() {
+            if row["slug"] == "acme" {
+                row["base_url"] = "https://llm.third.test/v1".into();
+            }
+        }
+        bed.ports.config.put_raw(&bed.scope, doc.to_string());
+        held.release();
+    };
+    let (edited, ()) = tokio::join!(edit, other_hub);
+    assert!(matches!(edited, Err(HubError::Conflict)), "{edited:?}");
+    let (base, key) = state_of(&bed).await;
+    assert_eq!(base, "https://llm.third.test/v1");
+    assert_eq!(
+        key, None,
+        "the old key is not put back beside a third origin"
+    );
+}

@@ -95,10 +95,8 @@ impl Hub {
         {
             // A store can delete and then report a failure: the key goes back,
             // so "nothing happened" is true.
-            if let Err(restore) = self.restore_slot(scope, slug, previous.clone()).await {
-                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
-                self.announce_key_state(scope, slug).await;
-            }
+            self.restore_or_announce(scope, slug, previous.clone())
+                .await;
             return Err(error);
         }
         let committed = self
@@ -121,9 +119,8 @@ impl Hub {
                 // it: putting the key back would leave a slot no record owns.
                 if !matches!(error, HubError::NotFound(_))
                     && let Some(previous) = previous
-                    && let Err(restore) = self.restore_slot(scope, slug, Some(previous)).await
                 {
-                    tracing::warn!(%slug, ?restore, "could not restore the previous key");
+                    self.restore_or_announce(scope, slug, Some(previous)).await;
                 }
                 return Err(error);
             }
@@ -287,10 +284,23 @@ impl Hub {
             Some(current) if current.id != record.id => return Err(HubError::Conflict),
             Some(_) => {}
         }
-        self.write_slot(scope, slug, key).await?;
+        let previous = self.read_slot(scope, slug).await?;
+        if let Err(error) = self.write_slot(scope, slug, key).await {
+            // A store can take the write and then report a failure: what the
+            // caller is told did not happen must not have happened.
+            self.restore_or_announce(scope, slug, previous).await;
+            return Err(error);
+        }
         // Kept for a store shared with another hub, whose removal the lock does
         // not order: the key just written would be owned by nothing.
-        let after = self.read_config(scope).await?;
+        let after = match self.read_config(scope).await {
+            Ok(after) => after,
+            Err(error) => {
+                // The key is stored; only the confirmation could not be read.
+                self.announce_key_state(scope, slug).await;
+                return Err(error);
+            }
+        };
         if after.provider(slug).is_none() {
             self.delete_orphan_slot(scope, slug).await;
             return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
@@ -345,10 +355,7 @@ impl Hub {
         let had_key = previous.is_some();
         if had_key {
             if let Err(error) = self.delete_slot(scope, slug).await {
-                if let Err(restore) = self.restore_slot(scope, slug, previous).await {
-                    tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
-                    self.announce_key_state(scope, slug).await;
-                }
+                self.restore_or_announce(scope, slug, previous).await;
                 return Err(error);
             }
             self.after_key_change(scope, slug, false).await;

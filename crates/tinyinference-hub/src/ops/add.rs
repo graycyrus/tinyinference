@@ -364,7 +364,9 @@ impl Hub {
                 });
             }
             drop(guard);
-            self.after_key_change(scope, &plan.slug, true).await;
+            // What is in the slot now (an operation on this provider may have
+            // run since the lock was released), not what this add wrote.
+            self.announce_key_state(scope, &plan.slug).await;
         }
         self.inner.events.emit(HubEvent::ProviderAdded {
             scope: scope.clone(),
@@ -564,7 +566,7 @@ impl Hub {
         }
         self.forget_health(scope, &slug).await;
         self.inner.cache.evict_scope(scope);
-        if existed {
+        if existed && removed.is_ok() {
             self.inner.events.emit(HubEvent::ProviderRemoved {
                 scope: scope.clone(),
                 slug,

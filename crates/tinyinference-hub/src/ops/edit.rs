@@ -171,11 +171,8 @@ impl Hub {
         {
             // A store can commit the write and then report a failure: what the
             // caller is told did not happen must not have happened.
-            if let Some(previous) = previous
-                && let Err(restore) = self.restore_slot(scope, slug, previous).await
-            {
-                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
-                self.announce_key_state(scope, slug).await;
+            if let Some(previous) = previous {
+                self.restore_or_announce(scope, slug, previous).await;
             }
             return Err(error);
         }
@@ -223,9 +220,7 @@ impl Hub {
                 } else if let Some(previous) = previous {
                     // The operation's own error is the reason; a failed restore
                     // must not replace it.
-                    if let Err(restore) = self.restore_slot(scope, slug, previous).await {
-                        tracing::warn!(%slug, ?restore, "could not restore the previous key");
-                    }
+                    self.restore_or_announce(scope, slug, previous).await;
                 }
                 return Err(error);
             }
@@ -255,7 +250,10 @@ impl Hub {
         committed_changed: bool,
     ) -> Result<Mutation, HubError> {
         if key_set {
-            self.after_key_change(scope, slug, true).await;
+            // What is in the slot now, not what this edit wrote: an operation on
+            // the same provider may have run since the lock was released, and
+            // its event must not be contradicted by a stale `present: true`.
+            self.announce_key_state(scope, slug).await;
         }
         if let Some(new) = base_url
             && new != record.base_url

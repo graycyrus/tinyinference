@@ -75,6 +75,11 @@ impl MemoryCredentials {
 
     /// Parks the matching call until the returned [`Held`] is released, so a
     /// test can run another operation in the middle of it.
+    ///
+    /// # Panics
+    ///
+    /// When `hold` names a call this store never makes (only get, set and delete
+    /// have points), rather than letting the test hang.
     pub fn hold(&self, hold: Hold) -> Held {
         self.interleave
             .hold(hold, &[Call::Get, Call::Set, Call::Delete])

@@ -81,11 +81,10 @@ impl Hub {
         if plan.previous.is_some()
             && let Err(error) = self.delete_slot(scope, slug).await
         {
-            if let Err(restore) = self.restore_slot(scope, slug, plan.previous.clone()).await {
-                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
-                // The key is gone though the record never moved: say so.
-                self.announce_key_state(scope, slug).await;
-            }
+            // The key is gone though the record never moved: back it goes, or it
+            // is announced.
+            self.restore_or_announce(scope, slug, plan.previous.clone())
+                .await;
             return Err(error);
         }
         // 2. The record moves, disabled.
@@ -127,13 +126,18 @@ impl Hub {
                     // It did commit: carry on from there.
                     Some(true) => true,
                     // Nothing moved: the old key goes back, unless the provider is
-                    // gone (its key went with it).
+                    // gone (its key went with it) or the record is not verifiably
+                    // still at the endpoint that key was entered for (another
+                    // hub moved it elsewhere: the old key beside a third origin
+                    // is exactly what must not happen).
                     Some(false) => {
-                        if !matches!(error, HubError::NotFound(_))
-                            && let Err(restore) =
-                                self.restore_slot(scope, slug, plan.previous.clone()).await
-                        {
-                            tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                        if matches!(error, HubError::NotFound(_)) {
+                            return Err(error);
+                        }
+                        if self.record_is_at(scope, slug, plan.validated_base).await == Some(true) {
+                            self.restore_or_announce(scope, slug, plan.previous.clone())
+                                .await;
+                        } else {
                             self.announce_key_state(scope, slug).await;
                         }
                         return Err(error);
@@ -238,9 +242,13 @@ impl Hub {
             self.announce_move(scope, slug).await;
             return;
         }
-        if let Err(error) = self.restore_slot(scope, slug, plan.previous.clone()).await {
-            tracing::warn!(%slug, reason = %error.reason(), "could not restore the previous key");
-            // The endpoint is back but the key it had is not: say the key changed.
+        // The old key goes back only beside a record verifiably at the endpoint
+        // it was entered for (the transaction above is a no-op when another hub
+        // has moved the record elsewhere meanwhile).
+        if self.record_is_at(scope, slug, plan.validated_base).await == Some(true) {
+            self.restore_or_announce(scope, slug, plan.previous.clone())
+                .await;
+        } else {
             self.announce_key_state(scope, slug).await;
         }
     }

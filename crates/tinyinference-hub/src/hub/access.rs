@@ -452,9 +452,35 @@ impl Hub {
     /// Announces that a provider's key **may have changed** where the operation
     /// cannot say how it ended (a store that failed part-way): reads the slot as
     /// it is now, so the event says what is there rather than what was hoped.
+    ///
+    /// When the slot cannot be read (a store that just failed part-way is often
+    /// still down) no claim about the key is made: health and cached catalogs are
+    /// dropped, and no `KeyChanged` event says something that may be false.
     pub(crate) async fn announce_key_state(&self, scope: &ScopeKey, slug: &Slug) {
-        let present = matches!(self.read_slot(scope, slug).await, Ok(Some(_)));
-        self.after_key_change(scope, slug, present).await;
+        match self.read_slot(scope, slug).await {
+            Ok(key) => self.after_key_change(scope, slug, key.is_some()).await,
+            Err(error) => {
+                tracing::warn!(%slug, reason = %error.reason(), "could not read the key slot to announce it");
+                self.forget_health(scope, slug).await;
+                self.inner.cache.evict_scope(scope);
+            }
+        }
+    }
+
+    /// Puts a slot back to `previous` after an operation that is failing; if that
+    /// cannot be done the key really is not what the caller is told (nothing
+    /// changed), so it is logged and announced. One place, so the announcement is
+    /// part of restoring rather than something each caller remembers.
+    pub(crate) async fn restore_or_announce(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        previous: Option<Secret>,
+    ) {
+        if let Err(error) = self.restore_slot(scope, slug, previous).await {
+            tracing::warn!(%slug, reason = %error.reason(), "could not restore the previous key");
+            self.announce_key_state(scope, slug).await;
+        }
     }
 
     /// Deletes a slot that belongs to nothing (its provider went, or moved, while
