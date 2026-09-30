@@ -174,6 +174,7 @@ impl RaceStats {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(test)]
     pub(crate) fn get(counter: &std::sync::atomic::AtomicUsize) -> usize {
         counter.load(std::sync::atomic::Ordering::SeqCst)
     }
