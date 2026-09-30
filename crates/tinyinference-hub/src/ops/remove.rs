@@ -229,8 +229,16 @@ impl Hub {
             });
         }
         self.write_slot(scope, slug, key).await?;
+        // The existence check above ran before the write. A removal that landed
+        // in between deleted the slot first, so the key just written would be
+        // owned by nothing (and would answer for a later provider of that slug).
+        let after = self.read_config(scope).await?;
+        if after.provider(slug).is_none() {
+            self.delete_slot(scope, slug).await.ok();
+            return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
+        }
         self.after_key_change(scope, slug, true).await;
-        let view = self.view(scope, &record, &config).await;
+        let view = self.view(scope, &record, &after).await;
         Ok(Mutation {
             status: MutationStatus::Saved,
             note: format!("The key for {} was saved.", record.label),

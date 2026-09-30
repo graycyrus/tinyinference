@@ -46,6 +46,9 @@ impl Hub {
             target = target.with_model(model);
         }
         let cx = self.cx(&headers);
+        // Read before the probe runs: a key change while it is in flight makes its
+        // result about a credential that is gone, and it must not be recorded.
+        let epoch = self.inner.health.epoch(scope, &record.slug);
         match run_probe(&cx, &*driver, &target, depth).await {
             Ok(report) => {
                 // Recording is best effort: the check ran, and its report is what
@@ -54,7 +57,7 @@ impl Hub {
                 if let Err(error) = self
                     .inner
                     .health
-                    .record_probe(scope, &record.slug, &report)
+                    .record_probe_at(scope, &record.slug, &report, Some(epoch))
                     .await
                 {
                     tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record a probe");
@@ -65,7 +68,12 @@ impl Hub {
                 Ok(report)
             }
             Err(HubError::SignedOut { provider }) => {
-                if let Err(error) = self.inner.health.mark_signed_out(scope, &record.slug).await {
+                if let Err(error) = self
+                    .inner
+                    .health
+                    .mark_signed_out_at(scope, &record.slug, Some(epoch))
+                    .await
+                {
                     tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record signed out");
                 }
                 Err(HubError::SignedOut { provider })
@@ -353,9 +361,9 @@ impl Hub {
     /// Such a provider is no longer routed to, so no real turn will ever clear
     /// it; only a deliberate check can. The hub spawns nothing, so a host calls
     /// this on its own schedule. The check is a completion when the record has a
-    /// model (the only depth that clears a rejected chat key), otherwise the
-    /// deepest depth the kind supports without one. A failed re-test refreshes
-    /// the failure's time, so the next one waits again.
+    /// model (the only depth that clears a rejected chat key), otherwise a
+    /// catalog read (which lifts only what a catalog read failed). Every re-test
+    /// stamps its time whatever it finds, so the next one waits again.
     ///
     /// # Errors
     ///
@@ -376,9 +384,18 @@ impl Hub {
             if !matches!(reason, ReasonCode::Auth | ReasonCode::Quota) {
                 continue;
             }
+            let last_retest = self
+                .inner
+                .retests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&(scope.clone(), record.slug.clone()))
+                .copied()
+                .unwrap_or(0);
             let since = snapshot
                 .last_failure
-                .map_or(snapshot.changed_at_ms, |f| f.at_ms);
+                .map_or(snapshot.changed_at_ms, |f| f.at_ms)
+                .max(last_retest);
             if now < since.saturating_add(wait) {
                 continue;
             }
@@ -398,6 +415,14 @@ impl Hub {
             if credential.key.is_none() && Self::auth_of(record, descriptor).needs_credential() {
                 continue;
             }
+            // Stamped before the check, whatever it finds: a check that passes
+            // but cannot lift the failure (a catalog read for a provider that
+            // failed a chat completion) must not be repeated on every tick.
+            self.inner
+                .retests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert((scope.clone(), record.slug.clone()), now);
             let Ok(report) = self
                 .probe_record(scope, record, depth, None, &credential)
                 .await
@@ -465,10 +490,11 @@ impl Hub {
         scope: &ScopeKey,
         turn: &crate::route::ResolvedTurn,
         outcome: Outcome,
+        epoch: u64,
     ) -> Result<(), HubError> {
         self.inner
             .health
-            .record_outcome(scope, &turn.slug, &outcome)
+            .record_outcome_at(scope, &turn.slug, &outcome, Some(epoch))
             .await?;
         Ok(())
     }

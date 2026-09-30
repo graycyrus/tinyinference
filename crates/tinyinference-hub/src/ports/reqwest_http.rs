@@ -215,6 +215,9 @@ impl ReqwestHttp {
             HttpError::Failed(LogOnly::new("the URL could not be parsed".to_string()))
         })?;
         let port = url.port_or_known_default().unwrap_or(443);
+        // The request's timeout is what is left of the whole chain's; resolving
+        // the name spends part of it, and the connection gets only the rest.
+        let started = self.clock.now();
         let (domain, ips) = match url.host() {
             Some(Host::Domain(name)) => (
                 Some(name.to_string()),
@@ -229,10 +232,12 @@ impl ReqwestHttp {
             addrs: pin_addresses(&ips, port, policy)?,
         };
         let prepared = build_request(&request, url)?;
-        let response = self
-            .executor
-            .execute(&pin, prepared, request.timeout)
-            .await?;
+        let left = request
+            .timeout
+            .checked_sub(self.clock.now().saturating_duration_since(started))
+            .filter(|left| !left.is_zero())
+            .ok_or(HttpError::Timeout)?;
+        let response = self.executor.execute(&pin, prepared, left).await?;
         read_response(response, request.body_cap, &request.url).await
     }
 }

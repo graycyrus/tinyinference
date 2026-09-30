@@ -120,7 +120,14 @@ impl Hub {
         let committed = match committed {
             Ok(committed) => committed,
             Err(error) => {
-                if let Some(previous) = previous {
+                // A record somebody removed while this ran took its key with it:
+                // restoring the old one would resurrect it, and the new one just
+                // written belongs to nothing. Anything else puts the old key back.
+                if matches!(error, HubError::NotFound(_)) {
+                    if key.is_some() {
+                        self.delete_slot(scope, slug).await.ok();
+                    }
+                } else if let Some(previous) = previous {
                     self.restore_slot(scope, slug, previous).await?;
                 }
                 return Err(error);

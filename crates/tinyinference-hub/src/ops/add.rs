@@ -150,14 +150,15 @@ impl Hub {
     }
 
     /// Inserts the planned record, enforcing the guards that read the
-    /// configuration. Returns the record and whether it became the default.
+    /// configuration. Returns the record and, when the add changed the default, what it was
+    /// before (so an undo can restore exactly that).
     fn insert_planned(
         &self,
         config: &mut HubConfig,
         plan: &AddPlan,
         id: &str,
         make_default: bool,
-    ) -> Result<(ProviderRecord, bool), HubError> {
+    ) -> Result<(ProviderRecord, Option<DefaultChoice>), HubError> {
         if config.contains(&plan.slug) {
             return Err(HubError::AlreadyExists {
                 slug: plan.slug.clone(),
@@ -185,17 +186,19 @@ impl Hub {
             .iter()
             .filter(|p| self.group_of(p) != ProviderGroup::Managed)
             .count();
-        let mut became_default = false;
+        let mut default_was: Option<DefaultChoice> = None;
         if make_default {
             let model = plan
                 .model
                 .clone()
                 .ok_or(HubError::Invalid(InvalidInput::Empty(InputField::ModelId)))?;
-            config.default = DefaultChoice::Full {
-                provider: plan.slug.clone(),
-                model,
-            };
-            became_default = true;
+            default_was = Some(std::mem::replace(
+                &mut config.default,
+                DefaultChoice::Full {
+                    provider: plan.slug.clone(),
+                    model,
+                },
+            ));
         } else if config.default == DefaultChoice::Unset
             && operator_rows == 1
             && let Some(model) = plan.model.clone()
@@ -207,9 +210,9 @@ impl Hub {
                 provider: plan.slug.clone(),
                 model,
             };
-            became_default = true;
+            default_was = Some(DefaultChoice::Unset);
         }
-        Ok((record, became_default))
+        Ok((record, default_was))
     }
 
     /// Adds a provider **without** checking it. Nothing is sent anywhere.
@@ -226,9 +229,9 @@ impl Hub {
     /// [`HubError::StoreUnreadable`] or [`HubError::Conflict`] from the stores.
     pub async fn add(&self, scope: &ScopeKey, draft: ProviderDraft) -> Result<Mutation, HubError> {
         let plan = self.plan_add(Operation::Add, &draft)?;
-        let (record, _) = self.save_new(scope, &plan, false).await?;
+        let added = self.save_new(scope, &plan, false).await?;
         let config = self.read_config(scope).await.unwrap_or_default();
-        let view = self.view(scope, &record, &config).await;
+        let view = self.view(scope, &added.record, &config).await;
         Ok(Mutation {
             status: MutationStatus::Saved,
             note: format!("{} was added.", plan.label),
@@ -238,50 +241,47 @@ impl Hub {
         })
     }
 
-    /// Writes the key (remembering the old value) and the record; restores the
-    /// key if the record cannot be saved.
-    async fn save_new(
-        &self,
-        scope: &ScopeKey,
-        plan: &AddPlan,
-        make_default: bool,
-    ) -> Result<(ProviderRecord, bool), HubError> {
-        let previous = match &plan.key {
+    /// Saves the record, **then** writes the key.
+    ///
+    /// The record goes first on purpose: a writer that loses (the slug is taken,
+    /// the compare-and-swap keeps failing) has touched nothing else, so it can
+    /// never overwrite, or delete, the key of the provider that won. The window
+    /// where the row exists without its key fails closed: a turn to it is
+    /// `NoKey`. If the key cannot be written the record is taken out again.
+    async fn save_new(&self, scope: &ScopeKey, plan: &AddPlan, make_default: bool) -> Result<Added, HubError> {
+        // Read the slot before anything changes: an unreadable store stops the
+        // add here, and a rollback needs to know what to put back.
+        let key_was = match &plan.key {
             Some(_) => Some(self.read_slot(scope, &plan.slug).await?),
             None => None,
         };
-        if let Some(key) = &plan.key {
-            self.write_slot(scope, &plan.slug, key.clone()).await?;
-        }
         let id = self.new_record_id(&plan.slug);
         let mut inserted = None;
-        let committed = self
-            .transact(scope, |config| {
-                inserted = Some(self.insert_planned(config, plan, &id, make_default)?);
-                Ok(())
-            })
-            .await;
-        match committed {
-            Ok(_) => {
-                let (record, became_default) = inserted.ok_or(HubError::Conflict)?;
-                if plan.key.is_some() {
-                    self.after_key_change(scope, &plan.slug, true).await;
-                }
-                self.inner.events.emit(HubEvent::ProviderAdded {
-                    scope: scope.clone(),
-                    slug: plan.slug.clone(),
-                });
-                Ok((record, became_default))
+        self.transact(scope, |config| {
+            inserted = Some(self.insert_planned(config, plan, &id, make_default)?);
+            Ok(())
+        })
+        .await?;
+        let (record, default_was) = inserted.ok_or(HubError::Conflict)?;
+        let mut added = Added {
+            record,
+            default_was,
+            key_was: None,
+        };
+        if let Some(key) = &plan.key {
+            if let Err(error) = self.write_slot(scope, &plan.slug, key.clone()).await {
+                // Nothing was written to the slot, so there is nothing to put back.
+                self.undo_add(scope, &added).await.ok();
+                return Err(error);
             }
-            Err(error) => {
-                if let Some(previous) = previous {
-                    // The record was not saved: put the slot back so a failed
-                    // add does not leave a key behind (or overwrite one).
-                    self.restore_slot(scope, &plan.slug, previous).await?;
-                }
-                Err(error)
-            }
+            added.key_was = key_was;
+            self.after_key_change(scope, &plan.slug, true).await;
         }
+        self.inner.events.emit(HubEvent::ProviderAdded {
+            scope: scope.clone(),
+            slug: plan.slug.clone(),
+        });
+        Ok(added)
     }
 
     /// Adds a provider **and checks it**, rolling the add back when the
@@ -320,19 +320,15 @@ impl Hub {
         if options.make_default && plan.model.is_none() {
             return Err(HubError::Invalid(InvalidInput::Empty(InputField::ModelId)));
         }
-        let previous = match &plan.key {
-            Some(_) => Some(self.read_slot(scope, &plan.slug).await?),
-            None => None,
-        };
-        let (record, made_default) = self.save_new(scope, &plan, options.make_default).await?;
+        let added = self.save_new(scope, &plan, options.make_default).await?;
+        let record = added.record.clone();
 
         // Is there anything to check with? A keyed kind saved without a key is
         // saved unchecked.
         let credential = match self.credential(scope, &record).await {
             Ok(credential) => credential,
             Err(error) => {
-                self.undo_add(scope, &record, previous, made_default)
-                    .await?;
+                self.undo_add(scope, &added).await?;
                 return Err(error);
             }
         };
@@ -361,16 +357,14 @@ impl Hub {
         {
             Ok(report) => report,
             Err(error) => {
-                self.undo_add(scope, &record, previous, made_default)
-                    .await?;
+                self.undo_add(scope, &added).await?;
                 return Err(error);
             }
         };
         if let Some(failure) = &report.failure {
             let refused = report.refusal.is_some();
             if refused || (failure.rolls_back(plan.group) && !options.add_anyway) {
-                self.undo_add(scope, &record, previous, made_default)
-                    .await?;
+                self.undo_add(scope, &added).await?;
                 let error = report
                     .clone()
                     .into_result()
@@ -399,33 +393,37 @@ impl Hub {
         })
     }
 
-    /// Undoes an add: the record goes (and the default too, when this add made
-    /// it), the key slot is put back to what it held, and what was learned
+    /// Undoes an add exactly: the record goes, the default goes back to what it
+    /// was (if this add changed it and nobody has changed it since), the key slot
+    /// goes back to what it held (if this add wrote a key), and what was learned
     /// about the new key is forgotten.
-    async fn undo_add(
-        &self,
-        scope: &ScopeKey,
-        record: &ProviderRecord,
-        previous: Option<Option<Secret>>,
-        made_default: bool,
-    ) -> Result<(), HubError> {
-        let slug = record.slug.clone();
+    async fn undo_add(&self, scope: &ScopeKey, added: &Added) -> Result<(), HubError> {
+        let slug = added.record.slug.clone();
         let removed = self
             .transact(scope, |config| {
                 config.providers.retain(|p| p.slug != slug);
-                if made_default
+                if let Some(was) = &added.default_was
                     && matches!(&config.default, DefaultChoice::Full { provider, .. } if *provider == slug)
                 {
-                    config.default = DefaultChoice::Unset;
+                    config.default = was.clone();
                 }
                 Ok(())
             })
             .await;
-        if let Some(previous) = previous {
+        if let Some(previous) = added.key_was.clone() {
             self.restore_slot(scope, &slug, previous).await?;
         }
         self.inner.cache.evict_scope(scope);
         self.forget_health(scope, &slug).await;
         removed.map(|_| ())
     }
+}
+
+/// What an add did, so it can be undone exactly.
+pub(crate) struct Added {
+    pub(crate) record: ProviderRecord,
+    /// The default before the add, when the add changed it.
+    pub(crate) default_was: Option<DefaultChoice>,
+    /// The key slot's value before the add wrote a key (`None`: it wrote none).
+    pub(crate) key_was: Option<Option<Secret>>,
 }

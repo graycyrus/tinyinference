@@ -441,6 +441,7 @@ impl HubBuilder {
                     .models
                     .unwrap_or_else(|| Arc::new(LlmModelFactory::new())),
                 ids: AtomicU64::new(0),
+                retests: std::sync::Mutex::new(HashMap::new()),
             }),
         })
     }

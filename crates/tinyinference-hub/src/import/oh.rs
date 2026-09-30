@@ -22,6 +22,43 @@ use crate::taxonomy::{AuthStyle, LocalRuntime, ProviderGroup};
 use super::{Imported, ImportedCredential, LossKind};
 use crate::secret::Secret;
 
+/// A key found in a stored shape. It redacts itself in `Debug` (an input struct
+/// is easy to log by accident) and deserialises from the plain string the
+/// source stored.
+#[derive(Clone)]
+pub struct StoredKey(Secret);
+
+impl StoredKey {
+    /// Wraps a key.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(Secret::new(key))
+    }
+
+    /// The key, trimmed, or `None` when it is blank.
+    fn usable(&self) -> Option<Secret> {
+        let key = self.0.expose().trim();
+        (!key.is_empty()).then(|| Secret::new(key))
+    }
+}
+
+impl From<String> for StoredKey {
+    fn from(key: String) -> Self {
+        Self::new(key)
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
+impl std::fmt::Debug for StoredKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StoredKey").field(&self.0).finish()
+    }
+}
+
 /// One entry of `cloud_providers`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -52,7 +89,7 @@ pub struct OhLocalAi {
     /// The one base URL OpenHuman shares between local runtimes.
     pub base_url: Option<String>,
     /// A key, when the runtime takes one.
-    pub api_key: Option<String>,
+    pub api_key: Option<StoredKey>,
     /// The model.
     pub model_id: Option<String>,
 }
@@ -64,7 +101,7 @@ pub struct OhByok {
     /// `inference_url`.
     pub url: String,
     /// The key.
-    pub api_key: Option<String>,
+    pub api_key: Option<StoredKey>,
     /// The model.
     pub model: Option<String>,
 }
@@ -300,11 +337,8 @@ pub fn import(snapshot: &OhSnapshot) -> Result<Imported, HubError> {
             record.model = Some(ModelId::parse(model)?);
         }
         record.validate()?;
-        if let Some(key) = byok.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-            out.credentials.push(ImportedCredential {
-                slug,
-                key: Secret::new(key.trim()),
-            });
+        if let Some(key) = byok.api_key.as_ref().and_then(StoredKey::usable) {
+            out.credentials.push(ImportedCredential { slug, key });
         }
         out.loss.push(
             "byok-inference",
@@ -366,11 +400,8 @@ pub fn import(snapshot: &OhSnapshot) -> Result<Imported, HubError> {
             record.validate()?;
             out.config.providers.push(record);
         }
-        if let Some(key) = local.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-            out.credentials.push(ImportedCredential {
-                slug,
-                key: Secret::new(key.trim()),
-            });
+        if let Some(key) = local.api_key.as_ref().and_then(StoredKey::usable) {
+            out.credentials.push(ImportedCredential { slug, key });
         }
         out.loss.push(
             "local_ai",

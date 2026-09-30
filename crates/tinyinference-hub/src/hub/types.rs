@@ -268,9 +268,10 @@ pub struct Retested {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HubPolicy {
-    /// Allow one row per catalogue kind (OpenCompany's rule). The default is
-    /// `false`: a second account of a kind is another instance with its own
-    /// slug.
+    /// Restrict each catalogue kind to a **single** row (OpenCompany's rule); a
+    /// second account of `openai` is then refused and has to be a `custom`
+    /// endpoint. The default is `false`: a second account of a kind is allowed
+    /// as another instance with its own slug.
     pub one_row_per_kind: bool,
     /// Words that are not model ids (a host's workload tiers). The hub reserves
     /// none itself (D7).

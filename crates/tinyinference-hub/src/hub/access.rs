@@ -1,6 +1,6 @@
 //! Shared plumbing for the operations: drivers, credentials, views, hooks.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::sync::atomic::Ordering;
 
 use crate::catalogue;
@@ -169,6 +169,11 @@ impl Hub {
     /// A health store that is down is reported by the reads that need it
     /// (`health`, `status`).
     pub(crate) async fn forget_health(&self, scope: &ScopeKey, slug: &Slug) {
+        self.inner
+            .retests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(scope.clone(), slug.clone()));
         if let Err(error) = self.inner.health.forget(scope, slug).await {
             tracing::warn!(%slug, reason = %error.reason(), "could not forget a provider's health");
         }

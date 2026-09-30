@@ -17,6 +17,21 @@ use super::types::{HealthSnapshot, ProviderHealth};
 /// One async lock per `(scope, provider)`.
 type LockMap = HashMap<(ScopeKey, Slug), Arc<Mutex<()>>>;
 
+/// How many providers' forget marks are kept before the map is reset.
+const MAX_EPOCHS: usize = 4096;
+
+/// Remembers when each provider's health was last forgotten, so a result that
+/// was measured **before** that moment (a probe or a turn that was in flight
+/// when its key changed) is dropped instead of recorded against the new key.
+#[derive(Default)]
+struct Epochs {
+    counter: u64,
+    /// Marks older than this are gone: an operation that captured an epoch below
+    /// it is treated as stale, which errs on the side of dropping a result.
+    floor: u64,
+    forgotten: HashMap<(ScopeKey, Slug), u64>,
+}
+
 /// How a real turn went, reported by the host after every turn so a provider
 /// that passes probes but fails turns does not look green.
 #[non_exhaustive]
@@ -41,6 +56,7 @@ pub struct HealthTracker {
     clock: Arc<dyn Clock>,
     events: Arc<dyn EventSink>,
     locks: std::sync::Mutex<LockMap>,
+    epochs: std::sync::Mutex<Epochs>,
 }
 
 impl HealthTracker {
@@ -55,6 +71,7 @@ impl HealthTracker {
             clock,
             events,
             locks: std::sync::Mutex::new(HashMap::new()),
+            epochs: std::sync::Mutex::new(Epochs::default()),
         }
     }
 
@@ -125,8 +142,31 @@ impl HealthTracker {
     where
         F: FnOnce(&mut HealthSnapshot, u64) -> bool,
     {
+        match self.update_at(scope, slug, None, apply).await? {
+            Some(health) => Ok(health),
+            None => self.health(scope, slug).await,
+        }
+    }
+
+    /// Like [`update`](Self::update), but does nothing (and returns `None`) when
+    /// the provider's health was forgotten since `expect` was read from
+    /// [`epoch`](Self::epoch). The check runs under the provider's lock, so it
+    /// cannot interleave with the forget.
+    async fn update_at<F>(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        expect: Option<u64>,
+        apply: F,
+    ) -> Result<Option<ProviderHealth>, HubError>
+    where
+        F: FnOnce(&mut HealthSnapshot, u64) -> bool,
+    {
         let lease = self.lease(scope, slug);
         let _serial = lease.lock.lock().await;
+        if expect.is_some_and(|epoch| epoch != self.epoch(scope, slug)) {
+            return Ok(None);
+        }
         let mut snapshot = self.snapshot(scope, slug).await?;
         let from = snapshot.health;
         let changed = apply(&mut snapshot, self.clock.wall_ms());
@@ -143,7 +183,39 @@ impl HealthTracker {
                 to,
             });
         }
-        Ok(to)
+        Ok(Some(to))
+    }
+
+    /// The provider's current epoch: read it **before** measuring something that
+    /// will be recorded later (a probe, a turn) and hand it to
+    /// [`record_probe_at`](Self::record_probe_at) or
+    /// [`record_outcome_at`](Self::record_outcome_at). A [`forget`](Self::forget)
+    /// in between changes it, and the stale result is dropped.
+    pub fn epoch(&self, scope: &ScopeKey, slug: &Slug) -> u64 {
+        let epochs = self
+            .epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        epochs
+            .forgotten
+            .get(&(scope.clone(), slug.clone()))
+            .copied()
+            .unwrap_or(0)
+            .max(epochs.floor)
+    }
+
+    fn mark_forgotten(&self, scope: &ScopeKey, slug: &Slug) {
+        let mut epochs = self
+            .epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        epochs.counter += 1;
+        let mark = epochs.counter;
+        if epochs.forgotten.len() >= MAX_EPOCHS {
+            epochs.floor = mark;
+            epochs.forgotten.clear();
+        }
+        epochs.forgotten.insert((scope.clone(), slug.clone()), mark);
     }
 
     /// Records a probe's result. Returns the new status.
@@ -157,12 +229,31 @@ impl HealthTracker {
         slug: &Slug,
         report: &ProbeReport,
     ) -> Result<ProviderHealth, HubError> {
+        match self.record_probe_at(scope, slug, report, None).await? {
+            Some(health) => Ok(health),
+            None => self.health(scope, slug).await,
+        }
+    }
+
+    /// [`record_probe`](Self::record_probe) that is dropped (`None`) when the
+    /// provider's health was forgotten after `epoch` was read.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn record_probe_at(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        report: &ProbeReport,
+        epoch: Option<u64>,
+    ) -> Result<Option<ProviderHealth>, HubError> {
         let failure = report.failure.as_ref().map(|f| (f.reason, f.status));
         let latency = u64::try_from(report.latency.as_millis()).ok();
         let depth = report.depth;
         let proves_key = report.proves_key;
         let started_ms = report.started_ms;
-        self.update(scope, slug, move |snapshot, now| {
+        self.update_at(scope, slug, epoch, move |snapshot, now| {
             snapshot.record_probe_started(depth, failure, latency, proves_key, started_ms, now)
         })
         .await
@@ -180,20 +271,42 @@ impl HealthTracker {
         slug: &Slug,
         outcome: &Outcome,
     ) -> Result<ProviderHealth, HubError> {
+        match self.record_outcome_at(scope, slug, outcome, None).await? {
+            Some(health) => Ok(health),
+            None => self.health(scope, slug).await,
+        }
+    }
+
+    /// [`record_outcome`](Self::record_outcome) that is dropped (`None`) when the
+    /// provider's health was forgotten after `epoch` was read.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn record_outcome_at(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        outcome: &Outcome,
+        epoch: Option<u64>,
+    ) -> Result<Option<ProviderHealth>, HubError> {
         match outcome {
             Outcome::Ok { latency } => {
                 let latency_ms = u64::try_from(latency.as_millis()).ok();
-                self.update(scope, slug, move |snapshot, now| {
+                self.update_at(scope, slug, epoch, move |snapshot, now| {
                     snapshot.record_turn(None, latency_ms, now)
                 })
                 .await
             }
             Outcome::Failed(failure) if failure.reason == ReasonCode::SignedOut => {
-                self.mark_signed_out(scope, slug).await
+                self.update_at(scope, slug, epoch, |snapshot, now| {
+                    snapshot.record_signed_out(now)
+                })
+                .await
             }
             Outcome::Failed(failure) => {
                 let note = (failure.reason, failure.status);
-                self.update(scope, slug, move |snapshot, now| {
+                self.update_at(scope, slug, epoch, move |snapshot, now| {
                     snapshot.record_turn(Some(note), None, now)
                 })
                 .await
@@ -215,6 +328,24 @@ impl HealthTracker {
             .await
     }
 
+    /// [`mark_signed_out`](Self::mark_signed_out) that is dropped (`None`) when
+    /// the provider's health was forgotten after `epoch` was read.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::StoreUnreadable`] when the health store fails.
+    pub async fn mark_signed_out_at(
+        &self,
+        scope: &ScopeKey,
+        slug: &Slug,
+        epoch: Option<u64>,
+    ) -> Result<Option<ProviderHealth>, HubError> {
+        self.update_at(scope, slug, epoch, |snapshot, now| {
+            snapshot.record_signed_out(now)
+        })
+        .await
+    }
+
     /// Forgets a provider's health: it was removed, or its key changed and what
     /// was learned with the old key no longer applies.
     ///
@@ -224,6 +355,9 @@ impl HealthTracker {
     pub async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), HubError> {
         let lease = self.lease(scope, slug);
         let _serial = lease.lock.lock().await;
+        // Marked even when the store cannot forget: whatever was in flight was
+        // measured against the old credential either way.
+        self.mark_forgotten(scope, slug);
         self.store
             .forget(scope, slug)
             .await

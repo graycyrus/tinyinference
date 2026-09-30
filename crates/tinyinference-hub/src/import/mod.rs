@@ -10,6 +10,7 @@ pub mod oc;
 pub mod oh;
 mod report;
 
+pub use oh::StoredKey;
 pub use report::{LossEntry, LossKind, LossReport};
 
 use crate::catalog::ModelOverride;

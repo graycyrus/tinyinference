@@ -103,6 +103,9 @@ pub(crate) struct Inner {
     pub(crate) spawner: Option<Arc<dyn crate::ports::ProcessSpawner>>,
     pub(crate) models: Arc<dyn ModelFactory>,
     pub(crate) ids: AtomicU64,
+    /// When each provider was last re-tested (wall milliseconds), so a re-test
+    /// that cannot clear what it looked at still waits before the next one.
+    pub(crate) retests: std::sync::Mutex<HashMap<(crate::ids::ScopeKey, crate::ids::Slug), u64>>,
 }
 
 /// The hub: every operation a host needs to manage and use inference providers.

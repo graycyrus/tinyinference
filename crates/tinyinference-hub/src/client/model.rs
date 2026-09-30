@@ -43,6 +43,17 @@ impl HubModel {
         }
     }
 
+    /// Whether the kind needs a key to be used at all.
+    fn key_required(&self) -> bool {
+        self.turn.auth.needs_credential()
+            && self
+                .hub
+                .inner
+                .registry
+                .get(&self.turn.kind)
+                .is_some_and(|driver| driver.descriptor().needs_key)
+    }
+
     fn provider_error(&self, code: &str, message: &str, retryable: bool) -> Error {
         Error::Provider(Box::new(ProviderError {
             provider: self.turn.kind.to_string(),
@@ -76,6 +87,12 @@ impl HubModel {
             }
         };
         let managed = self.turn.group == crate::taxonomy::ProviderGroup::Managed;
+        if key.is_none() && !managed && self.key_required() {
+            // Same rule as `resolve_for_turn`: a keyed kind with no key fails
+            // closed. A model the host kept from before the key was cleared
+            // must not quietly send an empty credential.
+            return Err(self.provider_error("no_key", "no key is configured", false));
+        }
         if key.is_none() && managed {
             let _ = self
                 .hub
@@ -117,7 +134,7 @@ impl HubModel {
         Ok(built)
     }
 
-    async fn observe_ok(&self, started: std::time::Instant) {
+    async fn observe_ok(&self, started: std::time::Instant, epoch: u64) {
         let latency = self
             .hub
             .inner
@@ -126,11 +143,11 @@ impl HubModel {
             .saturating_duration_since(started);
         let _ = self
             .hub
-            .record_outcome_lenient(&self.scope, &self.turn, Outcome::Ok { latency })
+            .record_outcome_lenient(&self.scope, &self.turn, Outcome::Ok { latency }, epoch)
             .await;
     }
 
-    async fn observe_err(&self, error: &Error) {
+    async fn observe_err(&self, error: &Error, epoch: u64) {
         let Some(failure) = failure_of(error) else {
             return;
         };
@@ -153,7 +170,7 @@ impl HubModel {
         }
         let _ = self
             .hub
-            .record_outcome_lenient(&self.scope, &self.turn, Outcome::Failed(failure))
+            .record_outcome_lenient(&self.scope, &self.turn, Outcome::Failed(failure), epoch)
             .await;
     }
 }
@@ -210,22 +227,26 @@ impl ChatModel<()> for HubModel {
     }
 
     async fn invoke(&self, state: &(), request: ModelRequest) -> Result<ModelResponse> {
+        // Read before the credential is resolved: what this turn learns is about
+        // that credential, and is dropped if the provider's key changes meanwhile.
+        let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
         let model = self.current().await?;
         let started = self.hub.inner.clock.now();
         match model.invoke(state, request).await {
             Ok(mut response) => {
                 mirror_usage_meta(&mut response);
-                self.observe_ok(started).await;
+                self.observe_ok(started, epoch).await;
                 Ok(response)
             }
             Err(error) => {
-                self.observe_err(&error).await;
+                self.observe_err(&error, epoch).await;
                 Err(error)
             }
         }
     }
 
     async fn stream(&self, state: &(), request: ModelRequest) -> Result<ModelStream> {
+        let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
         let model = self.current().await?;
         let started = self.hub.inner.clock.now();
         match model.stream(state, request).await {
@@ -233,11 +254,11 @@ impl ChatModel<()> for HubModel {
                 // Streaming health (time to first token, mid-stream failures) is
                 // the router's; a stream that starts is recorded as a turn that
                 // worked.
-                self.observe_ok(started).await;
+                self.observe_ok(started, epoch).await;
                 Ok(stream)
             }
             Err(error) => {
-                self.observe_err(&error).await;
+                self.observe_err(&error, epoch).await;
                 Err(error)
             }
         }
