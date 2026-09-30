@@ -106,3 +106,7 @@ required-features = ["testing"]
 [[test]]
 name = "guards_engine"
 required-features = ["testing"]
+
+[[test]]
+name = "use_cases"
+required-features = ["testing"]

@@ -27,7 +27,9 @@ pub(crate) struct AddPlan {
     pub(crate) base_url: String,
     pub(crate) model: Option<ModelId>,
     pub(crate) key: Option<Secret>,
-    pub(crate) needs_credential: bool,
+    /// Whether a key is *required* to use the kind: a keyless add is saved
+    /// unchecked only when one is.
+    pub(crate) key_required: bool,
 }
 
 impl Hub {
@@ -99,7 +101,7 @@ impl Hub {
             base_url,
             model,
             key,
-            needs_credential: descriptor.auth.needs_credential(),
+            key_required: descriptor.needs_key && descriptor.auth.needs_credential(),
         })
     }
 
@@ -334,7 +336,7 @@ impl Hub {
                 return Err(error);
             }
         };
-        let probes = !plan.needs_credential || credential.key.is_some();
+        let probes = !plan.key_required || credential.key.is_some();
         if !probes {
             let config = self.read_config(scope).await.unwrap_or_default();
             let view = self.view(scope, &record, &config).await;
