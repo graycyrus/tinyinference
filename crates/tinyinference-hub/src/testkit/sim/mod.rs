@@ -10,6 +10,8 @@
 
 mod action;
 mod invariants;
+mod model;
+mod moves;
 #[cfg(test)]
 #[path = "test.rs"]
 mod tests;
@@ -20,6 +22,7 @@ pub use invariants::InvariantViolation;
 pub(crate) use world::install;
 pub use world::{MANAGED_BASE, Mode, SimToken, WORLD, World};
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -138,6 +141,11 @@ pub struct ScenarioRunner {
     pub(crate) modes: Vec<Mode>,
     /// Every credential the run created, with the model its listing names.
     pub(crate) keys: Vec<(String, usize)>,
+    /// The one origin each credential was entered for (invariant 11): a request
+    /// carrying the credential to any other origin is a leak.
+    pub(crate) bound: HashMap<String, String>,
+    /// A chat model the run holds on to per scope, as a host does between turns.
+    pub(crate) kept: Vec<Option<Arc<dyn tinyinference_llm::model::ChatModel<()>>>>,
     pub(crate) next_key: usize,
     pub(crate) trace: Vec<String>,
     pub(crate) step: usize,
@@ -178,8 +186,13 @@ impl ScenarioRunner {
         let signed_out = Arc::new(AtomicBool::new(false));
         let clock: FakeClock = ports.clock.clone();
         let token = Arc::new(SimToken::new(clock, signed_out.clone()));
+        let factory = model::SimFactory {
+            http: ports.http.clone(),
+            policy: policy.clone(),
+        };
         let hub = ports
             .builder()
+            .model_factory(Arc::new(factory))
             .policy(policy)
             .managed(
                 ManagedConfig::new(MANAGED_BASE).source(TokenSourceAdapter::new(
@@ -199,6 +212,8 @@ impl ScenarioRunner {
             signed_out,
             modes: vec![Mode::Healthy; WORLD.len()],
             keys: Vec::new(),
+            bound: HashMap::new(),
+            kept: vec![None; 2],
             next_key: 0,
             trace: Vec::new(),
             step: 0,
@@ -240,11 +255,15 @@ impl ScenarioRunner {
         }
     }
 
-    /// Mints a credential the run has never used and installs its rules.
-    pub(crate) fn new_key(&mut self) -> crate::secret::Secret {
+    /// Mints a credential the run has never used, **entered for `origin`**, and
+    /// installs its rules.
+    pub(crate) fn new_key(&mut self, origin: &str) -> crate::secret::Secret {
         let id = self.next_key;
         self.next_key += 1;
-        let secret = format!("sk-sim-{}-{id}", self.seed);
+        // The terminator keeps one key from being a prefix of another
+        // (`...-1` and `...-10`), so a substring search is exact.
+        let secret = format!("sk-sim-{}-{id}.end", self.seed);
+        self.bound.insert(secret.clone(), origin.to_string());
         self.keys.push((secret.clone(), id));
         self.reinstall();
         crate::secret::Secret::new(secret)

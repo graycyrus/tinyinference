@@ -12,6 +12,11 @@
 //! 8. A failed add leaves the key slot and the record set as they were.
 //! 9. A removed or re-keyed provider's health is empty.
 //! 10. The default only changes through the operations that may change it.
+//! 11. **A credential is only ever sent to the origin it was entered for**: no
+//!     request carries a pasted key toward any other origin, and the platform
+//!     token goes only to the managed endpoint. Checked on every request of
+//!     every step, including the ones a kept model or a fresh resolve sends in
+//!     the middle of an edit that is parked mid-way.
 
 use std::fmt;
 
@@ -116,7 +121,11 @@ impl ScenarioRunner {
             | Action::List { scope, .. }
             | Action::Test { scope, .. }
             | Action::RecordOutcome { scope, .. }
-            | Action::RetestDown { scope } => Some(*scope % self.scopes.len()),
+            | Action::RetestDown { scope }
+            | Action::MoveOrigin { scope, .. }
+            | Action::Keep { scope }
+            | Action::UseKept { scope }
+            | Action::RaceMove { scope, .. } => Some(*scope % self.scopes.len()),
             _ => None,
         };
 
@@ -371,10 +380,12 @@ impl ScenarioRunner {
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_string));
             let known = WORLD.iter().any(|w| {
-                url::Url::parse(w.base)
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_string))
-                    == host
+                std::iter::once(w.base).chain(w.alt_base).any(|base| {
+                    url::Url::parse(base)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_string))
+                        == host
+                })
             });
             if !known {
                 return Err(broken(
@@ -382,6 +393,7 @@ impl ScenarioRunner {
                     format!("a request went to an unexpected host: {}", request.url),
                 ));
             }
+            self.check_credential_binding(request)?;
             if request.url.starts_with(MANAGED_BASE) && !self.managed_request_is_valid(request) {
                 return Err(broken(
                     1,
@@ -442,6 +454,42 @@ impl ScenarioRunner {
             if managed > 1 {
                 return Err(broken(6, "two managed records"));
             }
+        }
+        Ok(())
+    }
+
+    /// Invariant 11 for one request: each pasted key it carries was entered for
+    /// the origin it went to, and the platform token only went to the managed
+    /// endpoint.
+    fn check_credential_binding(
+        &self,
+        request: &crate::testkit::RecordedRequest,
+    ) -> Result<(), InvariantViolation> {
+        if request.header("authorization").is_none() {
+            return Ok(());
+        }
+        for (secret, entered_for) in &self.bound {
+            if request.carried(&Secret::new(secret.clone()))
+                && !crate::policy::same_origin(&request.url, entered_for)
+            {
+                return Err(broken(
+                    11,
+                    format!(
+                        "a key entered for {entered_for} was sent to {} ({})",
+                        request.url, secret
+                    ),
+                ));
+            }
+        }
+        let elapsed_ms = request
+            .at_wall_ms
+            .saturating_sub(crate::testkit::FakeClock::START_WALL_MS);
+        let token = Secret::new(SimToken::at_minute(elapsed_ms / 60_000));
+        if !request.url.starts_with(MANAGED_BASE) && request.carried(&token) {
+            return Err(broken(
+                11,
+                format!("the platform token was sent to {}", request.url),
+            ));
         }
         Ok(())
     }

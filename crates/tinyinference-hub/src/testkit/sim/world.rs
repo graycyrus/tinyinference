@@ -25,6 +25,10 @@ pub struct World {
     pub draft_base: Option<&'static str>,
     /// The endpoint the saved record has.
     pub base: &'static str,
+    /// A second origin the provider can be moved to (an editable endpoint).
+    /// Both answer identically; what the runner checks is which credential
+    /// each was sent.
+    pub alt_base: Option<&'static str>,
     /// Whether the provider takes a key.
     pub keyed: bool,
     /// Whether it is the managed provider.
@@ -39,6 +43,7 @@ pub const WORLD: &[World] = &[
         label: None,
         draft_base: None,
         base: "https://api.openai.com/v1",
+        alt_base: None,
         keyed: true,
         managed: false,
     },
@@ -48,6 +53,7 @@ pub const WORLD: &[World] = &[
         label: None,
         draft_base: None,
         base: "https://api.groq.com/openai/v1",
+        alt_base: None,
         keyed: true,
         managed: false,
     },
@@ -57,6 +63,7 @@ pub const WORLD: &[World] = &[
         label: None,
         draft_base: None,
         base: "https://api.mistral.ai/v1",
+        alt_base: None,
         keyed: true,
         managed: false,
     },
@@ -66,6 +73,7 @@ pub const WORLD: &[World] = &[
         label: Some("Acme"),
         draft_base: Some("https://llm.acme.test/v1"),
         base: "https://llm.acme.test/v1",
+        alt_base: Some("https://llm.acme-two.test/v1"),
         keyed: true,
         managed: false,
     },
@@ -75,6 +83,7 @@ pub const WORLD: &[World] = &[
         label: None,
         draft_base: None,
         base: "http://localhost:11434/v1",
+        alt_base: None,
         keyed: false,
         managed: false,
     },
@@ -84,6 +93,7 @@ pub const WORLD: &[World] = &[
         label: None,
         draft_base: None,
         base: MANAGED_BASE,
+        alt_base: None,
         keyed: true,
         managed: true,
     },
@@ -182,18 +192,6 @@ pub(crate) fn install(http: &ScriptedHttp, world: &World, mode: Mode, keys: &[(S
         http.route(Match::prefix("http://localhost:11434/api/tags"), tags);
         return;
     }
-    if world.kind == "custom" {
-        // A custom endpoint takes an optional key: with none it is asked
-        // without one. Installed first so a per-key rule below wins.
-        http.route(
-            Match::prefix(models.clone()).without_header("authorization"),
-            answer(world, mode, "model-none", false),
-        );
-        http.route(
-            Match::prefix(chat.clone()).without_header("authorization"),
-            answer(world, mode, "model-none", true),
-        );
-    }
     if world.managed {
         // Whatever token or pasted key arrives; the runner checks *which*.
         http.route(
@@ -206,17 +204,35 @@ pub(crate) fn install(http: &ScriptedHttp, world: &World, mode: Mode, keys: &[(S
         );
         return;
     }
-    for (secret, id) in keys {
-        let bearer = format!("Bearer {secret}");
-        let model = format!("model-{id}");
-        http.route(
-            Match::prefix(models.clone()).with_header("authorization", bearer.clone()),
-            answer(world, mode, &model, false),
-        );
-        http.route(
-            Match::prefix(chat.clone()).with_header("authorization", bearer),
-            answer(world, mode, &model, true),
-        );
+    // Every origin the provider can be at answers the same way for every key:
+    // which key went where is the runner's invariant to check, not the world's.
+    for base in std::iter::once(world.base).chain(world.alt_base) {
+        let models = format!("{base}/models");
+        let chat = format!("{base}/chat/completions");
+        if world.kind == "custom" {
+            // A custom endpoint takes an optional key: with none it is asked
+            // without one. Installed first so a per-key rule below wins.
+            http.route(
+                Match::prefix(models.clone()).without_header("authorization"),
+                answer(world, mode, "model-none", false),
+            );
+            http.route(
+                Match::prefix(chat.clone()).without_header("authorization"),
+                answer(world, mode, "model-none", true),
+            );
+        }
+        for (secret, id) in keys {
+            let bearer = format!("Bearer {secret}");
+            let model = format!("model-{id}");
+            http.route(
+                Match::prefix(models.clone()).with_header("authorization", bearer.clone()),
+                answer(world, mode, &model, false),
+            );
+            http.route(
+                Match::prefix(chat.clone()).with_header("authorization", bearer),
+                answer(world, mode, &model, true),
+            );
+        }
     }
 }
 

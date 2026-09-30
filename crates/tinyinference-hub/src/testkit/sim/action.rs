@@ -3,6 +3,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use super::moves::RACE_POINTS;
 use super::world::{Mode, WORLD};
 use super::{ScenarioRunner, is_infra};
 use crate::catalog::Freshness;
@@ -179,6 +180,36 @@ pub enum Action {
     },
     /// Sign the platform token in or out.
     ToggleSignedOut,
+    /// Move the provider with an editable endpoint to its other origin,
+    /// optionally entering a key for the new origin in the same edit.
+    MoveOrigin {
+        /// Scope index.
+        scope: usize,
+        /// Enter a new key with the move.
+        rotate: bool,
+    },
+    /// Hold on to a chat model for the scope's default provider, as a host does
+    /// between turns.
+    Keep {
+        /// Scope index.
+        scope: usize,
+    },
+    /// Send a request through the model kept for the scope.
+    UseKept {
+        /// Scope index.
+        scope: usize,
+    },
+    /// Move the editable-endpoint provider to its other origin **while** a kept
+    /// model and a fresh resolve use it, with the edit parked at one of the
+    /// points where it touches a store (deterministic interleaving).
+    RaceMove {
+        /// Scope index.
+        scope: usize,
+        /// Which store call the edit is parked at (taken modulo the table).
+        at: u8,
+        /// Enter a new key with the move.
+        rotate: bool,
+    },
 }
 
 /// What a step did, for the invariants and the caller.
@@ -203,7 +234,7 @@ pub struct StepResult {
 }
 
 impl StepResult {
-    fn ok(text: String) -> Self {
+    pub(crate) fn ok(text: String) -> Self {
         Self {
             ok: true,
             reason: None,
@@ -219,6 +250,10 @@ impl StepResult {
         let mut result = Self::ok(format!("{mutation:?}"));
         result.changed = mutation.status != crate::hub::MutationStatus::Unchanged;
         result
+    }
+
+    pub(crate) fn from_error(error: &HubError) -> Self {
+        Self::err(error)
     }
 
     fn err(error: &HubError) -> Self {
@@ -252,8 +287,10 @@ impl ScenarioRunner {
         let scope = self.rng.below(self.scopes.len());
         let prov = self.rng.below(WORLD.len());
         let flag = |rng: &mut super::Rng, p: f64| rng.chance(p);
-        // Weights sum to 100.
-        match self.rng.below(100) {
+        // The first hundred slots are the original mix (kept in this order so the
+        // draws of an older seed still mean what they did); the twelve after them
+        // are the origin-move and kept-model actions.
+        match self.rng.below(112) {
             0..=17 => Action::Connect {
                 scope,
                 prov,
@@ -338,7 +375,18 @@ impl ScenarioRunner {
                 prov,
                 mode: Mode::ALL[self.rng.below(Mode::ALL.len())],
             },
-            _ => Action::ToggleSignedOut,
+            99 => Action::ToggleSignedOut,
+            100..=103 => Action::MoveOrigin {
+                scope,
+                rotate: flag(&mut self.rng, 0.7),
+            },
+            104..=106 => Action::Keep { scope },
+            107..=109 => Action::UseKept { scope },
+            _ => Action::RaceMove {
+                scope,
+                at: u8::try_from(self.rng.below(RACE_POINTS)).unwrap_or(0),
+                rotate: flag(&mut self.rng, 0.8),
+            },
         }
     }
 
@@ -352,7 +400,8 @@ impl ScenarioRunner {
             draft = draft.with_base_url(base);
         }
         if keyed && world.keyed {
-            draft = draft.with_key(self.new_key());
+            let origin = world.draft_base.unwrap_or(world.base);
+            draft = draft.with_key(self.new_key(origin));
         }
         draft
     }
@@ -400,10 +449,11 @@ impl ScenarioRunner {
                 rotate,
                 model: m,
             } => {
+                let origin = self.record_origin(*scope, *prov).await;
                 let scope = scope_of(self, *scope);
                 let mut patch = ProviderPatch::new();
                 if *rotate {
-                    patch = patch.key(self.new_key());
+                    patch = patch.key(self.new_key(&origin));
                 }
                 if let Some(m) = m {
                     patch = patch.model(model(*m));
@@ -447,8 +497,9 @@ impl ScenarioRunner {
                 }
             }
             Action::SetKey { scope, prov } => {
+                let origin = self.record_origin(*scope, *prov).await;
                 let scope = scope_of(self, *scope);
-                let key = self.new_key();
+                let key = self.new_key(&origin);
                 match hub.set_key(&scope, &slug_of(*prov), key).await {
                     Ok(mutation) => StepResult::mutated(&mutation),
                     Err(error) => StepResult::err(&error),
@@ -621,6 +672,10 @@ impl ScenarioRunner {
                 self.signed_out.store(!now, Ordering::SeqCst);
                 StepResult::ok(String::from("toggled"))
             }
+            Action::MoveOrigin { scope, rotate } => self.move_origin(*scope, *rotate).await,
+            Action::Keep { scope } => self.keep(*scope).await,
+            Action::UseKept { scope } => self.use_kept(*scope).await,
+            Action::RaceMove { scope, at, rotate } => self.race_move(*scope, *at, *rotate).await,
         }
     }
 }
