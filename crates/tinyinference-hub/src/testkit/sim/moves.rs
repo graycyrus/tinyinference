@@ -14,8 +14,12 @@ use crate::policy::same_origin;
 use crate::ports::memory::{Call, Hold};
 use crate::route::{ProviderRoute, TurnQuery};
 
-/// How many places an edit can be parked at (see [`race_hold`]).
-pub(crate) const RACE_POINTS: usize = 14;
+/// How many places a race can park something at: the edit's own store calls
+/// (see [`race_hold`]) and, past them, the kept model's credential read.
+pub(crate) const RACE_POINTS: usize = 16;
+
+/// The first race point that parks the **kept model** instead of the edit.
+const MODEL_POINTS: usize = 14;
 
 /// The `n`-th place an edit of one provider can be parked: every store call it
 /// makes, before and after it takes effect. `true` is a configuration-store
@@ -155,6 +159,58 @@ impl ScenarioRunner {
         }
     }
 
+    /// The mirror race: the kept model is parked at its credential read (before
+    /// it, or after it) while the whole edit runs, then released to send with
+    /// whatever it read.
+    async fn race_model(
+        &self,
+        scope: &ScopeKey,
+        prov: usize,
+        slug: &Slug,
+        kept: &Arc<dyn ChatModel<()>>,
+        patch: ProviderPatch,
+        at: u8,
+    ) -> StepResult {
+        let hold = if usize::from(at) % RACE_POINTS == MODEL_POINTS {
+            Hold::before(Call::Get)
+        } else {
+            Hold::after(Call::Get)
+        }
+        .slot(slot_of(slug));
+        let mut held = self.ports.credentials.hold(hold);
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel::<()>();
+        let send = async {
+            let result = Self::send(kept).await;
+            let _ = sent_tx.send(());
+            result
+        };
+        let edit_meanwhile = async {
+            // A model that refuses before reading its credential never parks.
+            tokio::select! {
+                () = held.reached() => {}
+                _ = sent_rx => {}
+            }
+            let edited = self.hub.edit(scope, slug, patch).await;
+            held.release();
+            edited
+        };
+        let (_, edited) = tokio::join!(send, edit_meanwhile);
+        drop(held);
+        self.use_it(scope, prov, kept).await;
+        match edited {
+            Ok(mutation) => {
+                let mut result = StepResult::ok(format!("{mutation:?}"));
+                result.changed = mutation.status != crate::hub::MutationStatus::Unchanged;
+                result
+            }
+            Err(error) => {
+                let mut result = StepResult::from_error(&error);
+                result.infra = is_infra(&error);
+                result
+            }
+        }
+    }
+
     pub(crate) async fn race_move(&mut self, scope: usize, at: u8, rotate: bool) -> StepResult {
         let Some((prov, target)) = self.other_origin(scope).await else {
             return StepResult::ok(String::from("no movable provider"));
@@ -184,6 +240,11 @@ impl ScenarioRunner {
         let mut patch = ProviderPatch::new().base_url(target.clone());
         if rotate {
             patch = patch.key(self.new_key(&target));
+        }
+        if usize::from(at) % RACE_POINTS >= MODEL_POINTS {
+            return self
+                .race_model(&scope_key, prov, &slug, &kept, patch, at)
+                .await;
         }
         let (on_config, hold) = race_hold(at, &slug.key_slot());
         let mut held = if on_config {
@@ -223,4 +284,8 @@ impl ScenarioRunner {
             }
         }
     }
+}
+
+fn slot_of(slug: &Slug) -> String {
+    slug.key_slot()
 }

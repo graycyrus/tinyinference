@@ -456,3 +456,44 @@ async fn ops_an_origin_move_validated_against_an_endpoint_that_moved_meanwhile_i
         "the other writer's move stands"
     );
 }
+
+#[tokio::test]
+async fn ops_race_a_model_parked_at_its_key_read_never_pairs_the_new_key_with_the_old_origin() {
+    // The mirror of the origin-move race: the kept model has checked the record
+    // (old origin) and is about to read the key while the whole edit runs. The
+    // key it then reads is the new one, for the new origin: it must notice.
+    for after in [false, true] {
+        let (bed, spy) = acme_bed().await;
+        let turn = bed
+            .hub
+            .resolve_for_turn(&bed.scope, &TurnQuery::new())
+            .await
+            .unwrap();
+        let kept = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+        kept.invoke(&(), ModelRequest::default()).await.unwrap();
+        let slot = slug("acme").key_slot();
+        let hold = if after {
+            Hold::after(Call::Get)
+        } else {
+            Hold::before(Call::Get)
+        };
+        let mut held = bed.ports.credentials.hold(hold.slot(&slot));
+        let send = kept.invoke(&(), ModelRequest::default());
+        let edit = async {
+            held.reached().await;
+            bed.hub
+                .edit(&bed.scope, &slug("acme"), move_patch())
+                .await
+                .unwrap();
+            held.release();
+        };
+        let (sent, ()) = tokio::join!(send, edit);
+        drop(held);
+        // Read before the move (after = true) is still the old pair; read after it
+        // is refused. Never the new key at the old origin.
+        if !after {
+            assert!(sent.is_err(), "a stale model refuses instead of sending");
+        }
+        assert_no_cross_origin_credential(&spy, "model parked at its key read");
+    }
+}
