@@ -41,14 +41,6 @@ struct SimModel {
     key: Option<String>,
 }
 
-impl std::fmt::Debug for SimModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SimModel")
-            .field("base", &self.base)
-            .finish_non_exhaustive()
-    }
-}
-
 #[async_trait]
 impl ChatModel<()> for SimModel {
     async fn invoke(&self, _: &(), _: ModelRequest) -> LlmResult<ModelResponse> {
