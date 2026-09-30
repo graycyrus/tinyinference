@@ -914,3 +914,52 @@ async fn client_a_kept_model_fails_closed_after_its_provider_moved_was_disabled_
         .unwrap_err();
     assert!(matches!(error, Error::Provider(_)));
 }
+
+#[tokio::test]
+async fn client_a_signed_out_mark_does_not_outlive_a_sign_in_the_hub_was_not_told_about() {
+    // Finding 4.8: the host signs a user in through its own token source, so no
+    // hub operation bumps the epoch. The health written while signed out must
+    // stop reading "signed out" once a credential answers.
+    let tokens = Arc::new(Rotating {
+        token: Mutex::new(None),
+        invalidated: AtomicUsize::new(0),
+    });
+    let (factory, _fake) = recording(vec![]);
+    let bed = Bed::with(|b| {
+        b.model_factory(factory).managed(
+            ManagedConfig::new("https://api.tinyhumans.test/x").source(TokenSourceAdapter::new(
+                tokens.clone(),
+                CredentialOrigin::SessionJwt,
+            )),
+        )
+    });
+    let turn = crate::route::ResolvedTurn {
+        slug: slug("tinyhumans"),
+        kind: "tinyhumans".into(),
+        group: ProviderGroup::Managed,
+        base_url: "https://api.tinyhumans.test/x".into(),
+        model: Some(model("m")),
+        protocol: Protocol::OpenAiChat,
+        auth: AuthStyle::Bearer,
+        via: crate::route::ResolvedVia::Default,
+        origin: None,
+        temperature: None,
+        cli: None,
+    };
+    let chat = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+    chat.invoke(&(), ModelRequest::default()).await.unwrap_err();
+    let health = |bed: &Bed| {
+        let hub = bed.hub.clone();
+        let scope = bed.scope.clone();
+        async move { hub.health(&scope, &slug("tinyhumans")).await.unwrap() }
+    };
+    assert_eq!(health(&bed).await.health, ProviderHealth::SignedOut);
+    // The user signs in; the hub hears nothing.
+    *tokens.token.lock().unwrap() = Some("jwt".into());
+    let after = health(&bed).await;
+    assert_eq!(after.health, ProviderHealth::Unknown);
+    assert_eq!(after.snapshot.health, ProviderHealth::Unknown);
+    // And signing out again reads signed out again.
+    *tokens.token.lock().unwrap() = None;
+    assert_eq!(health(&bed).await.health, ProviderHealth::SignedOut);
+}

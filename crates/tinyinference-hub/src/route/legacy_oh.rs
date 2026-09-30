@@ -305,18 +305,32 @@ fn finish(key: String, route: ProviderRoute, mut loss: Vec<LossEntry>) -> OhPars
 /// grammar cannot say: a default or managed route with a model, and a named
 /// provider with no model (a bare provider name is OpenHuman's unresolvable
 /// trap, so writing one would not read back as the same route).
+///
+/// Two routes are written in the spelling OpenHuman itself uses, and so do not
+/// read back **identically**; both are deliberate and tested:
+///
+/// * [`RouteTarget::Local(None)`](RouteTarget::Local) ("whichever local runtime
+///   is configured") is written as `ollama[:model]`, which is what OpenHuman's UI
+///   writes for any local runtime and which OpenHuman resolves through
+///   `local_ai.provider`. The grammar has no other way to say it. Read back with
+///   no context it is `Local(Some(Ollama))`; read back with an [`OhContext`] that
+///   names the configured runtime it is that runtime.
+/// * a CLI login's temperature is **not written**: a CLI login takes none
+///   (`parse` drops it with a `Dropped` entry), so the string that reads back to
+///   the same route is the one without it.
 pub fn to_string(route: &ProviderRoute) -> Option<String> {
     let model = route.model.as_ref().map(ModelId::as_str);
-    let with_model = |head: &str| -> String {
+    let write = |head: &str, temperature: Option<Temperature>| -> String {
         let mut out = match model {
             Some(model) => format!("{head}:{model}"),
             None => head.to_string(),
         };
-        if let Some(temperature) = route.temperature {
+        if let Some(temperature) = temperature {
             out.push_str(&format!("@{}", temperature.get()));
         }
         out
     };
+    let with_model = |head: &str| write(head, route.temperature);
     Some(match &route.target {
         RouteTarget::Default => {
             if model.is_some() || route.temperature.is_some() {
@@ -340,7 +354,8 @@ pub fn to_string(route: &ProviderRoute) -> Option<String> {
         }
         RouteTarget::Local(Some(runtime)) => with_model(prefix_of(*runtime)),
         RouteTarget::Local(None) => with_model("ollama"),
-        RouteTarget::Cli(CliKind::ClaudeCode) => with_model("claude-code"),
+        // A CLI login takes no temperature: writing one would read back dropped.
+        RouteTarget::Cli(CliKind::ClaudeCode) => write("claude-code", None),
         // OpenHuman's grammar names one CLI; another would read back as it.
         RouteTarget::Cli(_) => return None,
         RouteTarget::Ephemeral => with_model("ephemeral-route"),

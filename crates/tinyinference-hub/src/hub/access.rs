@@ -170,7 +170,16 @@ impl Hub {
         record: &ProviderRecord,
         key: &KeyState,
     ) -> Result<(ProviderHealth, crate::health::HealthSnapshot), HubError> {
-        let snapshot = self.inner.health.snapshot(scope, &record.slug).await?;
+        let mut snapshot = self.inner.health.snapshot(scope, &record.slug).await?;
+        // A stored "signed out" is a fact about a moment with no credential. The
+        // host signs a user in through its own token source, which the hub is
+        // not told about (no epoch moves), so a mark written just before that
+        // sign-in would otherwise outlive it. A credential is answering now:
+        // whatever the mark said no longer holds, and the next probe or turn
+        // decides (finding 4.8).
+        if snapshot.health == ProviderHealth::SignedOut && matches!(key, KeyState::Configured(_)) {
+            snapshot.health = ProviderHealth::Unknown;
+        }
         let group = self.group_of(record);
         let offline_excluded = !self.inner.policy.allow_public
             && !matches!(group, ProviderGroup::Local | ProviderGroup::Cli);

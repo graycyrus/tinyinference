@@ -493,6 +493,55 @@ fn oh_to_string_says_none_for_what_the_grammar_cannot_say() {
     );
 }
 
+#[test]
+fn oh_the_two_deliberately_inexact_spellings_are_documented_behaviour() {
+    // Finding 4.7. `Local(None)`: written as OpenHuman's own spelling for "the
+    // configured local runtime", read back as Ollama, or as the configured
+    // runtime when the context names one.
+    let any_local = ProviderRoute::new(RouteTarget::Local(None)).with_model(model("llama3"));
+    let written = legacy_oh::to_string(&any_local).unwrap();
+    assert_eq!(written, "ollama:llama3");
+    assert_eq!(
+        legacy_oh::parse(&written, &OhContext::new()).route,
+        Some(
+            ProviderRoute::new(RouteTarget::Local(Some(LocalRuntime::Ollama)))
+                .with_model(model("llama3"))
+        ),
+        "with no context it reads back as Ollama, not as `Local(None)`"
+    );
+    let context = OhContext::new().with_local_ai_runtime(LocalRuntime::Mlx);
+    let parsed = legacy_oh::parse(&written, &context);
+    assert_eq!(
+        parsed.route.unwrap().target,
+        RouteTarget::Local(Some(LocalRuntime::Mlx)),
+        "with the configured runtime it reads back as that runtime"
+    );
+    assert!(
+        parsed.loss.iter().any(|e| e.kind == LossKind::Ambiguous),
+        "and the report says the spelling is ambiguous"
+    );
+
+    // A CLI route with a temperature: the temperature is not written, and the
+    // string reads back as the same route without it, with a `Dropped` note only
+    // when the input had one.
+    let mut cli =
+        ProviderRoute::new(RouteTarget::Cli(CliKind::ClaudeCode)).with_model(model("sonnet"));
+    cli.temperature = Temperature::new(0.5);
+    let written = legacy_oh::to_string(&cli).unwrap();
+    assert_eq!(written, "claude-code:sonnet");
+    let back = legacy_oh::parse(&written, &OhContext::new());
+    cli.temperature = None;
+    assert_eq!(back.route, Some(cli));
+    assert!(back.loss.is_empty(), "{:?}", back.loss);
+    let with_temperature = legacy_oh::parse("claude-code:sonnet@0.5", &OhContext::new());
+    assert!(
+        with_temperature
+            .loss
+            .iter()
+            .any(|e| e.kind == LossKind::Dropped)
+    );
+}
+
 mod route_props {
     use proptest::prelude::*;
 
