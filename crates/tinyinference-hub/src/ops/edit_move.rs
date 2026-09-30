@@ -4,23 +4,29 @@
 //!
 //! The order, under the provider's lock:
 //!
-//! 1. commit the record at the **new** origin and **disabled**, together with
+//! 1. delete the old key from the slot (a failure here aborts with nothing
+//!    changed);
+//! 2. commit the record at the **new** origin and **disabled**, together with
 //!    the rest of the patch;
-//! 2. write the new key;
-//! 3. commit the record's original `enabled` flag back.
+//! 3. write the new key;
+//! 4. commit the record's original `enabled` flag back.
 //!
-//! While the record is disabled nothing can be sent for it (a route to it fails
-//! closed, and a model the host kept refuses with `stale_route`), whatever any
-//! chain source (the stored slot, an environment variable, a keychain) would
-//! answer, so between step 1 and step 3 no credential, old or new, can meet
-//! either origin. Clearing the old slot first would not be enough: the other
-//! sources of the chain would still answer at the new origin in that window.
+//! While the record is disabled nothing is sent for it by a route or a kept
+//! model (`stale_route`), whatever any chain source (the slot, an environment
+//! variable, a keychain) would answer: that is what closes the window between
+//! steps 2 and 4 for the sources the hub does not own. Step 1 closes the other
+//! half: the old key is out of the slot before the record moves, so no failure
+//! afterwards, including a store that stops answering mid-way, can leave the old
+//! key beside the new origin (a state a disabled record does not protect: a
+//! `test` of a disabled provider still sends its credential). Whatever fails,
+//! the slot holds nothing or the new key while the record is at the new origin,
+//! and nothing or the old key while it is at the old one.
 //!
-//! A failure rolls back in the only order that is safe at every instant: empty
-//! the slot (so the new key never meets the old origin, nor the old key the new),
-//! move the record back and re-enable it, then restore the old key. If the
-//! record cannot be moved back it is left **disabled at the new origin with no
-//! key**: unusable, and reported.
+//! An undo runs in the order that keeps that true at every instant: empty the
+//! slot, move the record back and re-enable it, then restore the old key. A step
+//! that cannot run stops the undo there; the record stays **disabled at the new
+//! origin** (unusable) and the error says so. The old key is lost only when the
+//! stores fail twice in a row.
 
 use crate::error::{HubError, NotFound};
 use crate::hub::Hub;
@@ -39,7 +45,8 @@ pub(super) struct MovePlan<'a> {
     pub(super) key: &'a Secret,
     /// The record's `enabled` flag before the move, restored at the end.
     pub(super) was_enabled: bool,
-    /// What the slot held before, put back if the move is undone.
+    /// What the slot held before (it is deleted first, and put back if the move
+    /// is undone).
     pub(super) previous: Option<Secret>,
 }
 
@@ -57,6 +64,11 @@ impl Hub {
         slug: &Slug,
         plan: MovePlan<'_>,
     ) -> Result<bool, HubError> {
+        // 1. The old key leaves the slot before anything else moves.
+        if plan.previous.is_some() {
+            self.delete_slot(scope, slug).await?;
+        }
+        // 2. The record moves, disabled.
         let committed = self
             .transact(scope, |config| {
                 let record = config
@@ -78,8 +90,23 @@ impl Hub {
                 record.enabled = false;
                 Ok(())
             })
-            .await?;
+            .await;
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                // Nothing moved: the old key goes back, unless the provider is
+                // gone (its key went with it).
+                if !matches!(error, HubError::NotFound(_))
+                    && let Err(restore) =
+                        self.restore_slot(scope, slug, plan.previous.clone()).await
+                {
+                    tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                }
+                return Err(error);
+            }
+        };
 
+        // 3. The new key, for the new origin.
         if let Err(error) = self.write_slot(scope, slug, plan.key.clone()).await {
             self.undo_move(scope, slug, &plan).await;
             return Err(error);
@@ -108,9 +135,10 @@ impl Hub {
     /// at every instant (see the module docs). Best effort; each step's failure
     /// is logged and never replaces the reason the move failed.
     async fn undo_move(&self, scope: &ScopeKey, slug: &Slug, plan: &MovePlan<'_>) {
-        // The slot may now hold the new key (a write that committed and then
-        // timed out) or still the old one; either would meet the wrong origin
-        // once the record is switched back on, so it goes first.
+        // The slot may hold the new key (a write that committed and then timed
+        // out), which would meet the old origin once the record is switched back
+        // on, so it goes first. If it cannot be emptied the record stays at the
+        // new origin, where whatever is in the slot is the new key or nothing.
         if let Err(error) = self.delete_slot(scope, slug).await {
             tracing::warn!(%slug, reason = %error.reason(), "could not empty the key slot; the provider stays disabled at the new endpoint");
             self.forget_health(scope, slug).await;

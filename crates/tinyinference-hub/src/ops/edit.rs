@@ -133,6 +133,7 @@ impl Hub {
             None => None,
         };
         if let (Some(key), Some(target), true) = (&key, base_url.as_deref(), move_with_key) {
+            // (The slot's old key is deleted by the move itself, first.)
             let plan = MovePlan {
                 label: label.as_deref(),
                 model: model.as_ref(),

@@ -12,3 +12,9 @@
 # 401 whose older list the cache serves stale by design; the runner had wrongly
 # expected an error there (an oracle bug, fixed in invariant 4).
 1592594454 flaky
+
+# Found by run 4 (round 1 fix): a race edit that lost its key write to a credential
+# outage and could not empty the slot either left the OLD key beside the NEW
+# origin on a disabled record, which `test` still sends. Fixed by deleting the old
+# key first (edit_move.rs).
+1592594484 flaky

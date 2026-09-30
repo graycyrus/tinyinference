@@ -546,3 +546,89 @@ async fn ops_race_a_key_clear_that_waited_for_a_removal_reports_the_provider_gon
     removed.unwrap();
     assert!(matches!(cleared, Err(HubError::NotFound(_))), "{cleared:?}");
 }
+
+#[tokio::test]
+async fn ops_an_origin_move_whose_old_key_cannot_be_deleted_changes_nothing() {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _fault = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Delete).slot(&slot).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_OLD.into())));
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &TurnQuery::new())
+        .await
+        .unwrap();
+    assert_eq!(turn.base_url, OLD, "still enabled and usable");
+}
+
+#[tokio::test]
+async fn ops_an_origin_move_that_loses_both_the_key_write_and_the_slot_cleanup_never_leaves_the_old_key_at_the_new_origin()
+ {
+    // Seed 1592594484 (flaky): the credential store stopped answering writes
+    // mid-move, so the new key could not be written and the slot could not be
+    // emptied either. The old key was already out of the slot (deleted first), so
+    // the disabled record at the new origin has nothing to send; `test` of a
+    // disabled provider still sends a credential, so it is checked too.
+    let (bed, spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _write = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    // Delete #0 is the move's first step; #1 is the undo's.
+    let _cleanup = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Delete).slot(&slot).skip(1).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    let (base, key) = state_of(&bed).await;
+    assert_eq!((base.as_str(), key), (NEW, None));
+    let record_enabled = bed
+        .hub
+        .status(&bed.scope)
+        .await
+        .unwrap()
+        .providers
+        .iter()
+        .find(|p| p.view.record.slug == slug("acme"))
+        .unwrap()
+        .view
+        .record
+        .enabled;
+    assert!(!record_enabled, "left disabled");
+    bed.ports.http.route(
+        crate::testkit::Match::prefix(NEW),
+        crate::testkit::Scripted::json(200, &crate::hub::fixtures::models_body(&["m"])),
+    );
+    bed.hub
+        .test(
+            &bed.scope,
+            &slug("acme"),
+            crate::taxonomy::TestDepth::Catalog,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        bed.ports.http.request_count() > 0,
+        "the test of the disabled provider did send a request"
+    );
+    for request in bed.ports.http.requests_from(0) {
+        assert!(
+            !request.carried(&Secret::new(K_OLD)),
+            "the old key was sent to {}",
+            request.url
+        );
+    }
+    assert_no_cross_origin_credential(&spy, "double failure");
+}
