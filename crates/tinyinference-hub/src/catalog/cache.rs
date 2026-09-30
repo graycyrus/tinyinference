@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::endpoint::redact_endpoint;
-use crate::error::{HubError, ProviderFailure, ReasonCode};
+use crate::error::{HubError, ProviderFailure};
 use crate::ids::{ScopeKey, Slug};
 use crate::ports::Clock;
 use crate::secret::SecretId;
@@ -287,7 +287,7 @@ impl Slot {
 /// `auth`). Reported, shared with callers already queued, never remembered, and
 /// the list read with that key is dropped.
 fn is_rejection(failure: &ProviderFailure) -> bool {
-    failure.reason == ReasonCode::Auth || failure.status == Some(401)
+    failure.is_rejection()
 }
 
 /// A `403` that is not a rejection (the classifier has no bare-403 rule: a WAF,

@@ -21,7 +21,7 @@ use crate::config::ProviderDraft;
 use crate::error::HubError;
 use crate::hub::fixtures::{Bed, model, slug};
 use crate::hub::{Confirm, ConnectOptions, Hub, ProviderPatch};
-use crate::ids::ScopeKey;
+use crate::ids::{ModelId, ScopeKey};
 use crate::ports::memory::{Call, Hold};
 use crate::route::TurnQuery;
 use crate::secret::Secret;
@@ -877,4 +877,147 @@ async fn ops_a_move_that_cannot_switch_the_provider_on_still_announces_the_chang
             .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { .. })),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn ops_an_add_whose_provider_another_writer_moved_before_its_key_landed_stores_no_key() {
+    // Round 3: the id still matched, so the add wrote a key entered for the
+    // endpoint it was added at over the provider another writer had just moved.
+    let bed = Bed::new();
+    let draft = ProviderDraft::new("custom")
+        .with_label("Acme")
+        .with_base_url(OLD)
+        .with_key(Secret::new(K_OLD))
+        .with_model(model("m"));
+    let acme = slug("acme");
+    let mut held = bed.ports.config.hold(Hold::after(Call::Save));
+    let add = bed.hub.add(&bed.scope, draft);
+    let mover = async {
+        held.reached().await;
+        bed.hub
+            .edit(&bed.scope, &acme, ProviderPatch::new().base_url(NEW))
+            .await
+            .unwrap();
+        held.release();
+    };
+    let (added, ()) = tokio::join!(add, mover);
+    assert!(matches!(added, Err(HubError::Conflict)), "{added:?}");
+    assert_eq!(state_of(&bed).await, (NEW.to_string(), None));
+}
+
+#[tokio::test]
+async fn ops_a_connect_whose_provider_was_edited_before_its_check_is_not_undone() {
+    // Round 3: connect treated the Conflict as its own failure and undid the add,
+    // deleting the edit another writer had just made.
+    let bed = Bed::new();
+    let draft = ProviderDraft::new("custom")
+        .with_label("Acme")
+        .with_base_url(OLD)
+        .with_key(Secret::new(K_OLD))
+        .with_model(model("m"));
+    let acme = slug("acme");
+    // The last thing the add does, after its lock is released.
+    let mut held = bed.ports.health.hold(Hold::before(Call::Forget));
+    let connect = bed
+        .hub
+        .connect(&bed.scope, draft, ConnectOptions::default());
+    // The parked `forget` holds the health tracker's lock for this provider, so the
+    // edit runs as far as its own `forget` (its record, key and flag are all
+    // committed by then) and is finished after the connect is released.
+    let mut edit = std::pin::pin!(bed.hub.edit(&bed.scope, &acme, move_patch()));
+    let mover = async {
+        held.reached().await;
+        assert!(futures::poll!(edit.as_mut()).is_pending());
+        held.release();
+    };
+    let (connected, ()) = tokio::join!(connect, mover);
+    edit.await.unwrap();
+    assert!(
+        matches!(connected, Err(HubError::Conflict)),
+        "{connected:?}"
+    );
+    assert_eq!(state_of(&bed).await, (NEW.to_string(), Some(K_NEW.into())));
+    assert_eq!(bed.ports.http.request_count(), 0, "nothing was sent");
+}
+
+#[tokio::test]
+async fn ops_a_probe_of_a_provider_removed_while_it_waited_reports_not_found() {
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+    let test = bed
+        .hub
+        .test(&bed.scope, &acme, crate::taxonomy::TestDepth::Catalog, None);
+    let removal = async {
+        held.reached().await;
+        bed.hub
+            .remove(&bed.scope, &acme, Confirm::in_use())
+            .await
+            .unwrap();
+        held.release();
+    };
+    let (tested, ()) = tokio::join!(test, removal);
+    assert!(matches!(tested, Err(HubError::NotFound(_))), "{tested:?}");
+}
+
+#[tokio::test]
+async fn ops_a_removal_that_waited_while_the_slug_was_re_added_does_not_delete_the_new_provider() {
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    // The removal parks holding its lock; a second removal + add of the slug must
+    // wait; the first removal then finds ITS provider gone. Stage the opposite: a
+    // removal that read the record, then loses the lock to a remove+add.
+    let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+    let stale_removal = bed.hub.remove(&bed.scope, &acme, Confirm::in_use());
+    let replacement = async {
+        held.reached().await;
+        bed.hub
+            .remove(&bed.scope, &acme, Confirm::in_use())
+            .await
+            .unwrap();
+        bed.hub
+            .add(
+                &bed.scope,
+                ProviderDraft::new("custom")
+                    .with_label("Acme")
+                    .with_base_url(OLD)
+                    .with_key(Secret::new(K_NEW))
+                    .with_model(model("m")),
+            )
+            .await
+            .unwrap();
+        held.release();
+    };
+    let (removed, ()) = tokio::join!(stale_removal, replacement);
+    assert!(matches!(removed, Err(HubError::Conflict)), "{removed:?}");
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_NEW.into())));
+}
+
+#[tokio::test]
+async fn ops_an_undone_origin_move_puts_the_label_and_model_back_too() {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _fault = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot).fail());
+    bed.hub
+        .edit(
+            &bed.scope,
+            &slug("acme"),
+            move_patch().label("Renamed").model(model("other")),
+        )
+        .await
+        .unwrap_err();
+    let status = bed.hub.status(&bed.scope).await.unwrap();
+    let record = &status
+        .providers
+        .iter()
+        .find(|p| p.view.record.slug == slug("acme"))
+        .unwrap()
+        .view
+        .record;
+    assert_eq!(record.label, "Acme");
+    assert_eq!(record.model.as_ref().map(ModelId::as_str), Some("m"));
+    assert_eq!(record.base_url, OLD);
 }

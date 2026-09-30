@@ -286,6 +286,7 @@ impl ConfigStore for MemoryConfig {
 pub struct MemoryHealth {
     map: Mutex<HashMap<(ScopeKey, Slug), HealthSnapshot>>,
     unavailable: AtomicBool,
+    interleave: Interleave,
 }
 
 impl MemoryHealth {
@@ -297,6 +298,13 @@ impl MemoryHealth {
     /// While `true`, every call fails as an outage.
     pub fn set_unavailable(&self, unavailable: bool) {
         self.unavailable.store(unavailable, Ordering::SeqCst);
+    }
+
+    /// Parks (or fails) the matching `forget` call, the one every credential or
+    /// endpoint change ends with: it runs after the change is committed and after
+    /// the provider's lock is released, so a test can act in that gap.
+    pub fn hold(&self, hold: Hold) -> Held {
+        self.interleave.hold(hold)
     }
 
     fn check(&self) -> Result<(), PortError> {
@@ -339,8 +347,14 @@ impl HealthStore for MemoryHealth {
     }
 
     async fn forget(&self, scope: &ScopeKey, slug: &Slug) -> Result<(), PortError> {
+        self.interleave
+            .point(Call::Forget, Phase::Before, None)
+            .await?;
         self.check()?;
         lock(&self.map).remove(&(scope.clone(), slug.clone()));
+        self.interleave
+            .point(Call::Forget, Phase::After, None)
+            .await?;
         Ok(())
     }
 }

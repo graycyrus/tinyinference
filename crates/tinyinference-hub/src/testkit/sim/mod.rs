@@ -153,6 +153,30 @@ pub struct ScenarioRunner {
     pub(crate) requests_before: usize,
     pub(crate) refused_seen: usize,
     pub(crate) infra_faults_this_step: bool,
+    /// What the race actions actually did, so a test can say they were not
+    /// vacuous.
+    pub(crate) races: RaceStats,
+}
+
+/// Counters for [`ScenarioRunner`]'s race actions.
+#[derive(Debug, Default)]
+pub(crate) struct RaceStats {
+    /// Races started (a movable provider existed and was enabled).
+    pub(crate) attempted: std::sync::atomic::AtomicUsize,
+    /// Races in which the parked call was actually reached.
+    pub(crate) parked: std::sync::atomic::AtomicUsize,
+    /// Races whose edit succeeded and changed the record.
+    pub(crate) moved: std::sync::atomic::AtomicUsize,
+}
+
+impl RaceStats {
+    pub(crate) fn bump(counter: &std::sync::atomic::AtomicUsize) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn get(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl fmt::Debug for ScenarioRunner {
@@ -221,6 +245,7 @@ impl ScenarioRunner {
             requests_before: 0,
             refused_seen: 0,
             infra_faults_this_step: false,
+            races: RaceStats::default(),
         };
         runner.reinstall();
         runner

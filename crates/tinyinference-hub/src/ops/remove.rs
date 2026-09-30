@@ -46,8 +46,9 @@ impl Hub {
     /// # Errors
     ///
     /// [`HubError::NotFound`]; [`HubError::Unsupported`] for the managed
-    /// provider and the read-only entry-zero record; [`HubError::InUse`]; and the
-    /// stores' errors.
+    /// provider and the read-only entry-zero record; [`HubError::InUse`];
+    /// [`HubError::Conflict`] when the provider was removed and added again while
+    /// this waited (it decided about another provider); and the stores' errors.
     pub async fn remove(
         &self,
         scope: &ScopeKey,
@@ -78,6 +79,16 @@ impl Hub {
         // other key operation on this provider (a concurrent add of the slug
         // must not find the slot half-cleared, nor a key write land in it).
         let _guard = self.slot_lock(scope, slug).await;
+        // What was read before the lock may have been replaced while this waited
+        // for it (a removal and a new add of the slug): this call decided about
+        // one provider and must not delete another. The hub-owned references are
+        // re-checked by the transaction below.
+        let now = self.read_config(scope).await?;
+        match now.provider(slug) {
+            None => return Err(HubError::NotFound(NotFound::Provider(slug.clone()))),
+            Some(current) if current.id != record.id => return Err(HubError::Conflict),
+            Some(_) => {}
+        }
         let previous = self.read_slot(scope, slug).await?;
         if previous.is_some() {
             self.delete_slot(scope, slug).await?;

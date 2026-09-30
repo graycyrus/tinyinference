@@ -226,8 +226,12 @@ impl Hub {
     /// [`HubError::NotFound`] for an unknown kind, [`HubError::Unsupported`] for
     /// a CLI, OAuth or managed kind, [`HubError::Invalid`] and
     /// [`HubError::Policy`] for a draft that fails validation,
-    /// [`HubError::AlreadyExists`] for a taken slug, and
-    /// [`HubError::StoreUnreadable`] or [`HubError::Conflict`] from the stores.
+    /// [`HubError::AlreadyExists`] for a taken slug,
+    /// [`HubError::StoreUnreadable`] or [`HubError::Conflict`] from the stores,
+    /// [`HubError::NotFound`] when another writer removed the provider before its
+    /// key could be stored, and [`HubError::Conflict`] when another writer moved
+    /// its endpoint first (the key, entered for the endpoint it was added at, is
+    /// not stored; the record stays as they left it).
     pub async fn add(&self, scope: &ScopeKey, draft: ProviderDraft) -> Result<Mutation, HubError> {
         let plan = self.plan_add(Operation::Add, &draft)?;
         let added = self.save_new(scope, &plan, false).await?;
@@ -281,8 +285,8 @@ impl Hub {
             // record and its key: this add would then write its key over the second
             // add's and, finding its record gone, delete the slot (finding 4.6).
             let guard = self.slot_lock(scope, &plan.slug).await;
-            let ours = match self.read_config(scope).await {
-                Ok(config) => config.providers.iter().any(|p| p.id == added.record.id),
+            let ownership = match self.read_config(scope).await {
+                Ok(config) => Ownership::of(&config, &added.record),
                 Err(error) => {
                     // The add is half done and cannot be confirmed: undo it,
                     // and report why.
@@ -291,12 +295,19 @@ impl Hub {
                     return Err(error);
                 }
             };
-            if !ours {
+            match ownership {
+                Ownership::Ours => {}
                 // Somebody removed the provider meanwhile: the slot is not ours
                 // to write or to delete.
-                return Err(HubError::NotFound(crate::error::NotFound::Provider(
-                    plan.slug.clone(),
-                )));
+                Ownership::Gone => {
+                    return Err(HubError::NotFound(crate::error::NotFound::Provider(
+                        plan.slug.clone(),
+                    )));
+                }
+                // Somebody moved it to another endpoint meanwhile: this key was
+                // entered for the one it was added at, so it is not stored. The
+                // record is theirs now and stays as they left it.
+                Ownership::Moved => return Err(HubError::Conflict),
             }
             // What to put back if this add is undone: read under the lock, so it
             // is the slot as this add found it, not as it was before a removal.
@@ -320,19 +331,20 @@ impl Hub {
             // over the same store, which the lock does not order: the key just
             // written would belong to nothing, and to whoever adds that slug next.
             // (Under the lock, so it deletes only what this add wrote.)
-            let still_ours = match self.read_config(scope).await {
-                Ok(config) => config.providers.iter().any(|p| p.id == added.record.id),
+            let still = match self.read_config(scope).await {
+                Ok(config) => Ownership::of(&config, &added.record),
                 Err(error) => {
                     drop(guard);
                     self.undo_add(scope, &added).await;
                     return Err(error);
                 }
             };
-            if !still_ours {
+            if still != Ownership::Ours {
                 self.delete_slot(scope, &plan.slug).await.ok();
-                return Err(HubError::NotFound(crate::error::NotFound::Provider(
-                    plan.slug.clone(),
-                )));
+                return Err(match still {
+                    Ownership::Moved => HubError::Conflict,
+                    _ => HubError::NotFound(crate::error::NotFound::Provider(plan.slug.clone())),
+                });
             }
             drop(guard);
             self.after_key_change(scope, &plan.slug, true).await;
@@ -359,7 +371,9 @@ impl Hub {
     ///
     /// Everything [`Hub::add`] returns, plus the provider's failure
     /// ([`HubError::Provider`], or [`HubError::Policy`] for a refused endpoint)
-    /// when the add was undone.
+    /// when the add was undone. [`HubError::NotFound`] or [`HubError::Conflict`]
+    /// when another writer removed or edited the provider between the add and the
+    /// check: what is there is theirs, so it is neither undone nor checked.
     pub async fn connect(
         &self,
         scope: &ScopeKey,
@@ -387,6 +401,10 @@ impl Hub {
         // saved unchecked.
         let credential = match self.credential_checked(scope, &record).await {
             Ok(credential) => credential,
+            // Somebody else removed or edited the provider between this connect's
+            // commit and its check: what is there now is theirs, so it is not
+            // undone (that would delete their edit), and the check is not made.
+            Err(error @ (HubError::Conflict | HubError::NotFound(_))) => return Err(error),
             Err(error) => {
                 self.undo_add(scope, &added).await;
                 return Err(error);
@@ -529,6 +547,27 @@ impl Hub {
                 scope: scope.clone(),
                 slug,
             });
+        }
+    }
+}
+
+/// Whether an add's record is still the one it committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ownership {
+    /// The record is there, at the endpoint it was added at.
+    Ours,
+    /// The record is there at another endpoint (somebody edited it).
+    Moved,
+    /// The record is gone.
+    Gone,
+}
+
+impl Ownership {
+    fn of(config: &HubConfig, added: &ProviderRecord) -> Self {
+        match config.providers.iter().find(|p| p.id == added.id) {
+            None => Self::Gone,
+            Some(now) if now.base_url != added.base_url => Self::Moved,
+            Some(_) => Self::Ours,
         }
     }
 }

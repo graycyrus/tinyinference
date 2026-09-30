@@ -62,6 +62,8 @@ pub enum Call {
     Load,
     /// `ConfigStore::save`.
     Save,
+    /// `HealthStore::forget`.
+    Forget,
 }
 
 /// Where in a call it is held.

@@ -11,7 +11,7 @@ use tinyinference_llm::model::{
 };
 
 use crate::credential::CredentialOrigin;
-use crate::error::{HubError, ProviderFailure, ReasonCode};
+use crate::error::{HubError, ProviderFailure};
 use crate::health::Outcome;
 use crate::hub::Hub;
 use crate::ids::ScopeKey;
@@ -219,7 +219,7 @@ impl HubModel {
             return;
         };
         let current = self.hub.inner.health.epoch(&self.scope, &self.turn.slug) == epoch;
-        if (failure.reason == ReasonCode::Auth || failure.status == Some(401)) && current {
+        if failure.is_rejection() && current {
             // The source that supplied the credential this request used, not
             // whatever answers now: a stale rejection must not refresh a token
             // that has since been rotated.

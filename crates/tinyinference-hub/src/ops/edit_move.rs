@@ -41,6 +41,11 @@ use crate::secret::Secret;
 pub(super) struct MovePlan<'a> {
     pub(super) label: Option<&'a str>,
     pub(super) model: Option<&'a crate::ids::ModelId>,
+    /// The label and model the record had, put back by an undo (the patch's own
+    /// label and model are committed with the move, so an undone edit must not
+    /// keep them).
+    pub(super) was_label: &'a str,
+    pub(super) was_model: Option<&'a crate::ids::ModelId>,
     /// The endpoint being moved to.
     pub(super) target: &'a str,
     /// The endpoint the move was validated against (G3 is re-checked against it
@@ -162,18 +167,24 @@ impl Hub {
             // was learned about the old ones, cached for them or announced about
             // them is stale). Switching it on is then `set_enabled`.
             tracing::warn!(%slug, reason = %error.reason(), "the provider was moved and its key saved but it could not be switched back on");
-            self.after_key_change(scope, slug, true).await;
-            self.inner.cache.evict_scope(scope);
-            self.forget_health(scope, slug).await;
-            self.inner
-                .events
-                .emit(crate::ports::HubEvent::ProviderEdited {
-                    scope: scope.clone(),
-                    slug: slug.clone(),
-                });
+            self.announce_move(scope, slug).await;
             return Err(error);
         }
         Ok(changed)
+    }
+
+    /// What a move that changed the record and could not finish tells the rest of
+    /// the system: the endpoint and key really changed, so what was learned,
+    /// cached or announced about the old ones is stale (health, catalogs, and the
+    /// `KeyChanged` and `ProviderEdited` events a host mirrors state from).
+    async fn announce_move(&self, scope: &ScopeKey, slug: &Slug) {
+        self.after_key_change(scope, slug, true).await;
+        self.inner
+            .events
+            .emit(crate::ports::HubEvent::ProviderEdited {
+                scope: scope.clone(),
+                slug: slug.clone(),
+            });
     }
 
     /// Whether the record is at `target` now: `None` when the store cannot say.
@@ -192,8 +203,7 @@ impl Hub {
         // new origin, where whatever is in the slot is the new key or nothing.
         if let Err(error) = self.delete_slot(scope, slug).await {
             tracing::warn!(%slug, reason = %error.reason(), "could not empty the key slot; the provider stays disabled at the new endpoint");
-            self.forget_health(scope, slug).await;
-            self.inner.cache.evict_scope(scope);
+            self.announce_move(scope, slug).await;
             return;
         }
         let back = self
@@ -203,18 +213,21 @@ impl Hub {
                 {
                     record.base_url = plan.validated_base.to_string();
                     record.enabled = plan.was_enabled;
+                    record.label = plan.was_label.to_string();
+                    record.model = plan.was_model.cloned();
                 }
                 Ok(())
             })
             .await;
         if let Err(error) = back {
             tracing::warn!(%slug, reason = %error.reason(), "could not move the endpoint back; the provider stays disabled at the new endpoint with no key");
-            self.forget_health(scope, slug).await;
-            self.inner.cache.evict_scope(scope);
+            self.announce_move(scope, slug).await;
             return;
         }
         if let Err(error) = self.restore_slot(scope, slug, plan.previous.clone()).await {
             tracing::warn!(%slug, reason = %error.reason(), "could not restore the previous key");
+            // The endpoint is back but the key it had is not: say the key changed.
+            self.after_key_change(scope, slug, false).await;
         }
     }
 }

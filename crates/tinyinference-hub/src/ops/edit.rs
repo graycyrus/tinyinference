@@ -137,6 +137,8 @@ impl Hub {
             let plan = MovePlan {
                 label: label.as_deref(),
                 model: model.as_ref(),
+                was_label: &record.label,
+                was_model: record.model.as_ref(),
                 target,
                 validated_base: &record.base_url,
                 key,
@@ -144,6 +146,7 @@ impl Hub {
                 previous: previous.clone().flatten(),
             };
             let changed = self.move_origin_with_key(scope, slug, plan).await?;
+            drop(slot_guard);
             return self
                 .finish_edit(scope, slug, &record, &base_url, true, changed)
                 .await;

@@ -129,7 +129,10 @@ impl Hub {
     ///
     /// [`HubError::NotFound`], [`HubError::Unsupported`] for a depth the kind
     /// does not offer, [`HubError::SignedOut`] for a managed provider with no
-    /// credential, [`HubError::Invalid`] for a missing key or model, and
+    /// credential, [`HubError::Invalid`] for a missing key or model,
+    /// [`HubError::Conflict`] when another writer moved the provider's endpoint
+    /// while this waited to resolve its credential (retry: the credential is never
+    /// paired with an endpoint it was not entered for), and
     /// [`HubError::StoreUnreadable`].
     pub async fn test(
         &self,
@@ -161,7 +164,9 @@ impl Hub {
     ///
     /// [`HubError::NotFound`], [`HubError::SignedOut`], [`HubError::Unsupported`]
     /// (a CLI has no listing), [`HubError::Policy`] for an endpoint the policy
-    /// refuses, [`HubError::Provider`] with the classified failure, and
+    /// refuses, [`HubError::Provider`] with the classified failure,
+    /// [`HubError::Conflict`] when another writer moved the provider's endpoint
+    /// while this waited to resolve its credential (retry), and
     /// [`HubError::StoreUnreadable`].
     pub async fn list_models(
         &self,
@@ -361,7 +366,7 @@ impl Hub {
             .record_outcome(scope, slug, &outcome)
             .await?;
         if let Outcome::Failed(failure) = &outcome
-            && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
+            && failure.is_rejection()
             && let Ok(credential) = self.credential(scope, record).await
         {
             self.note_rejection_unattributed(scope, &record.kind, &credential, failure);

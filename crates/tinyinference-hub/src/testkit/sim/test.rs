@@ -734,6 +734,16 @@ async fn sim_origin_moves_kept_models_and_races_by_hand() {
             .unwrap_or_else(|f| panic!("at {at}: {f}"));
         }
     }
+    // The races were not vacuous: every one with a key entered for the move
+    // (half of them) parked at the store call it named and moved the record.
+    // (Points 14 and 15 park the kept model instead, at its credential read.)
+    use crate::testkit::sim::RaceStats;
+    let attempted = RaceStats::get(&r.races.attempted);
+    let parked = RaceStats::get(&r.races.parked);
+    let moved = RaceStats::get(&r.races.moved);
+    assert_eq!(attempted, 32, "every race found a provider to move");
+    assert!(parked >= 16, "the parked call was reached: {parked}");
+    assert!(moved >= 16, "the edit went through: {moved}");
     // Nothing kept, or no provider to move, is a quiet no-op.
     let mut empty = runner();
     empty.step(Action::UseKept { scope: 1 }).await.unwrap();

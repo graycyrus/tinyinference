@@ -122,3 +122,23 @@ async fn interleave_a_slot_filter_does_not_apply_to_a_config_call() {
     assert!(config.load(&scope).await.is_err());
     assert!(config.load(&scope).await.is_ok());
 }
+
+#[tokio::test]
+async fn interleave_a_health_forget_can_be_held_and_failed() {
+    use crate::ids::Slug;
+    use crate::ports::HealthStore;
+    use crate::ports::memory::MemoryHealth;
+    let health = MemoryHealth::new();
+    let scope = scope();
+    let slug = Slug::parse("acme").unwrap();
+    let mut held = health.hold(Hold::before(Call::Forget));
+    let forget = health.forget(&scope, &slug);
+    let look = async {
+        held.reached().await;
+        held.release();
+    };
+    let (done, ()) = tokio::join!(forget, look);
+    done.unwrap();
+    let _fault = health.hold(Hold::after(Call::Forget).fail());
+    assert!(health.forget(&scope, &slug).await.is_err());
+}

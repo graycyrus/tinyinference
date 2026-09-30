@@ -7,7 +7,7 @@ use crate::catalogue;
 use crate::config::HubConfig;
 use crate::credential::{CredentialChain, CredentialOrigin};
 use crate::descriptor::{ProviderDescriptor, ProviderRecord};
-use crate::error::{HubError, NotFound, ProviderFailure, ReasonCode, UsedBy};
+use crate::error::{HubError, NotFound, ProviderFailure, UsedBy};
 use crate::health::ProviderHealth;
 use crate::ids::{KindId, ScopeKey, Slug};
 use crate::kinds::{DriverContext, KindDriver};
@@ -133,29 +133,37 @@ impl Hub {
     /// An endpoint move holds the same lock across every step, so a credential
     /// resolved here is one the record's endpoint, as of now, was entered for: a
     /// probe or a listing that read the record just before a move cannot pair it
-    /// with the key the move writes. The managed provider's endpoint is the
-    /// host's and cannot move, so it skips the extra read.
+    /// with the key the move writes, nor read mid-move state. Only a kind whose
+    /// endpoint can be edited can move, so the others (the catalogue's clouds, the
+    /// managed provider, whose endpoint is the host's) skip the lock and the
+    /// extra read. The lock is held across one credential-chain read, so a source
+    /// must not call back into the hub from `resolve`.
     ///
     /// # Errors
     ///
-    /// [`HubError::Conflict`] when the record's endpoint changed (or the record
-    /// went) since the caller read it: retry against the new one. Otherwise as
+    /// [`HubError::NotFound`] when the provider went while the caller was
+    /// waiting; [`HubError::Conflict`] when its endpoint changed since the caller
+    /// read the record (retry against the new one). Otherwise as
     /// [`Hub::credential`].
     pub(crate) async fn credential_checked(
         &self,
         scope: &ScopeKey,
         record: &ProviderRecord,
     ) -> Result<Credential, HubError> {
-        if self.group_of(record) == ProviderGroup::Managed {
+        let movable = self
+            .inner
+            .registry
+            .get(&record.kind)
+            .is_some_and(|driver| driver.descriptor().endpoint_editable);
+        if !movable || self.group_of(record) == ProviderGroup::Managed {
             return self.credential(scope, record).await;
         }
         let _guard = self.slot_lock(scope, &record.slug).await;
-        let unchanged = self
-            .read_config(scope)
-            .await?
+        let config = self.read_config(scope).await?;
+        let now = config
             .provider(&record.slug)
-            .is_some_and(|now| now.base_url == record.base_url);
-        if !unchanged {
+            .ok_or_else(|| HubError::NotFound(NotFound::Provider(record.slug.clone())))?;
+        if now.base_url != record.base_url {
             return Err(HubError::Conflict);
         }
         self.credential(scope, record).await
@@ -271,7 +279,9 @@ impl Hub {
     }
 
     /// A rejected credential: tell the source that supplied it so a host that
-    /// caches (a rotating token) refreshes instead of replaying it.
+    /// caches (a rotating token) refreshes instead of replaying it, naming the
+    /// credential that was rejected so a source that has already rotated keeps its
+    /// fresh one.
     pub(crate) fn note_rejection(
         &self,
         scope: &ScopeKey,
@@ -280,17 +290,11 @@ impl Hub {
         failure: &ProviderFailure,
     ) {
         if let Some(origin) = credential.origin.as_ref()
-            && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
+            && let Some(key) = credential.key.as_ref()
+            && failure.is_rejection()
         {
-            match credential.key.as_ref() {
-                // Name the token that was rejected: a source that rotated since
-                // keeps its fresh one.
-                Some(key) => {
-                    self.chain_for(kind)
-                        .invalidate_origin_rejected(scope, origin, key.id())
-                }
-                None => self.chain_for(kind).invalidate_origin(scope, origin),
-            }
+            self.chain_for(kind)
+                .invalidate_origin_rejected(scope, origin, key.id());
         }
     }
 
@@ -306,7 +310,7 @@ impl Hub {
         failure: &ProviderFailure,
     ) {
         if let Some(origin) = credential.origin.as_ref()
-            && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
+            && failure.is_rejection()
         {
             self.chain_for(kind).invalidate_origin(scope, origin);
         }

@@ -7,7 +7,7 @@ use tinyinference_llm::model::{ChatModel, ModelRequest};
 
 use super::action::StepResult;
 use super::world::WORLD;
-use super::{ScenarioRunner, is_infra};
+use super::{RaceStats, ScenarioRunner, is_infra};
 use crate::hub::ProviderPatch;
 use crate::ids::{ModelId, ScopeKey, Slug};
 use crate::policy::same_origin;
@@ -206,7 +206,9 @@ impl ScenarioRunner {
         let edit_meanwhile = async {
             // A model that refuses before reading its credential never parks.
             tokio::select! {
-                () = held.reached() => {}
+                () = held.reached() => {
+                    RaceStats::bump(&self.races.parked);
+                }
                 _ = sent_rx => {
                     // The hold was never reached; the edit's own credential reads
                     // must not be parked by it.
@@ -224,6 +226,9 @@ impl ScenarioRunner {
             Ok(mutation) => {
                 let mut result = StepResult::ok(format!("{mutation:?}"));
                 result.changed = mutation.status != crate::hub::MutationStatus::Unchanged;
+                if result.changed {
+                    RaceStats::bump(&self.races.moved);
+                }
                 result
             }
             Err(error) => {
@@ -259,6 +264,7 @@ impl ScenarioRunner {
         };
         // The host has used it once before the edit.
         let _ = Self::send(&kept).await;
+        RaceStats::bump(&self.races.attempted);
 
         let mut patch = ProviderPatch::new().base_url(target.clone());
         if rotate {
@@ -284,6 +290,7 @@ impl ScenarioRunner {
         let others = async {
             tokio::select! {
                 () = held.reached() => {
+                    RaceStats::bump(&self.races.parked);
                     self.use_models(&scope_key, prov, &kept).await;
                     // A probe and a listing wait for the parked edit's lock:
                     // start them, let them queue, then let the edit go.
@@ -309,6 +316,9 @@ impl ScenarioRunner {
             Ok(mutation) => {
                 let mut result = StepResult::ok(format!("{mutation:?}"));
                 result.changed = mutation.status != crate::hub::MutationStatus::Unchanged;
+                if result.changed {
+                    RaceStats::bump(&self.races.moved);
+                }
                 result
             }
             Err(error) => {

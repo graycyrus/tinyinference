@@ -497,6 +497,14 @@ pub struct ProviderFailure {
 }
 
 impl ProviderFailure {
+    /// Whether the provider **rejected the credential** it was shown (`401`, or
+    /// classified `auth`): a fact about that credential, which a source that
+    /// rotates its own is told about. One definition, so the cache, the health
+    /// hooks and the token sources cannot disagree about what a rejection is.
+    pub fn is_rejection(&self) -> bool {
+        self.reason == ReasonCode::Auth || self.status == Some(401)
+    }
+
     /// A failure with just a class and a retry hint.
     pub fn new(reason: ReasonCode, retry: Retry) -> Self {
         Self {
