@@ -457,6 +457,58 @@ async fn client_managed_signed_out_is_typed_and_a_rejected_token_reaches_its_sou
 }
 
 #[tokio::test]
+async fn client_a_stale_rejection_does_not_refresh_a_token_rotated_meanwhile() {
+    let tokens = Arc::new(Rotating {
+        token: Mutex::new(Some("jwt".into())),
+        invalidated: AtomicUsize::new(0),
+    });
+    let (factory, _fake) = recording(vec![]);
+    let bed = Bed::with(|b| {
+        b.model_factory(factory).managed(
+            ManagedConfig::new("https://api.tinyhumans.test/x").source(TokenSourceAdapter::new(
+                tokens.clone(),
+                CredentialOrigin::SessionJwt,
+            )),
+        )
+    });
+    let turn = crate::route::ResolvedTurn {
+        slug: slug("tinyhumans"),
+        kind: "tinyhumans".into(),
+        group: ProviderGroup::Managed,
+        base_url: "https://api.tinyhumans.test/x".into(),
+        model: Some(model("m")),
+        protocol: Protocol::OpenAiChat,
+        auth: AuthStyle::Bearer,
+        via: crate::route::ResolvedVia::Default,
+        origin: None,
+        temperature: None,
+        cli: None,
+    };
+    let chat = super::model::HubModel::new(bed.hub.clone(), bed.scope.clone(), turn);
+    let rejected = Error::Provider(Box::new(ProviderError {
+        provider: "tinyhumans".into(),
+        status: Some(401),
+        message: "invalid token".into(),
+        ..ProviderError::default()
+    }));
+    let stale = bed.hub.inner.health.epoch(&bed.scope, &slug("tinyhumans"));
+    // The credential changes (which bumps the epoch) while the request is out.
+    bed.hub.forget_health(&bed.scope, &slug("tinyhumans")).await;
+    let origin = CredentialOrigin::SessionJwt;
+    chat.observe_err_for_test(&rejected, stale, Some(&origin))
+        .await;
+    assert_eq!(
+        tokens.invalidated.load(Ordering::SeqCst),
+        0,
+        "a stale 401 refreshes nothing"
+    );
+    let now = bed.hub.inner.health.epoch(&bed.scope, &slug("tinyhumans"));
+    chat.observe_err_for_test(&rejected, now, Some(&origin))
+        .await;
+    assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn client_an_unreadable_credential_store_is_a_retryable_error_never_a_keyless_call() {
     let (factory, _fake) = recording(vec![]);
     let (bed, turn) = openai_bed(factory.clone()).await;

@@ -11,7 +11,7 @@
 mod env;
 mod local;
 
-pub use env::{ENV_KEYS, detect_env, env_var_for_kind};
+pub use env::{ENV_KEYS, detect_env, env_var_for_kind, env_vars_for_kind};
 pub use local::{Fingerprint, LocalRuntimeStatus, detect_local, fingerprints};
 
 use crate::config::ProviderDraft;

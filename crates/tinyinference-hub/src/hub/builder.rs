@@ -9,7 +9,7 @@ use crate::catalog::{CatalogCache, ModelMetadataSource, ModelOverride};
 use crate::catalogue;
 use crate::client::{LlmModelFactory, ModelFactory};
 use crate::credential::{CredentialChain, CredentialSource, EnvVarSource, StoreSource};
-use crate::detect::env_var_for_kind;
+use crate::detect::env_vars_for_kind;
 use crate::error::{HubError, InputField, InvalidInput};
 use crate::health::HealthTracker;
 use crate::ids::KindId;
@@ -390,7 +390,7 @@ impl HubBuilder {
             && let Some(env) = &self.env
         {
             for (kind, chain) in &mut chains {
-                if let Some(var) = env_var_for_kind(kind.as_str()) {
+                for var in env_vars_for_kind(kind.as_str()) {
                     let taken = std::mem::take(chain);
                     *chain = taken.with(EnvVarSource::new(env.clone(), var));
                 }

@@ -22,6 +22,9 @@ use super::types::{KeyState, ProviderView};
 pub(crate) struct Credential {
     pub(crate) key: Option<Secret>,
     pub(crate) origin: Option<CredentialOrigin>,
+    /// The provider's health epoch **as read before the chain ran**: anything
+    /// measured with this credential is dropped if the credential changed since.
+    pub(crate) epoch: u64,
 }
 
 impl Hub {
@@ -79,6 +82,7 @@ impl Hub {
         scope: &ScopeKey,
         record: &ProviderRecord,
     ) -> Result<Credential, HubError> {
+        let epoch = self.inner.health.epoch(scope, &record.slug);
         let resolved = self
             .chain_for(&record.kind)
             .resolve(scope, &record.slug)
@@ -87,10 +91,12 @@ impl Hub {
             Some((key, origin)) => Credential {
                 key: Some(key),
                 origin: Some(origin),
+                epoch,
             },
             None => Credential {
                 key: None,
                 origin: None,
+                epoch,
             },
         })
     }
@@ -183,8 +189,11 @@ impl Hub {
     /// forgotten (what was learned about the old credential says nothing about
     /// the new one) and the scope's cached catalogs are dropped.
     pub(crate) async fn after_key_change(&self, scope: &ScopeKey, slug: &Slug, present: bool) {
-        self.inner.cache.evict_scope(scope);
+        // Health first (it bumps the epoch), the cache second: a list that read the
+        // old key and fills the cache after this sees the bumped epoch and evicts
+        // itself; one that filled it before is evicted here.
         self.forget_health(scope, slug).await;
+        self.inner.cache.evict_scope(scope);
         self.inner.events.emit(HubEvent::KeyChanged {
             scope: scope.clone(),
             slug: slug.clone(),

@@ -466,6 +466,16 @@ fn oh_to_string_says_none_for_what_the_grammar_cannot_say() {
         None
     );
     assert_eq!(
+        legacy_oh::to_string(&ProviderRoute::provider(slug("openrouter"))),
+        None,
+        "a bare provider name does not read back as that provider"
+    );
+    assert_eq!(
+        legacy_oh::to_string(&ProviderRoute::provider(slug("openrouter")).with_model(model("m")))
+            .as_deref(),
+        Some("openrouter:m")
+    );
+    assert_eq!(
         legacy_oh::to_string(&ProviderRoute::new(RouteTarget::Local(None))).as_deref(),
         Some("ollama")
     );

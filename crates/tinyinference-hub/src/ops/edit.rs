@@ -141,7 +141,7 @@ impl Hub {
             && *new != record.base_url
         {
             // A different endpoint says nothing about what the old one said.
-            self.inner.cache.evict_endpoint(&record.base_url);
+            self.inner.cache.evict_scope(scope);
             self.forget_health(scope, slug).await;
         }
         let changed = committed.changed || key.is_some();

@@ -104,7 +104,6 @@ impl Hub {
                 return Err(error);
             }
         };
-        self.inner.cache.evict_endpoint(&record.base_url);
         self.inner.cache.evict_scope(scope);
         self.forget_health(scope, slug).await;
         self.inner.events.emit(HubEvent::ProviderRemoved {

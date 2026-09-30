@@ -186,14 +186,35 @@ fn import_oc_cli_rows_are_dropped_and_managed_aliases_normalise() {
             .loss
             .has("inference/providers/claude-code", LossKind::Dropped)
     );
-    let managed = imported.config.provider(&slug("cloud")).unwrap();
-    assert_eq!(managed.kind.as_str(), "tinyhumans");
-    assert!(managed.synthetic);
+    assert!(
+        imported.config.providers.is_empty(),
+        "a managed-kind row is not a second managed record"
+    );
     assert!(
         imported
             .loss
             .has("inference/providers/cloud", LossKind::Normalised)
     );
+}
+
+#[test]
+fn import_oc_a_disabled_managed_row_makes_exactly_one_disabled_managed_record() {
+    let cases = [
+        json!({"providers": [{"id": "b", "slug": "cloud", "kind": "managed", "enabled": false}]}),
+        json!({"providers": [{"id": "b", "slug": "cloud", "kind": "managed", "enabled": false}], "managed_enabled": "false"}),
+        json!({"providers": [{"id": "b", "slug": "cloud", "kind": "managed"}], "managed_enabled": "false"}),
+        json!({"managed_enabled": "false"}),
+    ];
+    for case in cases {
+        let imported = import_oc(&oc(case.clone())).unwrap();
+        assert_eq!(imported.config.providers.len(), 1, "{case}");
+        assert!(!imported.config.providers[0].enabled, "{case}");
+    }
+    let enabled = import_oc(&oc(
+        json!({"providers": [{"id": "b", "slug": "cloud", "kind": "managed"}]}),
+    ))
+    .unwrap();
+    assert!(enabled.config.providers.is_empty());
 }
 
 #[test]

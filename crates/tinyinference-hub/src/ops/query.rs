@@ -46,9 +46,10 @@ impl Hub {
             target = target.with_model(model);
         }
         let cx = self.cx(&headers);
-        // Read before the probe runs: a key change while it is in flight makes its
+        // The epoch was read before the credential was resolved (see
+        // `Credential`): a key change while the probe is in flight makes its
         // result about a credential that is gone, and it must not be recorded.
-        let epoch = self.inner.health.epoch(scope, &record.slug);
+        let epoch = credential.epoch;
         match run_probe(&cx, &*driver, &target, depth).await {
             Ok(report) => {
                 // Recording is best effort: the check ran, and its report is what
@@ -225,6 +226,12 @@ impl Hub {
                 driver.list_models(&cx, &target).await
             })
             .await;
+        // A key change while the list was being read makes what was cached the
+        // old credential's entitlement list: drop it rather than let it serve the
+        // new key for an hour.
+        if self.inner.health.epoch(scope, slug) != credential.epoch {
+            self.inner.cache.evict_scope(scope);
+        }
         let mut list = match read {
             Ok(list) => list,
             Err(error) => {

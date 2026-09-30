@@ -74,7 +74,10 @@ fn health_the_fold_table() {
         ),
         (
             "a rate-limited turn after a rejected one shows the key was accepted",
-            vec![Turn(Some(ReasonCode::Auth)), Turn(Some(ReasonCode::RateLimited))],
+            vec![
+                Turn(Some(ReasonCode::Auth)),
+                Turn(Some(ReasonCode::RateLimited)),
+            ],
             ProviderHealth::Degraded(ReasonCode::RateLimited),
         ),
         (

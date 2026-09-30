@@ -302,7 +302,9 @@ fn finish(key: String, route: ProviderRoute, mut loss: Vec<LossEntry>) -> OhPars
 }
 
 /// Writes a route as an OpenHuman provider string, or `None` for a route the
-/// grammar cannot say (a default with a model).
+/// grammar cannot say: a default or managed route with a model, and a named
+/// provider with no model (a bare provider name is OpenHuman's unresolvable
+/// trap, so writing one would not read back as the same route).
 pub fn to_string(route: &ProviderRoute) -> Option<String> {
     let model = route.model.as_ref().map(ModelId::as_str);
     let with_model = |head: &str| -> String {
@@ -328,7 +330,10 @@ pub fn to_string(route: &ProviderRoute) -> Option<String> {
             }
             "openhuman".to_string()
         }
-        RouteTarget::Provider(slug) => with_model(slug.as_str()),
+        RouteTarget::Provider(slug) => {
+            model?;
+            with_model(slug.as_str())
+        }
         RouteTarget::Local(Some(runtime)) => with_model(prefix_of(*runtime)),
         RouteTarget::Local(None) => with_model("ollama"),
         RouteTarget::Cli(_) => with_model("claude-code"),

@@ -129,12 +129,18 @@ back to either host by the hub.
 - Turn traffic uses `tinyinference-llm`'s own transport, so per-redirect policy
   and address pinning cover probes and catalogs, not chat turns. The resolved
   endpoint is re-checked against the policy at `resolve_for_turn`.
+- `ReqwestHttp` builds a `reqwest` client per hop (no connection reuse) and
+  ignores proxy environment variables, because a proxy would bypass the pinned
+  address; a host behind a corporate proxy supplies its own `Http`.
 - `ReqwestHttp`'s two network touch points (`SystemResolver::resolve` and
   `ReqwestExecutor::execute`) are not exercised by this crate's tests, which open
   no sockets; everything around them is.
 - The managed provider's backend differs between OpenCompany and OpenHuman; the
   host names its endpoint and catalog shape.
 - An ephemeral route parses but is not resolved by the hub.
+- A `set_key` racing a `remove` in the instant between two stores can leave one
+  orphan key slot; the hub re-checks and cleans up, which narrows the window to
+  two adjacent calls but cannot close it across two stores.
 - Failover, budgets, cooldowns and streaming health are a later crate; the hub
   exposes the signals (`record_outcome`, health, `Retry`).
 

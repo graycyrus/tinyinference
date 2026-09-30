@@ -10,6 +10,7 @@ use tinyinference_llm::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStream, ProviderError,
 };
 
+use crate::credential::CredentialOrigin;
 use crate::error::{HubError, ProviderFailure, ReasonCode};
 use crate::health::Outcome;
 use crate::hub::Hub;
@@ -23,6 +24,9 @@ use super::factory::ModelSpec;
 const LEGACY_USAGE_META: &str = "openhuman_usage_meta";
 /// The neutral spelling.
 const USAGE_META: &str = "usage_meta";
+
+/// The model for one call and the credential source that answered for it.
+type Current = (std::sync::Arc<dyn ChatModel<()>>, Option<CredentialOrigin>);
 
 type Built = (Option<Secret>, std::sync::Arc<dyn ChatModel<()>>);
 
@@ -68,7 +72,7 @@ impl HubModel {
 
     /// The model for this call: the credential chain is resolved **now**, and
     /// the underlying client is rebuilt only when the credential changed.
-    async fn current(&self) -> Result<std::sync::Arc<dyn ChatModel<()>>> {
+    async fn current(&self) -> Result<Current> {
         let resolved = self
             .hub
             .chain_for(&self.turn.kind)
@@ -77,7 +81,7 @@ impl HubModel {
         // The chain only ever fails as an unreadable source: not "no key", and not
         // a reason to fall through to a call without one.
         let key = match resolved {
-            Ok(found) => found.map(|(secret, _)| secret),
+            Ok(found) => found,
             Err(_) => {
                 return Err(self.provider_error(
                     "store_unreadable",
@@ -85,6 +89,10 @@ impl HubModel {
                     true,
                 ));
             }
+        };
+        let (key, origin) = match key {
+            Some((secret, origin)) => (Some(secret), Some(origin)),
+            None => (None, None),
         };
         let managed = self.turn.group == crate::taxonomy::ProviderGroup::Managed;
         if key.is_none() && !managed && self.key_required() {
@@ -110,7 +118,7 @@ impl HubModel {
             if let Some((built_for, model)) = held.as_ref()
                 && built_for.as_ref().map(Secret::expose) == key.as_ref().map(Secret::expose)
             {
-                return Ok(model.clone());
+                return Ok((model.clone(), origin));
             }
         }
         let extra = self.hub.request_headers(&self.turn);
@@ -131,7 +139,7 @@ impl HubModel {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, built.clone()));
-        Ok(built)
+        Ok((built, origin))
     }
 
     async fn observe_ok(&self, started: std::time::Instant, epoch: u64) {
@@ -147,20 +155,19 @@ impl HubModel {
             .await;
     }
 
-    async fn observe_err(&self, error: &Error, epoch: u64) {
+    async fn observe_err(&self, error: &Error, epoch: u64, origin: Option<&CredentialOrigin>) {
         let Some(failure) = failure_of(error) else {
             return;
         };
-        if failure.reason == ReasonCode::Auth || failure.status == Some(401) {
-            if let Ok(Some((_, origin))) = self
-                .hub
-                .chain_for(&self.turn.kind)
-                .resolve(&self.scope, &self.turn.slug)
-                .await
-            {
+        let current = self.hub.inner.health.epoch(&self.scope, &self.turn.slug) == epoch;
+        if (failure.reason == ReasonCode::Auth || failure.status == Some(401)) && current {
+            // The source that supplied the credential this request used, not
+            // whatever answers now: a stale rejection must not refresh a token
+            // that has since been rotated.
+            if let Some(origin) = origin {
                 self.hub
                     .chain_for(&self.turn.kind)
-                    .invalidate_origin(&self.scope, &origin);
+                    .invalidate_origin(&self.scope, origin);
             }
             // The cached client holds the rejected key: drop it.
             *self
@@ -230,7 +237,7 @@ impl ChatModel<()> for HubModel {
         // Read before the credential is resolved: what this turn learns is about
         // that credential, and is dropped if the provider's key changes meanwhile.
         let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
-        let model = self.current().await?;
+        let (model, origin) = self.current().await?;
         let started = self.hub.inner.clock.now();
         match model.invoke(state, request).await {
             Ok(mut response) => {
@@ -239,7 +246,7 @@ impl ChatModel<()> for HubModel {
                 Ok(response)
             }
             Err(error) => {
-                self.observe_err(&error, epoch).await;
+                self.observe_err(&error, epoch, origin.as_ref()).await;
                 Err(error)
             }
         }
@@ -247,7 +254,7 @@ impl ChatModel<()> for HubModel {
 
     async fn stream(&self, state: &(), request: ModelRequest) -> Result<ModelStream> {
         let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
-        let model = self.current().await?;
+        let (model, origin) = self.current().await?;
         let started = self.hub.inner.clock.now();
         match model.stream(state, request).await {
             Ok(stream) => {
@@ -258,10 +265,23 @@ impl ChatModel<()> for HubModel {
                 Ok(stream)
             }
             Err(error) => {
-                self.observe_err(&error, epoch).await;
+                self.observe_err(&error, epoch, origin.as_ref()).await;
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl HubModel {
+    /// Lets a test hand the failure path a stale (or current) epoch directly.
+    pub(super) async fn observe_err_for_test(
+        &self,
+        error: &Error,
+        epoch: u64,
+        origin: Option<&CredentialOrigin>,
+    ) {
+        self.observe_err(error, epoch, origin).await;
     }
 }
 

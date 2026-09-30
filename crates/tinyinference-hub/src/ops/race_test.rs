@@ -470,7 +470,8 @@ impl Http for HookHttp {
         request: HubRequest,
         policy: &crate::policy::EndpointPolicy,
     ) -> Result<HubResponse, HttpError> {
-        if let Some(hook) = self.hook.lock().unwrap().take()
+        let hook = self.hook.lock().unwrap().take();
+        if let Some(hook) = hook
             && let Some(hub) = self.hub.get()
         {
             hook(hub);
@@ -588,5 +589,337 @@ async fn health_a_turn_in_flight_when_the_provider_is_removed_and_readded_is_not
     assert_eq!(
         hub.health(&me, &slug("groq")).await.unwrap().health,
         crate::health::ProviderHealth::Unknown
+    );
+}
+
+// ---- round 2 ------------------------------------------------------------------------------
+
+/// A credential store whose `get` lets something happen to the hub after it has
+/// decided what to return: the caller then holds a credential that is already old.
+struct StaleGet {
+    inner: Arc<crate::ports::memory::MemoryCredentials>,
+    hub: Arc<OnceLock<crate::hub::Hub>>,
+    hook: Mutex<Option<HubHook>>,
+}
+
+impl std::fmt::Debug for StaleGet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StaleGet")
+    }
+}
+
+#[async_trait]
+impl CredentialStore for StaleGet {
+    async fn get(&self, scope: &ScopeKey, slot: &str) -> Result<Option<Secret>, PortError> {
+        let value = self.inner.get(scope, slot).await?;
+        // Taken out first: the temporary guard would otherwise be held while the
+        // hook runs, and the hook re-enters this store.
+        let hook = if value.is_some() {
+            self.hook.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some(hook) = hook
+            && let Some(hub) = self.hub.get()
+        {
+            hook(hub);
+        }
+        Ok(value)
+    }
+
+    async fn set(&self, scope: &ScopeKey, slot: &str, value: Secret) -> Result<(), PortError> {
+        self.inner.set(scope, slot, value).await
+    }
+
+    async fn delete(&self, scope: &ScopeKey, slot: &str) -> Result<(), PortError> {
+        self.inner.delete(scope, slot).await
+    }
+}
+
+fn stale_get_hub(
+    ports: &MemoryPorts,
+) -> (
+    crate::hub::Hub,
+    Arc<OnceLock<crate::hub::Hub>>,
+    Arc<StaleGet>,
+) {
+    let cell = Arc::new(OnceLock::new());
+    let creds = Arc::new(StaleGet {
+        inner: ports.credentials.clone(),
+        hub: cell.clone(),
+        hook: Mutex::new(None),
+    });
+    let hub = ports
+        .builder()
+        .credentials_arc(creds.clone())
+        .build()
+        .unwrap();
+    cell.set(hub.clone()).ok();
+    (hub, cell, creds)
+}
+
+#[tokio::test]
+async fn health_a_check_whose_credential_was_read_before_a_key_change_is_not_recorded() {
+    let ports = MemoryPorts::new();
+    let me = scope("company:acme");
+    let (hub, _cell, creds) = stale_get_hub(&ports);
+    hub.add(
+        &me,
+        ProviderDraft::new("openai")
+            .with_key(Secret::new(KEY))
+            .with_model(model("m")),
+    )
+    .await
+    .unwrap();
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.openai.com/v1/models"),
+        crate::testkit::Scripted::json(
+            401,
+            &json!({"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}}),
+        ),
+    );
+    let target = me.clone();
+    *creds.hook.lock().unwrap() = Some(Box::new(move |hub| {
+        futures::executor::block_on(hub.set_key(&target, &slug("openai"), Secret::new("sk-new")))
+            .unwrap();
+    }));
+    // The key is read (old), then rotated, then the probe runs with the old one.
+    let report = hub
+        .test(
+            &me,
+            &slug("openai"),
+            crate::taxonomy::TestDepth::Catalog,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!report.ok());
+    assert_eq!(
+        hub.health(&me, &slug("openai")).await.unwrap().health,
+        crate::health::ProviderHealth::Unknown
+    );
+}
+
+#[tokio::test]
+async fn ops_a_list_read_with_an_old_key_does_not_serve_the_new_key_from_the_cache() {
+    let ports = MemoryPorts::new();
+    let me = scope("company:acme");
+    let (hub, _cell, creds) = stale_get_hub(&ports);
+    hub.add(&me, ProviderDraft::new("openai").with_key(Secret::new(KEY)))
+        .await
+        .unwrap();
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.openai.com/v1/models"),
+        crate::testkit::Scripted::json(
+            200,
+            &crate::hub::fixtures::models_body(&["old-entitlements"]),
+        ),
+    );
+    let target = me.clone();
+    *creds.hook.lock().unwrap() = Some(Box::new(move |hub| {
+        futures::executor::block_on(hub.set_key(&target, &slug("openai"), Secret::new("sk-new")))
+            .unwrap();
+    }));
+    hub.list_models(&me, &slug("openai"), false).await.unwrap();
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.openai.com/v1/models"),
+        crate::testkit::Scripted::json(
+            200,
+            &crate::hub::fixtures::models_body(&["new-entitlements"]),
+        ),
+    );
+    let next = hub.list_models(&me, &slug("openai"), false).await.unwrap();
+    assert_eq!(
+        next.ids(),
+        ["new-entitlements"],
+        "the old key's list was not kept for the new key"
+    );
+    assert_eq!(next.freshness, crate::catalog::Freshness::Fresh);
+}
+
+#[tokio::test]
+async fn ops_an_add_whose_record_is_removed_before_its_key_lands_leaves_no_key() {
+    let ports = MemoryPorts::new();
+    let me = scope("company:acme");
+    let (hub, armed) = removing_hub(&ports, &me);
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = hub
+        .add(
+            &me,
+            ProviderDraft::new("groq").with_key(Secret::new("gsk-late")),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HubError::NotFound(_)), "{error:?}");
+    assert!(ports.credentials.is_empty());
+    assert!(hub.status(&me).await.unwrap().providers.is_empty());
+}
+
+#[tokio::test]
+async fn ops_a_rolled_back_connect_tells_event_consumers_it_was_undone() {
+    use crate::ports::HubEvent;
+    let ports = MemoryPorts::new();
+    let hub = ports.hub();
+    let me = scope("company:acme");
+    ports
+        .credentials
+        .set(&me, &slug("openai").key_slot(), Secret::new("sk-previous"))
+        .await
+        .unwrap();
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.openai.com/"),
+        crate::testkit::Scripted::text(401, "Incorrect API key provided"),
+    );
+    hub.connect(
+        &me,
+        ProviderDraft::new("openai").with_key(Secret::new(KEY)),
+        ConnectOptions::default(),
+    )
+    .await
+    .unwrap_err();
+    let events = ports.events.events();
+    let added = events
+        .iter()
+        .filter(|e| matches!(e, HubEvent::ProviderAdded { .. }))
+        .count();
+    let removed = events
+        .iter()
+        .filter(|e| matches!(e, HubEvent::ProviderRemoved { .. }))
+        .count();
+    let keys: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            HubEvent::KeyChanged { present, .. } => Some(*present),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((added, removed), (1, 1), "{events:?}");
+    assert_eq!(
+        keys,
+        [true, true],
+        "the key changed, then went back to the previous one"
+    );
+}
+
+#[tokio::test]
+async fn ops_an_undo_that_cannot_restore_the_key_still_reports_why_the_add_failed_and_cleans_up() {
+    let ports = MemoryPorts::new();
+    let me = scope("company:acme");
+    let creds = ports.credentials.clone();
+    let hub = hooked(
+        &ports,
+        Box::new(move |_| {
+            // The credential store goes down while the check is in flight.
+            creds.inject(crate::ports::memory::CredentialFault::Write);
+        }),
+    );
+    ports
+        .credentials
+        .set(&me, &slug("openai").key_slot(), Secret::new("sk-previous"))
+        .await
+        .unwrap();
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.openai.com/"),
+        crate::testkit::Scripted::text(401, "Incorrect API key provided"),
+    );
+    let error = hub
+        .connect(
+            &me,
+            ProviderDraft::new("openai").with_key(Secret::new(KEY)),
+            ConnectOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.reason(),
+        crate::error::ReasonCode::Auth,
+        "the caller hears why, not that a restore failed: {error:?}"
+    );
+    ports.credentials.heal();
+    assert!(
+        hub.status(&me).await.unwrap().providers.is_empty(),
+        "the record was taken out anyway"
+    );
+}
+
+#[tokio::test]
+async fn ops_an_undo_only_removes_the_record_its_own_add_made() {
+    let ports = MemoryPorts::new();
+    let me = scope("company:acme");
+    let target = me.clone();
+    let hub = hooked(
+        &ports,
+        Box::new(move |hub| {
+            // While the check runs, somebody removes the provider and adds another
+            // of the same slug with its own key.
+            futures::executor::block_on(async {
+                hub.clear_default(&target).await.unwrap();
+                hub.remove(&target, &slug("groq"), Confirm::in_use())
+                    .await
+                    .unwrap();
+                hub.add(
+                    &target,
+                    ProviderDraft::new("groq").with_key(Secret::new("gsk-theirs")),
+                )
+                .await
+                .unwrap();
+            });
+        }),
+    );
+    ports.http.route(
+        crate::testkit::Match::prefix("https://api.groq.com/"),
+        crate::testkit::Scripted::text(401, "Invalid API Key"),
+    );
+    hub.connect(
+        &me,
+        ProviderDraft::new("groq").with_key(Secret::new("gsk-mine")),
+        ConnectOptions::default(),
+    )
+    .await
+    .unwrap_err();
+    let key = ports
+        .credentials
+        .get(&me, &slug("groq").key_slot())
+        .await
+        .unwrap();
+    assert_eq!(
+        key.unwrap().expose(),
+        "gsk-theirs",
+        "the other writer's key was not overwritten"
+    );
+    assert_eq!(
+        hub.status(&me).await.unwrap().providers.len(),
+        1,
+        "and its record was not removed"
+    );
+}
+
+#[tokio::test]
+async fn ops_removing_a_provider_does_not_evict_another_scopes_shared_listing() {
+    let ports = MemoryPorts::new();
+    let hub = ports.hub();
+    let (a, b) = (scope("company:a"), scope("company:b"));
+    ports.http.route(
+        crate::testkit::Match::prefix("https://gw.acme.test/"),
+        crate::testkit::Scripted::json(200, &crate::hub::fixtures::models_body(&["m"])),
+    );
+    let gateway = || {
+        ProviderDraft::new("custom")
+            .with_label("Gateway")
+            .with_base_url("https://gw.acme.test/v1")
+    };
+    for s in [&a, &b] {
+        hub.add(s, gateway()).await.unwrap();
+        hub.list_models(s, &slug("gateway"), false).await.unwrap();
+    }
+    let asked = ports.http.request_count();
+    hub.remove(&a, &slug("gateway"), Confirm::no())
+        .await
+        .unwrap();
+    hub.list_models(&b, &slug("gateway"), false).await.unwrap();
+    assert_eq!(
+        ports.http.request_count(),
+        asked,
+        "one tenant's removal never forces another's refetch"
     );
 }

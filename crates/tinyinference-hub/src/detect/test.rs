@@ -162,6 +162,55 @@ async fn detect_env_never_persists_and_never_carries_the_key() {
     assert!(bed.ports.config.raw(&bed.scope).is_none() && bed.ports.credentials.is_empty());
 }
 
+#[tokio::test]
+async fn detect_env_every_reported_variable_is_read_by_the_chain_and_blank_is_unset() {
+    let ports = crate::testkit::MemoryPorts::new().with_env(
+        MapEnv::new()
+            .with("GOOGLE_API_KEY", "g-key\n")
+            .with("OPENAI_API_KEY", " \n"),
+    );
+    let hub = ports.builder().env_credentials(true).build().unwrap();
+    let bed = Bed {
+        hub: hub.clone(),
+        ports,
+        scope: crate::hub::fixtures::scope("u"),
+    };
+    script_machine(&bed, false, false, false, None);
+    let drafts = hub.detect(&DetectOptions::default()).await.unwrap();
+    assert_eq!(
+        drafts.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>(),
+        ["google"],
+        "a blank value is not a key"
+    );
+    assert_eq!(
+        env_vars_for_kind("google").collect::<Vec<_>>(),
+        ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    );
+    // The chain finds the second variable, trimmed, like detection did.
+    let scope = crate::hub::fixtures::scope("u");
+    hub.add(
+        &scope,
+        crate::config::ProviderDraft::new("google").with_model(crate::hub::fixtures::model("m")),
+    )
+    .await
+    .unwrap();
+    let turn = hub
+        .resolve_for_turn(&scope, &crate::route::TurnQuery::new())
+        .await
+        .unwrap();
+    assert_eq!(turn.slug.as_str(), "google");
+    // A blank OpenAI variable is no key for the chain either.
+    hub.add(
+        &scope,
+        crate::config::ProviderDraft::new("openai").with_model(crate::hub::fixtures::model("m")),
+    )
+    .await
+    .unwrap();
+    let pinned = crate::route::TurnQuery::new()
+        .with_override(crate::route::ProviderRoute::provider(slug("openai")));
+    assert!(hub.resolve_for_turn(&scope, &pinned).await.is_err());
+}
+
 #[test]
 fn detect_env_table_is_consistent_with_the_catalogue() {
     for (var, kind) in ENV_KEYS {

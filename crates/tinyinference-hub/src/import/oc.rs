@@ -181,6 +181,7 @@ fn health_state(raw: &str) -> ProviderHealth {
 /// is not valid or a credential-shaped legacy field.
 pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
     let mut out = Imported::new();
+    let mut managed_off = false;
 
     for stored in &snapshot.providers {
         let (kind, kind_changed) = normalise_kind(&stored.kind)?;
@@ -201,7 +202,18 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
             );
             continue;
         }
-        let managed = descriptor.is_some_and(|d| d.group == ProviderGroup::Managed);
+        if descriptor.is_some_and(|d| d.group == ProviderGroup::Managed) {
+            // The hub always lists the managed provider under its own slug, so a
+            // stored row of the managed kind (a legacy alias) is not a second
+            // record: it only says whether the operator had it switched off.
+            out.loss.push(
+                format!("inference/providers/{}", stored.slug),
+                LossKind::Normalised,
+                "a row of the managed kind is the managed provider, which the hub lists itself; only its enabled flag was kept",
+            );
+            managed_off |= !stored.enabled;
+            continue;
+        }
         let base_url = if stored.base_url.trim().is_empty() {
             descriptor
                 .and_then(|d| d.default_endpoint)
@@ -223,7 +235,6 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
         );
         record.enabled = stored.enabled;
         record.origin = RecordOrigin::Imported;
-        record.synthetic = managed;
         match model_on_row(&stored.models) {
             ModelOnRow::None => {}
             ModelOnRow::One(model) => record.model = Some(ModelId::parse(&model)?),
@@ -294,8 +305,11 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
         }
     }
 
-    if let Some(raw) = &snapshot.managed_enabled
-        && raw.trim().eq_ignore_ascii_case("false")
+    managed_off |= snapshot
+        .managed_enabled
+        .as_deref()
+        .is_some_and(|raw| raw.trim().eq_ignore_ascii_case("false"));
+    if managed_off
         && let Some(descriptor) = catalogue::descriptors_in(ProviderGroup::Managed).next()
     {
         let slug = Slug::parse(descriptor.slug())?;

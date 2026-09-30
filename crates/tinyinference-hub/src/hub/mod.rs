@@ -39,7 +39,7 @@
 //!
 //! **A result measured against an old credential is dropped.** Every probe and
 //! every turn through [`Hub::chat_model`] reads the provider's health *epoch*
-//! before it starts; forgetting health (a key change, a removal) bumps it, and a
+//! **before it resolves the credential**; forgetting health (a key change, a removal) bumps it, and a
 //! result that arrives carrying an older epoch is not recorded. A failing check
 //! made with the previous key therefore cannot mark a working new key `Down`.
 //!

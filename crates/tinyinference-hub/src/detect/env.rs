@@ -38,6 +38,16 @@ pub fn env_var_for_kind(kind: &str) -> Option<&'static str> {
         .map(|(var, _)| *var)
 }
 
+/// Every environment variable that is a kind's key, in table order. The
+/// credential chain reads all of them, so what detection reports is what the
+/// chain will find.
+pub fn env_vars_for_kind(kind: &str) -> impl Iterator<Item = &'static str> + '_ {
+    ENV_KEYS
+        .iter()
+        .filter(move |(_, k)| *k == kind)
+        .map(|(var, _)| *var)
+}
+
 /// Drafts for every provider whose environment variable is set and non-blank.
 /// A kind with two variables set is reported once. The draft carries **no key**.
 pub fn detect_env(env: &dyn EnvSource) -> Vec<ProviderDraft> {

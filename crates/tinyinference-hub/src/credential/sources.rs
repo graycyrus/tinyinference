@@ -109,7 +109,14 @@ impl CredentialSource for EnvVarSource {
     }
 
     async fn resolve(&self, _scope: &ScopeKey, _slug: &Slug) -> Result<Option<Secret>, PortError> {
-        Ok(self.env.var(&self.name).map(Secret::new))
+        // A trailing newline or a blank value is not a key: detection treats
+        // them as unset, and so must the chain.
+        Ok(self
+            .env
+            .var(&self.name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Secret::new))
     }
 }
 

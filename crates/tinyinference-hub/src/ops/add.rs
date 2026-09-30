@@ -217,8 +217,9 @@ impl Hub {
 
     /// Adds a provider **without** checking it. Nothing is sent anywhere.
     ///
-    /// The key, if any, is written to the credential store first and put back
-    /// to what it was if the record cannot be saved.
+    /// The record is saved first and the key written after it; a key that cannot
+    /// be written takes the record back out, and a provider that was removed in
+    /// between is a `NotFound` that leaves no key behind.
     ///
     /// # Errors
     ///
@@ -276,10 +277,25 @@ impl Hub {
         if let Some(key) = &plan.key {
             if let Err(error) = self.write_slot(scope, &plan.slug, key.clone()).await {
                 // Nothing was written to the slot, so there is nothing to put back.
-                self.undo_add(scope, &added).await.ok();
+                self.undo_add(scope, &added).await;
                 return Err(error);
             }
             added.key_was = key_was;
+            // A removal that landed between the record's commit and the write
+            // found an empty slot to delete: the key just written would belong to
+            // nothing, and to whoever adds that slug next.
+            let still_there = self
+                .read_config(scope)
+                .await?
+                .providers
+                .iter()
+                .any(|p| p.id == added.record.id);
+            if !still_there {
+                self.delete_slot(scope, &plan.slug).await.ok();
+                return Err(HubError::NotFound(crate::error::NotFound::Provider(
+                    plan.slug.clone(),
+                )));
+            }
             self.after_key_change(scope, &plan.slug, true).await;
         }
         self.inner.events.emit(HubEvent::ProviderAdded {
@@ -333,7 +349,7 @@ impl Hub {
         let credential = match self.credential(scope, &record).await {
             Ok(credential) => credential,
             Err(error) => {
-                self.undo_add(scope, &added).await?;
+                self.undo_add(scope, &added).await;
                 return Err(error);
             }
         };
@@ -362,14 +378,14 @@ impl Hub {
         {
             Ok(report) => report,
             Err(error) => {
-                self.undo_add(scope, &added).await?;
+                self.undo_add(scope, &added).await;
                 return Err(error);
             }
         };
         if let Some(failure) = &report.failure {
             let refused = report.refusal.is_some();
             if refused || (failure.rolls_back(plan.group) && !options.add_anyway) {
-                self.undo_add(scope, &added).await?;
+                self.undo_add(scope, &added).await;
                 let error = report
                     .clone()
                     .into_result()
@@ -398,15 +414,26 @@ impl Hub {
         })
     }
 
-    /// Undoes an add exactly: the record goes, the default goes back to what it
-    /// was (if this add changed it and nobody has changed it since), the key slot
-    /// goes back to what it held (if this add wrote a key), and what was learned
-    /// about the new key is forgotten.
-    async fn undo_add(&self, scope: &ScopeKey, added: &Added) -> Result<(), HubError> {
-        let slug = added.record.slug.clone();
+    /// Undoes an add exactly: the record goes (only the record this add made,
+    /// found by id), the default goes back to what it was (if this add changed it
+    /// and nobody has changed it since), the key slot goes back to what it held
+    /// (if this add wrote a key and its record was still there), and what was
+    /// learned about the new key is forgotten. Compensating events are emitted,
+    /// so a host that mirrors state from events sees the add and its undoing.
+    ///
+    /// Best effort by construction: each step runs whatever the others did, and a
+    /// step that fails is logged. The caller is reporting *why the add failed*;
+    /// a failure of the cleanup must not replace that reason.
+    async fn undo_add(&self, scope: &ScopeKey, added: &Added) {
+        let (slug, id) = (added.record.slug.clone(), added.record.id.clone());
+        let mut existed = false;
         let removed = self
             .transact(scope, |config| {
-                config.providers.retain(|p| p.slug != slug);
+                existed = config.providers.iter().any(|p| p.id == id);
+                if !existed {
+                    return Ok(());
+                }
+                config.providers.retain(|p| p.id != id);
                 if let Some(was) = &added.default_was
                     && matches!(&config.default, DefaultChoice::Full { provider, .. } if *provider == slug)
                 {
@@ -415,12 +442,28 @@ impl Hub {
                 Ok(())
             })
             .await;
-        if let Some(previous) = added.key_was.clone() {
-            self.restore_slot(scope, &slug, previous).await?;
+        if let Err(error) = &removed {
+            tracing::warn!(%slug, reason = %error.reason(), "could not take an undone add's record out");
         }
-        self.inner.cache.evict_scope(scope);
+        if existed && let Some(previous) = added.key_was.clone() {
+            let present = previous.is_some();
+            if let Err(error) = self.restore_slot(scope, &slug, previous).await {
+                tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
+            }
+            self.inner.events.emit(HubEvent::KeyChanged {
+                scope: scope.clone(),
+                slug: slug.clone(),
+                present,
+            });
+        }
         self.forget_health(scope, &slug).await;
-        removed.map(|_| ())
+        self.inner.cache.evict_scope(scope);
+        if existed {
+            self.inner.events.emit(HubEvent::ProviderRemoved {
+                scope: scope.clone(),
+                slug,
+            });
+        }
     }
 }
 
