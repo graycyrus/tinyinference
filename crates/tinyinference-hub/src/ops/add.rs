@@ -543,9 +543,18 @@ impl Hub {
                 Ok(())
             })
             .await;
-        if let Err(error) = &removed {
-            tracing::warn!(%slug, reason = %error.reason(), "could not take an undone add's record out");
-        }
+        // A store that committed the removal and then reported a failure is looked
+        // at: the record is read back, and a record that is gone was removed.
+        let removed_ok = match &removed {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%slug, reason = %error.reason(), "could not take an undone add's record out");
+                match self.read_config(scope).await {
+                    Ok(config) => !config.providers.iter().any(ours),
+                    Err(_) => false,
+                }
+            }
+        };
         if restore_after
             && existed
             && let Some(previous) = added.key_was.clone()
@@ -554,7 +563,7 @@ impl Hub {
         }
         self.forget_health(scope, &slug).await;
         self.inner.cache.evict_scope(scope);
-        if existed && removed.is_ok() {
+        if existed && removed_ok {
             self.inner.events.emit(HubEvent::ProviderRemoved {
                 scope: scope.clone(),
                 slug,
@@ -578,7 +587,9 @@ impl Ownership {
     fn of(config: &HubConfig, added: &ProviderRecord) -> Self {
         match config.providers.iter().find(|p| p.id == added.id) {
             None => Self::Gone,
-            Some(now) if now.base_url != added.base_url => Self::Moved,
+            // A change of path or query is not a move: the key was entered for
+            // the origin, and it is still there (the same rule G3 applies).
+            Some(now) if !crate::policy::same_origin(&now.base_url, &added.base_url) => Self::Moved,
             Some(_) => Self::Ours,
         }
     }

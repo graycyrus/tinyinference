@@ -656,10 +656,17 @@ async fn ops_an_origin_move_that_cannot_switch_the_provider_back_on_leaves_it_di
         .ports
         .config
         .hold(Hold::before(Call::Save).skip(1).fail());
-    bed.hub
+    let mutation = bed
+        .hub
         .edit(&bed.scope, &slug("acme"), move_patch())
         .await
-        .unwrap_err();
+        .unwrap();
+    // The edit went through; only the flag could not be restored: a warning on a
+    // successful edit, not an error a caller would retry.
+    assert_eq!(
+        mutation.status,
+        crate::hub::MutationStatus::SavedWithWarning
+    );
     assert_eq!(state_of(&bed).await, (NEW.to_string(), Some(K_NEW.into())));
     assert!(!enabled_of(&bed).await, "unusable rather than half usable");
 }
@@ -872,7 +879,7 @@ async fn ops_a_move_that_cannot_switch_the_provider_on_still_announces_the_chang
     bed.hub
         .edit(&bed.scope, &slug("acme"), move_patch())
         .await
-        .unwrap_err();
+        .unwrap();
     let events = bed.ports.events.events();
     assert!(
         events
@@ -1385,10 +1392,20 @@ async fn ops_a_removal_the_store_committed_and_then_reported_failed_does_not_bri
     // next provider of that slug to find.
     let (bed, _spy) = acme_bed().await;
     let _fault = bed.ports.config.hold(Hold::after(Call::Save).fail());
-    bed.hub
+    // The removal did commit, so it is reported as done (and announced), not as a
+    // failure the caller would retry.
+    let removed = bed
+        .hub
         .remove(&bed.scope, &slug("acme"), Confirm::in_use())
-        .await
-        .unwrap_err();
+        .await;
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::ProviderRemoved { .. }))
+    );
     assert!(
         !bed.hub
             .status(&bed.scope)
@@ -1451,4 +1468,56 @@ async fn ops_an_undo_whose_move_back_commits_and_then_reports_failure_still_gets
         .unwrap_err();
     assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_OLD.into())));
     assert!(enabled_of(&bed).await);
+}
+
+#[tokio::test]
+async fn ops_an_undo_whose_record_removal_commits_and_then_reports_failure_is_announced() {
+    let bed = Bed::new();
+    bed.openai_rejects_key();
+    // Saves: the add's record (#0), then the undo's removal (#1): it lands, then errors.
+    let _fault = bed
+        .ports
+        .config
+        .hold(Hold::after(Call::Save).skip(1).fail());
+    bed.hub
+        .connect(&bed.scope, bed.openai_draft(), ConnectOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::ProviderRemoved { .. })),
+        "the record is gone, so it is announced"
+    );
+}
+
+#[tokio::test]
+async fn ops_an_add_whose_provider_another_writer_only_re_pathed_still_gets_its_key() {
+    // Same origin, different path: not a move (the key was entered for the origin).
+    let bed = Bed::new();
+    let draft = ProviderDraft::new("custom")
+        .with_label("Acme")
+        .with_base_url(OLD)
+        .with_key(Secret::new(K_OLD))
+        .with_model(model("m"));
+    let acme = slug("acme");
+    let mut held = bed.ports.config.hold(Hold::after(Call::Save));
+    let add = bed.hub.add(&bed.scope, draft);
+    let mover = async {
+        held.reached().await;
+        bed.hub
+            .edit(
+                &bed.scope,
+                &acme,
+                ProviderPatch::new().base_url("https://llm.acme.test/v2"),
+            )
+            .await
+            .unwrap();
+        held.release();
+    };
+    let (added, ()) = tokio::join!(add, mover);
+    added.unwrap();
+    assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_OLD));
 }

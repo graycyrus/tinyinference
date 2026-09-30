@@ -145,16 +145,19 @@ back to either host by the hub.
   `set_key` racing a `remove` in the instant between two stores can still leave
   one orphan key slot; the hub re-checks and cleans up, which narrows the window
   to two adjacent calls but cannot close it across two stores.
-- An edit that moves the endpoint to another origin **with** a key commits the
-  record at the new origin *disabled*, writes the new key, then switches the
-  record back on, so no credential, whichever source of the chain supplies it,
-  can meet an origin it was not entered for. For those few calls the provider
-  reads as disabled (a route to it fails closed; a `HubModel` kept from before
-  the move refuses with `stale_route`). A failure rolls back in the order
-  empty-slot, record back, old key back; if the record cannot be moved back it is
-  left disabled at the new origin with no key; the caller gets the reason the move
-  failed, and the stuck state is logged and announced (`ProviderEdited`,
-  `KeyChanged`), `set_enabled` finishing a half-applied move.
+- An edit that moves the endpoint to another origin **with** a key deletes the
+  old key, commits the record at the new origin *disabled*, writes the new key,
+  then switches the record back on, so no credential the hub stores can meet an
+  origin it was not entered for, and a credential a host source supplies is never
+  offered to the new origin while the record is parked (a route to it fails
+  closed; a `HubModel` kept from before the move refuses with `stale_route`; a
+  probe or listing waits for the move). A failure rolls back in the order
+  empty-slot, record back, old key back. If only the last step (switching it back
+  on) fails the edit **succeeds with a warning** (`SavedWithWarning`; call
+  `set_enabled`). If the record cannot be moved back it is left disabled at the
+  new origin with no key: the caller gets the reason the move failed, the stuck
+  state is logged and announced (`ProviderEdited`, `KeyChanged`), and a key must
+  be entered (`set_key`) before the provider is tested, listed or switched on.
 - Operations that change two stores (a key and a record: `add`, `edit`, `remove`,
   `set_key`, `clear_key`, and above all an endpoint move) are **not
   cancellation-safe**. A future dropped between their awaits (a request timeout,

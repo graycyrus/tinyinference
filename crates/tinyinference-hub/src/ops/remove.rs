@@ -117,27 +117,32 @@ impl Hub {
             Err(error) => {
                 // A record somebody else removed while this ran took its key with
                 // it: putting the key back would leave a slot no record owns.
-                // Nor is a store that committed the removal and then reported a
-                // failure a reason to put it back: the record is looked for, and
-                // the key restored only beside a record that is verifiably
-                // still there.
-                if !matches!(error, HubError::NotFound(_)) {
-                    let still_there = self
-                        .read_config(scope)
-                        .await
-                        .ok()
-                        .map(|c| c.provider(slug).is_some_and(|p| p.id == record.id));
-                    match (still_there, previous) {
-                        (Some(true), Some(previous)) => {
-                            self.restore_or_announce(scope, slug, Some(previous)).await;
-                        }
-                        // Gone: the key stays deleted. Unreadable: cannot tell,
-                        // so the slot is left as it is and said so.
-                        (None, Some(_)) => self.announce_key_state(scope, slug).await,
-                        _ => {}
-                    }
+                if matches!(error, HubError::NotFound(_)) {
+                    return Err(error);
                 }
-                return Err(error);
+                // A store that committed the removal and then reported a failure
+                // is looked at, not assumed away: the record is read back.
+                let still_there = self
+                    .read_config(scope)
+                    .await
+                    .ok()
+                    .map(|c| c.provider(slug).is_some_and(|p| p.id == record.id));
+                match (still_there, previous) {
+                    // It did commit: this removal happened. Carry on as one.
+                    (Some(false), _) => Self::merge_used_by(&now, slug, &host),
+                    // Still there: the key goes back beside it.
+                    (Some(true), Some(previous)) => {
+                        self.restore_or_announce(scope, slug, Some(previous)).await;
+                        return Err(error);
+                    }
+                    // Unreadable: cannot tell, so the slot is left as it is and
+                    // said so.
+                    (None, Some(_)) => {
+                        self.announce_key_state(scope, slug).await;
+                        return Err(error);
+                    }
+                    _ => return Err(error),
+                }
             }
         };
         self.inner.cache.evict_scope(scope);

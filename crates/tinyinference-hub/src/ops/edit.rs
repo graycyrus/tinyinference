@@ -39,12 +39,14 @@ impl Hub {
     /// endpoint's origin, or removed and re-added the provider, after this edit
     /// validated its patch; and the stores' errors. **A failure while moving the
     /// endpoint with a new key can leave the change partly applied, always in a
-    /// state that cannot send a credential to the wrong origin:** the provider
-    /// disabled at the new endpoint with its new key (only switching it back on
-    /// failed: call [`Hub::set_enabled`]), or disabled there with no key (the
-    /// move could not be undone: enter the key with [`Hub::set_key`] before
-    /// switching it on). The failure is logged and the change announced
-    /// (`ProviderEdited`, `KeyChanged`) in those cases. Like every operation that
+    /// state in which no credential the hub stored can meet the wrong origin:**
+    /// if only switching the provider back on failed, the edit **succeeds with a
+    /// warning** ([`MutationStatus::SavedWithWarning`]; call [`Hub::set_enabled`]);
+    /// if the move could not be undone, the caller gets the failure and the
+    /// provider is left disabled at the new endpoint with no key (enter one with
+    /// [`Hub::set_key`] before testing, listing or enabling it: a credential a
+    /// host source supplies would otherwise answer there). Both are logged and
+    /// announced (`ProviderEdited`, `KeyChanged`). Like every operation that
     /// changes two stores this is **not cancellation-safe**: run it to completion
     /// (do not put it under a timeout or a `select!` that can drop it).
     pub async fn edit(
@@ -163,11 +165,29 @@ impl Hub {
                 was_enabled: record.enabled,
                 previous: previous.clone().flatten(),
             };
-            let changed = self.move_origin_with_key(scope, slug, plan).await?;
+            let outcome = self.move_origin_with_key(scope, slug, plan).await?;
             drop(slot_guard);
-            return self
-                .finish_edit(scope, slug, &record, base_url.as_deref(), true, changed)
-                .await;
+            let mut mutation = self
+                .finish_edit(
+                    scope,
+                    slug,
+                    &record,
+                    base_url.as_deref(),
+                    true,
+                    outcome.changed,
+                )
+                .await?;
+            if outcome.left_disabled {
+                mutation.status = MutationStatus::SavedWithWarning;
+                mutation.note = format!(
+                    "{} was moved and its key saved, but it could not be switched back on; enable it once the store recovers.",
+                    mutation
+                        .record
+                        .as_ref()
+                        .map_or("The provider", |v| v.record.label.as_str())
+                );
+            }
+            return Ok(mutation);
         }
         if let Some(key) = &key
             && let Err(error) = self.write_slot(scope, slug, key.clone()).await

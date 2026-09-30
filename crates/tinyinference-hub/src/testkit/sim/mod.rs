@@ -1,6 +1,6 @@
 //! The seeded scenario runner: random but reproducible sessions against a full
 //! [`Hub`](crate::Hub) over in-memory ports, a scripted transport and a fake
-//! clock, with the ten invariants checked after **every** step.
+//! clock, with the eleven invariants checked after **every** step.
 //!
 //! A run is `ScenarioRunner::new(seed)` then [`run_random`](ScenarioRunner::run_random).
 //! The seed is always passed in code (never read from the environment), and a

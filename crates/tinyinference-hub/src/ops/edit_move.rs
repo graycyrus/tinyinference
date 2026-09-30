@@ -31,11 +31,14 @@
 //! that cannot run stops the undo there; the record stays **disabled at the new
 //! origin** (unusable). The caller's error is the reason the move failed; the
 //! stuck state is logged and announced (`ProviderEdited`, and `KeyChanged` with
-//! what the slot holds). If only the final "switch back on" failed the key is in
-//! place and `Hub::set_enabled` finishes the move; if the undo failed the
-//! provider has no key, so enter one (`set_key`) **before** switching it on (a
-//! host credential in the chain would otherwise answer at the new endpoint). The
-//! old key is lost only when the stores fail twice in a row.
+//! what the slot holds). If only the final "switch back on" failed the edit
+//! **succeeds with a warning** (`MutationStatus::SavedWithWarning`): the endpoint
+//! moved and the key is in place, and `Hub::set_enabled` finishes it. If the undo
+//! failed the caller gets the failure and the provider has no key: enter one
+//! (`set_key`) **before** testing, listing or switching it on, because a host
+//! credential in the chain would otherwise answer at the new endpoint (a
+//! disabled record is not probed-protected: `test` and `list_models` do not
+//! check the flag). The old key is lost only when the stores fail twice in a row.
 //!
 //! Not cancellation-safe: the move is several awaits over two stores. A future
 //! dropped between them (a request timeout, a `select!`) leaves the state a
@@ -45,6 +48,15 @@ use crate::error::{HubError, NotFound};
 use crate::hub::Hub;
 use crate::ids::{ScopeKey, Slug};
 use crate::secret::Secret;
+
+/// How a completed move ended.
+pub(super) struct MoveOutcome {
+    /// Whether the record's commit changed the document.
+    pub(super) changed: bool,
+    /// The endpoint moved and the key is in place, but the record could not be
+    /// switched back on: reported as a warning on a successful edit.
+    pub(super) left_disabled: bool,
+}
 
 /// Everything an origin move needs, gathered by `Hub::edit` under the lock.
 pub(super) struct MovePlan<'a> {
@@ -81,7 +93,7 @@ impl Hub {
         scope: &ScopeKey,
         slug: &Slug,
         plan: MovePlan<'_>,
-    ) -> Result<bool, HubError> {
+    ) -> Result<MoveOutcome, HubError> {
         // 1. The old key leaves the slot before anything else moves. A store can
         // delete and then report a failure: the old key goes back (the record has
         // not moved), so "nothing changed" is true of what the caller is told.
@@ -187,9 +199,18 @@ impl Hub {
             // them is stale). Switching it on is then `set_enabled`.
             tracing::warn!(%slug, reason = %error.reason(), "the provider was moved and its key saved but it could not be switched back on");
             self.announce_move(scope, slug).await;
-            return Err(error);
+            // The edit itself succeeded: the endpoint moved and the key is in
+            // place. Only the flag could not be restored, which is a warning
+            // on a successful edit rather than an error a caller would retry.
+            return Ok(MoveOutcome {
+                changed,
+                left_disabled: true,
+            });
         }
-        Ok(changed)
+        Ok(MoveOutcome {
+            changed,
+            left_disabled: false,
+        })
     }
 
     /// What a move that changed the record and could not finish tells the rest of
