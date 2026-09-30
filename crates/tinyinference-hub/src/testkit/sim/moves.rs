@@ -288,13 +288,15 @@ impl ScenarioRunner {
                     // A probe and a listing wait for the parked edit's lock:
                     // start them, let them queue, then let the edit go.
                     let mut probes = std::pin::pin!(self.probe_and_list(&scope_key, prov));
-                    tokio::select! {
+                    let finished = tokio::select! {
                         biased;
-                        () = &mut probes => {}
-                        () = std::future::ready(()) => {}
-                    }
+                        () = &mut probes => true,
+                        () = std::future::ready(()) => false,
+                    };
                     held.release();
-                    probes.await;
+                    if !finished {
+                        probes.await;
+                    }
                 }
                 _ = done_rx => {}
             }
