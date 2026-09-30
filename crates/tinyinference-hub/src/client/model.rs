@@ -81,33 +81,42 @@ impl HubModel {
         }))
     }
 
+    /// Fails closed unless the live record is still enabled and at the endpoint
+    /// this model was resolved for. The managed provider's endpoint is the host's,
+    /// not the record's, and is not checked.
+    async fn check_route_is_current(&self) -> Result<()> {
+        if self.turn.group == crate::taxonomy::ProviderGroup::Managed {
+            return Ok(());
+        }
+        let stale = match self.hub.read_config(&self.scope).await {
+            Ok(config) => config
+                .provider(&self.turn.slug)
+                .is_none_or(|record| !record.enabled || record.base_url != self.turn.base_url),
+            Err(_) => {
+                return Err(self.provider_error(
+                    "store_unreadable",
+                    "the settings store could not be read",
+                    true,
+                ));
+            }
+        };
+        if stale {
+            return Err(self.provider_error(
+                "stale_route",
+                "the provider changed or was removed since this model was resolved",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     /// The model for this call: the credential chain is resolved **now**, and
     /// the underlying client is rebuilt only when the credential changed.
     async fn current(&self) -> Result<Current> {
         // A model the host kept must not send whatever key the chain holds now
         // to an endpoint the record no longer has (G3): the live record must
         // still be enabled and at the endpoint this model was resolved for.
-        if self.turn.group != crate::taxonomy::ProviderGroup::Managed {
-            let stale = match self.hub.read_config(&self.scope).await {
-                Ok(config) => config
-                    .provider(&self.turn.slug)
-                    .is_none_or(|record| !record.enabled || record.base_url != self.turn.base_url),
-                Err(_) => {
-                    return Err(self.provider_error(
-                        "store_unreadable",
-                        "the settings store could not be read",
-                        true,
-                    ));
-                }
-            };
-            if stale {
-                return Err(self.provider_error(
-                    "stale_route",
-                    "the provider changed or was removed since this model was resolved",
-                    false,
-                ));
-            }
-        }
+        self.check_route_is_current().await?;
         let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
         let resolved = self
             .hub
@@ -126,6 +135,12 @@ impl HubModel {
                 ));
             }
         };
+        // The record again, **after** the key was read: an endpoint move commits
+        // its record before it writes the new key, so a key read here that was
+        // entered for another endpoint implies the record has already moved, and
+        // this second look sees it. (Record, key, record: the pair is only used
+        // if the record did not move across the key read.)
+        self.check_route_is_current().await?;
         let (key, origin) = match key {
             Some((secret, origin)) => {
                 let id = secret.id();

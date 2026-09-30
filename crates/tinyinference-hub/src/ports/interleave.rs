@@ -8,6 +8,16 @@
 //! parked, then releases it. The schedule is written in the test, not found by
 //! chance, so the race it reproduces reproduces every time.
 //!
+//! A hold can instead be a scripted **fault** ([`Hold::fail`]): the matching call
+//! returns an outage error at that point (after taking effect, for
+//! [`Hold::after`]: a store that commits and then times out), with no test
+//! choreography needed.
+//!
+//! Several armed holds count the calls they match independently, in the order
+//! they were armed; the first whose count is exhausted fires and is spent, and
+//! the holds armed after it do not see that call. Two identical `skip(n)` holds
+//! therefore fire on consecutive calls.
+//!
 //! ```
 //! use tinyinference_hub::ports::CredentialStore;
 //! use tinyinference_hub::ports::memory::{Call, Hold, MemoryCredentials};
@@ -35,6 +45,8 @@ use std::fmt;
 use std::sync::Mutex;
 
 use tokio::sync::oneshot;
+
+use super::PortError;
 
 /// A store call an [`Interleave`] can hold.
 #[non_exhaustive]
@@ -71,6 +83,7 @@ pub struct Hold {
     phase: Phase,
     slot: Option<String>,
     skip: usize,
+    fail: bool,
 }
 
 impl Hold {
@@ -81,6 +94,7 @@ impl Hold {
             phase: Phase::Before,
             slot: None,
             skip: 0,
+            fail: false,
         }
     }
 
@@ -103,6 +117,14 @@ impl Hold {
     #[must_use]
     pub fn skip(mut self, n: usize) -> Self {
         self.skip = n;
+        self
+    }
+
+    /// Makes the matching call fail with an outage at that point instead of
+    /// parking it.
+    #[must_use]
+    pub fn fail(mut self) -> Self {
+        self.fail = true;
         self
     }
 }
@@ -181,7 +203,16 @@ impl Interleave {
 
     /// Called by a store at each point a call can be held. Parks the call when
     /// an armed hold matches and returns once the test releases it.
-    pub(crate) async fn point(&self, call: Call, phase: Phase, slot: &str) {
+    ///
+    /// # Errors
+    ///
+    /// An outage, when the matching hold is a scripted fault.
+    pub(crate) async fn point(
+        &self,
+        call: Call,
+        phase: Phase,
+        slot: &str,
+    ) -> Result<(), PortError> {
         let parked = {
             let mut armed = self
                 .armed
@@ -204,10 +235,14 @@ impl Interleave {
             if let Some(reached) = hold.reached.take() {
                 let _ = reached.send(());
             }
+            if hold.hold.fail {
+                return Err(PortError::unavailable("injected fault"));
+            }
             if let Some(release) = hold.release.take() {
                 let _ = release.await;
             }
         }
+        Ok(())
     }
 }
 

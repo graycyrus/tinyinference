@@ -94,3 +94,20 @@ async fn interleave_config_saves_and_loads_can_be_held() {
     let (loaded, ()) = tokio::join!(load, look);
     assert!(loaded.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn interleave_a_scripted_fault_fails_the_matching_call_only() {
+    let store = MemoryCredentials::new();
+    let scope = scope();
+    let _fault = store.hold(Hold::before(Call::Get).skip(1).fail());
+    assert!(store.get(&scope, "s").await.is_ok());
+    assert!(
+        store.get(&scope, "s").await.is_err(),
+        "the second get fails"
+    );
+    assert!(store.get(&scope, "s").await.is_ok(), "and only that one");
+    // After a commit, before the caller hears of it: the write happened.
+    let _late = store.hold(Hold::after(Call::Set).fail());
+    assert!(store.set(&scope, "s", Secret::new("v")).await.is_err());
+    assert!(store.get(&scope, "s").await.unwrap().is_some());
+}

@@ -62,6 +62,7 @@ mod access;
 mod builder;
 #[cfg(test)]
 pub(crate) mod fixtures;
+mod slot_lock;
 mod tx;
 mod types;
 
@@ -124,6 +125,9 @@ pub(crate) struct Inner {
     /// When each provider was last re-tested (wall milliseconds), so a re-test
     /// that cannot clear what it looked at still waits before the next one.
     pub(crate) retests: std::sync::Mutex<HashMap<(crate::ids::ScopeKey, crate::ids::Slug), u64>>,
+    /// One async lock per `(scope, slug)` that every operation touching a key
+    /// slot holds across its record-and-key sequence (see `slot_lock`).
+    pub(crate) slot_locks: std::sync::Mutex<slot_lock::SlotLocks>,
 }
 
 /// The hub: every operation a host needs to manage and use inference providers.

@@ -74,6 +74,10 @@ impl Hub {
         }
         let view = self.view(scope, &record, &config).await;
 
+        // The key delete and the record's removal are one unit against every
+        // other key operation on this provider (a concurrent add of the slug
+        // must not find the slot half-cleared, nor a key write land in it).
+        let _guard = self.slot_lock(scope, slug).await;
         let previous = self.read_slot(scope, slug).await?;
         if previous.is_some() {
             self.delete_slot(scope, slug).await?;
@@ -241,10 +245,16 @@ impl Hub {
                 kind: record.kind.clone(),
             });
         }
+        // Under the provider's lock the record cannot be removed (or re-added)
+        // between the check and the write: the check is repeated once the lock is
+        // held, and the write happens inside it.
+        let _guard = self.slot_lock(scope, slug).await;
+        if self.read_config(scope).await?.provider(slug).is_none() {
+            return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
+        }
         self.write_slot(scope, slug, key).await?;
-        // The existence check above ran before the write. A removal that landed
-        // in between deleted the slot first, so the key just written would be
-        // owned by nothing (and would answer for a later provider of that slug).
+        // Kept for a store shared with another hub, whose removal the lock does
+        // not order: the key just written would be owned by nothing.
         let after = self.read_config(scope).await?;
         if after.provider(slug).is_none() {
             self.delete_slot(scope, slug).await.ok();
@@ -284,6 +294,7 @@ impl Hub {
         if !used.is_empty() && !confirm.in_use {
             return Err(HubError::InUse(used));
         }
+        let _guard = self.slot_lock(scope, slug).await;
         let had_key = self.read_slot(scope, slug).await?.is_some();
         if had_key {
             self.delete_slot(scope, slug).await?;

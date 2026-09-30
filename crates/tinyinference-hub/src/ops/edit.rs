@@ -85,30 +85,60 @@ impl Hub {
             None => None,
         };
 
+        // Everything below that touches the key slot, or moves the endpoint,
+        // runs under the provider's lock: another key change or edit of the
+        // same provider waits, and what this edit read is what it changes.
+        let slot_guard = if key.is_some() || base_url.is_some() {
+            Some(self.slot_lock(scope, slug).await)
+        } else {
+            None
+        };
+        // The record as it is now that nobody else can be changing this
+        // provider's key or endpoint.
+        let record = match &slot_guard {
+            Some(_) => self
+                .read_config(scope)
+                .await?
+                .provider(slug)
+                .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
+                .clone(),
+            None => record,
+        };
         let origin_changes = base_url
             .as_deref()
             .is_some_and(|new| !same_origin(&record.base_url, new));
         // Only an origin move without a new key reads the chain: a label rename or
         // a key rotation must not fail because a source is unreadable.
-        let has_chain_key = if origin_changes && key.is_none() {
-            self.credential(scope, &record).await?.key.is_some()
-        } else {
-            false
-        };
-        if has_chain_key {
+        if origin_changes && key.is_none() && self.credential(scope, &record).await?.key.is_some() {
             return Err(HubError::Invalid(InvalidInput::Malformed {
                 field: InputField::Endpoint,
                 reason: "changing the endpoint to another origin needs the key entered again",
             }));
         }
 
+        // A key entered together with an origin move is for the NEW origin, so it
+        // must never be usable against the old one, nor the old key against the
+        // new one, at any moment a request can be built. The order that
+        // guarantees it: clear the old key, move the record, write the new key.
+        // Between those steps a keyed request fails closed (no key). The other
+        // order (new key first, or record first with the old key still there)
+        // has a window in which one origin is paired with the other's key
+        // (finding 5.4).
+        let move_with_key = origin_changes && key.is_some();
         let previous = match &key {
             Some(_) => Some(self.read_slot(scope, slug).await?),
             None => None,
         };
         if let Some(key) = &key {
-            self.write_slot(scope, slug, key.clone()).await?;
+            if move_with_key {
+                if previous.as_ref().is_some_and(Option::is_some) {
+                    self.delete_slot(scope, slug).await?;
+                }
+            } else {
+                self.write_slot(scope, slug, key.clone()).await?;
+            }
         }
+        let validated_base = record.base_url.clone();
         let committed = self
             .transact(scope, |config| {
                 let record = config
@@ -118,9 +148,11 @@ impl Hub {
                     record.label.clone_from(label);
                 }
                 if let Some(url) = &base_url {
-                    // G3 again, against the record as it is now: a concurrent
-                    // edit may have moved the origin since the check above.
-                    if key.is_none() && !same_origin(&record.base_url, url) && has_chain_key {
+                    // G3 again, against the record as it is now: an edit through
+                    // another hub over this store may have moved the origin since
+                    // the check above, and this move was validated against the
+                    // old one.
+                    if !same_origin(&record.base_url, &validated_base) {
                         return Err(HubError::Conflict);
                     }
                     record.base_url.clone_from(url);
@@ -138,7 +170,7 @@ impl Hub {
                 // restoring the old one would resurrect it, and the new one just
                 // written belongs to nothing. Anything else puts the old key back.
                 if matches!(error, HubError::NotFound(_)) {
-                    if key.is_some() {
+                    if key.is_some() && !move_with_key {
                         self.delete_slot(scope, slug).await.ok();
                     }
                 } else if let Some(previous) = previous {
@@ -151,6 +183,39 @@ impl Hub {
                 return Err(error);
             }
         };
+        if move_with_key && let Some(key) = &key {
+            // The record is at the new origin with no key: now the key that was
+            // entered for it. If it cannot be written, put the record back first
+            // and the old key second, so the old key is never usable at the new
+            // origin nor the reverse.
+            if let Err(error) = self.write_slot(scope, slug, key.clone()).await {
+                let back = self
+                    .transact(scope, |config| {
+                        if let Some(record) = config.provider_mut(slug)
+                            && base_url.as_deref() == Some(record.base_url.as_str())
+                        {
+                            record.base_url.clone_from(&validated_base);
+                        }
+                        Ok(())
+                    })
+                    .await;
+                match back {
+                    Ok(_) => {
+                        if let Some(previous) = previous
+                            && let Err(restore) = self.restore_slot(scope, slug, previous).await
+                        {
+                            tracing::warn!(%slug, ?restore, "could not restore the previous key");
+                        }
+                    }
+                    // The record stays at the new origin with no key: fail
+                    // closed, and the old key stays cleared.
+                    Err(undo) => {
+                        tracing::warn!(%slug, ?undo, "could not move the endpoint back after a failed key write");
+                    }
+                }
+                return Err(error);
+            }
+        }
 
         if key.is_some() {
             self.after_key_change(scope, slug, true).await;

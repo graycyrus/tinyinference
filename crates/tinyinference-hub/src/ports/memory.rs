@@ -121,32 +121,36 @@ impl fmt::Debug for MemoryCredentials {
 #[async_trait]
 impl CredentialStore for MemoryCredentials {
     async fn get(&self, scope: &ScopeKey, slot: &str) -> Result<Option<Secret>, PortError> {
-        self.interleave.point(Call::Get, Phase::Before, slot).await;
+        self.interleave
+            .point(Call::Get, Phase::Before, slot)
+            .await?;
         self.check(false)?;
         let found = lock(&self.slots)
             .get(&(scope.clone(), slot.to_string()))
             .cloned();
-        self.interleave.point(Call::Get, Phase::After, slot).await;
+        self.interleave.point(Call::Get, Phase::After, slot).await?;
         Ok(found)
     }
 
     async fn set(&self, scope: &ScopeKey, slot: &str, value: Secret) -> Result<(), PortError> {
-        self.interleave.point(Call::Set, Phase::Before, slot).await;
+        self.interleave
+            .point(Call::Set, Phase::Before, slot)
+            .await?;
         self.check(true)?;
         lock(&self.slots).insert((scope.clone(), slot.to_string()), value);
-        self.interleave.point(Call::Set, Phase::After, slot).await;
+        self.interleave.point(Call::Set, Phase::After, slot).await?;
         Ok(())
     }
 
     async fn delete(&self, scope: &ScopeKey, slot: &str) -> Result<(), PortError> {
         self.interleave
             .point(Call::Delete, Phase::Before, slot)
-            .await;
+            .await?;
         self.check(true)?;
         lock(&self.slots).remove(&(scope.clone(), slot.to_string()));
         self.interleave
             .point(Call::Delete, Phase::After, slot)
-            .await;
+            .await?;
         Ok(())
     }
 }
@@ -219,15 +223,15 @@ impl fmt::Debug for MemoryConfig {
 #[async_trait]
 impl ConfigStore for MemoryConfig {
     async fn load(&self, scope: &ScopeKey) -> Result<Option<(HubConfig, Version)>, PortError> {
-        self.interleave.point(Call::Load, Phase::Before, "").await;
+        self.interleave.point(Call::Load, Phase::Before, "").await?;
         self.check()?;
         let Some((json, version)) = lock(&self.docs).get(scope).cloned() else {
-            self.interleave.point(Call::Load, Phase::After, "").await;
+            self.interleave.point(Call::Load, Phase::After, "").await?;
             return Ok(None);
         };
         let config: HubConfig = serde_json::from_str(&json)
             .map_err(|_| PortError::unavailable("the stored configuration is not readable"))?;
-        self.interleave.point(Call::Load, Phase::After, "").await;
+        self.interleave.point(Call::Load, Phase::After, "").await?;
         Ok(Some((config, Version::new(version))))
     }
 
@@ -237,7 +241,7 @@ impl ConfigStore for MemoryConfig {
         config: &HubConfig,
         expect: Option<Version>,
     ) -> Result<Version, PortError> {
-        self.interleave.point(Call::Save, Phase::Before, "").await;
+        self.interleave.point(Call::Save, Phase::Before, "").await?;
         self.check()?;
         if self
             .conflicts
@@ -258,7 +262,7 @@ impl ConfigStore for MemoryConfig {
             docs.insert(scope.clone(), (json, next));
             next
         };
-        self.interleave.point(Call::Save, Phase::After, "").await;
+        self.interleave.point(Call::Save, Phase::After, "").await?;
         Ok(Version::new(next))
     }
 }

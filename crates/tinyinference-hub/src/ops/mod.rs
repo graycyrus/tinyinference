@@ -18,6 +18,9 @@ mod remove;
 #[path = "guards_test.rs"]
 mod guards_tests;
 #[cfg(test)]
+#[path = "interleave_test.rs"]
+mod interleave_tests;
+#[cfg(test)]
 #[path = "query_test.rs"]
 mod query_tests;
 #[cfg(test)]

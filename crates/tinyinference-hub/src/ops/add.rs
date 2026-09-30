@@ -256,11 +256,11 @@ impl Hub {
         make_default: bool,
     ) -> Result<Added, HubError> {
         // Read the slot before anything changes: an unreadable store stops the
-        // add here, and a rollback needs to know what to put back.
-        let key_was = match &plan.key {
-            Some(_) => Some(self.read_slot(scope, &plan.slug).await?),
-            None => None,
-        };
+        // add here. (What a rollback puts back is read again, under the lock,
+        // once the record is committed.)
+        if plan.key.is_some() {
+            self.read_slot(scope, &plan.slug).await?;
+        }
         let id = self.new_record_id(&plan.slug);
         let mut inserted = None;
         self.transact(scope, |config| {
@@ -275,31 +275,66 @@ impl Hub {
             key_was: None,
         };
         if let Some(key) = &plan.key {
-            if let Err(error) = self.write_slot(scope, &plan.slug, key.clone()).await {
-                // A store can commit and then time out: put back what was there.
-                added.key_was = key_was;
-                self.undo_add(scope, &added).await;
-                return Err(error);
-            }
-            added.key_was = key_was;
-            // A removal that landed between the record's commit and the write
-            // found an empty slot to delete: the key just written would belong to
-            // nothing, and to whoever adds that slug next.
-            let still_there = match self.read_config(scope).await {
+            // The record is committed; the key goes in under the provider's lock,
+            // after confirming the record is still this add's. Without the lock, a
+            // removal and a second add of the same slug can run between this add's
+            // record and its key: this add would then write its key over the second
+            // add's and, finding its record gone, delete the slot (finding 4.6).
+            let guard = self.slot_lock(scope, &plan.slug).await;
+            let ours = match self.read_config(scope).await {
                 Ok(config) => config.providers.iter().any(|p| p.id == added.record.id),
                 Err(error) => {
                     // The add is half done and cannot be confirmed: undo it,
                     // and report why.
+                    drop(guard);
                     self.undo_add(scope, &added).await;
                     return Err(error);
                 }
             };
-            if !still_there {
+            if !ours {
+                // Somebody removed the provider meanwhile: the slot is not ours
+                // to write or to delete.
+                return Err(HubError::NotFound(crate::error::NotFound::Provider(
+                    plan.slug.clone(),
+                )));
+            }
+            // What to put back if this add is undone: read under the lock, so it
+            // is the slot as this add found it, not as it was before a removal.
+            let previous = match self.read_slot(scope, &plan.slug).await {
+                Ok(previous) => previous,
+                Err(error) => {
+                    drop(guard);
+                    self.undo_add(scope, &added).await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = self.write_slot(scope, &plan.slug, key.clone()).await {
+                // A store can commit and then time out: put back what was there.
+                added.key_was = Some(previous);
+                drop(guard);
+                self.undo_add(scope, &added).await;
+                return Err(error);
+            }
+            added.key_was = Some(previous);
+            // Once more after the write, for a removal made through another hub
+            // over the same store, which the lock does not order: the key just
+            // written would belong to nothing, and to whoever adds that slug next.
+            // (Under the lock, so it deletes only what this add wrote.)
+            let still_ours = match self.read_config(scope).await {
+                Ok(config) => config.providers.iter().any(|p| p.id == added.record.id),
+                Err(error) => {
+                    drop(guard);
+                    self.undo_add(scope, &added).await;
+                    return Err(error);
+                }
+            };
+            if !still_ours {
                 self.delete_slot(scope, &plan.slug).await.ok();
                 return Err(HubError::NotFound(crate::error::NotFound::Provider(
                     plan.slug.clone(),
                 )));
             }
+            drop(guard);
             self.after_key_change(scope, &plan.slug, true).await;
         }
         self.inner.events.emit(HubEvent::ProviderAdded {
@@ -430,6 +465,10 @@ impl Hub {
     /// a failure of the cleanup must not replace that reason.
     async fn undo_add(&self, scope: &ScopeKey, added: &Added) {
         let (slug, id) = (added.record.slug.clone(), added.record.id.clone());
+        // Held to the end: nothing else may write this provider's key between
+        // the restore and the record's removal, or a later add of the slug could
+        // have its key overwritten by this restore.
+        let _guard = self.slot_lock(scope, &slug).await;
         // Put the key slot back while this add's record still owns the slug: no
         // other add of that slug can be writing it, so this cannot clobber a
         // winner's key. A record already gone means the slot is not ours.

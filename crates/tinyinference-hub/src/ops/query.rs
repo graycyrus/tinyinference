@@ -64,7 +64,7 @@ impl Hub {
                     tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record a probe");
                 }
                 if let Some(failure) = &report.failure {
-                    self.note_rejection(scope, &record.kind, &credential, failure);
+                    self.note_rejection(scope, &record.kind, credential, failure);
                 }
                 Ok(report)
             }
