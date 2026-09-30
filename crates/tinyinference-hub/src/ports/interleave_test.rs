@@ -1,0 +1,96 @@
+//! The interleaving hook: it parks exactly the call it names and nothing else.
+
+use crate::HubConfig;
+use crate::ids::ScopeKey;
+use crate::ports::memory::{Call, Hold, MemoryConfig, MemoryCredentials};
+use crate::ports::{ConfigStore, CredentialStore};
+use crate::secret::Secret;
+
+fn scope() -> ScopeKey {
+    ScopeKey::new("a")
+}
+
+#[tokio::test]
+async fn interleave_a_call_held_before_has_not_taken_effect_and_one_held_after_has() {
+    let store = MemoryCredentials::new();
+    let scope = scope();
+    let mut before = store.hold(Hold::before(Call::Set));
+    let write = store.set(&scope, "s", Secret::new("v"));
+    let look = async {
+        before.reached().await;
+        assert!(store.get(&scope, "s").await.unwrap().is_none());
+        before.release();
+    };
+    let (done, ()) = tokio::join!(write, look);
+    done.unwrap();
+
+    let mut after = store.hold(Hold::after(Call::Set));
+    let write = store.set(&scope, "s", Secret::new("w"));
+    let look = async {
+        after.reached().await;
+        let seen = store.get(&scope, "s").await.unwrap().unwrap();
+        assert_eq!(seen.expose(), "w", "it took effect before it returned");
+        after.release();
+    };
+    let (done, ()) = tokio::join!(write, look);
+    done.unwrap();
+}
+
+#[tokio::test]
+async fn interleave_skip_and_slot_pick_the_call_to_hold() {
+    let store = MemoryCredentials::new();
+    let scope = scope();
+    let mut held = store.hold(Hold::before(Call::Set).slot("wanted").skip(1));
+    let writes = async {
+        store.set(&scope, "other", Secret::new("1")).await.unwrap();
+        store.set(&scope, "wanted", Secret::new("2")).await.unwrap();
+        store.set(&scope, "wanted", Secret::new("3")).await.unwrap();
+    };
+    let look = async {
+        held.reached().await;
+        // Only the second write to "wanted" is parked.
+        assert_eq!(
+            store.get(&scope, "wanted").await.unwrap().unwrap().expose(),
+            "2"
+        );
+        assert!(store.get(&scope, "other").await.unwrap().is_some());
+        held.release();
+    };
+    tokio::join!(writes, look);
+    assert_eq!(
+        store.get(&scope, "wanted").await.unwrap().unwrap().expose(),
+        "3"
+    );
+}
+
+#[tokio::test]
+async fn interleave_a_dropped_handle_releases_the_call() {
+    let store = MemoryCredentials::new();
+    let held = store.hold(Hold::before(Call::Delete));
+    drop(held);
+    store.delete(&scope(), "s").await.unwrap();
+}
+
+#[tokio::test]
+async fn interleave_config_saves_and_loads_can_be_held() {
+    let config = MemoryConfig::new();
+    let scope = scope();
+    let mut held = config.hold(Hold::after(Call::Save));
+    let doc = HubConfig::new();
+    let save = config.save(&scope, &doc, None);
+    let look = async {
+        held.reached().await;
+        assert!(config.raw(&scope).is_some());
+        held.release();
+    };
+    let (saved, ()) = tokio::join!(save, look);
+    saved.unwrap();
+    let mut held = config.hold(Hold::before(Call::Load));
+    let load = config.load(&scope);
+    let look = async {
+        held.reached().await;
+        held.release();
+    };
+    let (loaded, ()) = tokio::join!(load, look);
+    assert!(loaded.unwrap().is_some());
+}

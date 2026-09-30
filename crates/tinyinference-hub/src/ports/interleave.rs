@@ -1,0 +1,222 @@
+//! Deterministic interleaving for the in-memory stores.
+//!
+//! The in-memory ports complete every call without yielding, so two hub
+//! operations run on one task never overlap and a race between them cannot be
+//! staged. An [`Interleave`] fixes that: a test **holds** the `n`-th matching
+//! call of a store at a chosen point (before it takes effect, or after it has
+//! but before it returns), runs whatever it wants while the operation is
+//! parked, then releases it. The schedule is written in the test, not found by
+//! chance, so the race it reproduces reproduces every time.
+//!
+//! ```
+//! use tinyinference_hub::ports::CredentialStore;
+//! use tinyinference_hub::ports::memory::{Call, Hold, MemoryCredentials};
+//! use tinyinference_hub::{ScopeKey, Secret};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() {
+//! let store = MemoryCredentials::new();
+//! let scope = ScopeKey::new("a");
+//! let mut held = store.hold(Hold::before(Call::Set));
+//! let write = store.set(&scope, "slot", Secret::new("v"));
+//! let observe = async {
+//!     held.reached().await;
+//!     // The write is parked before it took effect.
+//!     assert!(store.get(&scope, "slot").await.unwrap().is_none());
+//!     held.release();
+//! };
+//! let (written, ()) = tokio::join!(write, observe);
+//! written.unwrap();
+//! assert!(store.get(&scope, "slot").await.unwrap().is_some());
+//! # }
+//! ```
+
+use std::fmt;
+use std::sync::Mutex;
+
+use tokio::sync::oneshot;
+
+/// A store call an [`Interleave`] can hold.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// `CredentialStore::get`.
+    Get,
+    /// `CredentialStore::set`.
+    Set,
+    /// `CredentialStore::delete`.
+    Delete,
+    /// `ConfigStore::load`.
+    Load,
+    /// `ConfigStore::save`.
+    Save,
+}
+
+/// Where in a call it is held.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Before the call reads or changes anything.
+    Before,
+    /// After the call has taken effect (and computed its answer), before it
+    /// returns: the caller has not yet seen the result.
+    After,
+}
+
+/// Which call to hold: the `skip`-th (from zero) call matching `call`, `phase`
+/// and, when set, `slot`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hold {
+    call: Call,
+    phase: Phase,
+    slot: Option<String>,
+    skip: usize,
+}
+
+impl Hold {
+    /// Holds the next `call` before it takes effect.
+    pub fn before(call: Call) -> Self {
+        Self {
+            call,
+            phase: Phase::Before,
+            slot: None,
+            skip: 0,
+        }
+    }
+
+    /// Holds the next `call` after it took effect, before it returns.
+    pub fn after(call: Call) -> Self {
+        Self {
+            phase: Phase::After,
+            ..Self::before(call)
+        }
+    }
+
+    /// Only calls on this credential slot count (ignored by config calls).
+    #[must_use]
+    pub fn slot(mut self, slot: impl Into<String>) -> Self {
+        self.slot = Some(slot.into());
+        self
+    }
+
+    /// Lets `n` matching calls through first.
+    #[must_use]
+    pub fn skip(mut self, n: usize) -> Self {
+        self.skip = n;
+        self
+    }
+}
+
+/// A held call, seen from the test.
+pub struct Held {
+    reached: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+impl Held {
+    /// Resolves once the operation under test is parked at the hold.
+    ///
+    /// # Panics
+    ///
+    /// When the store was dropped, or the operation ended, without reaching the
+    /// hold (the schedule never matched: a test bug worth failing loudly).
+    pub async fn reached(&mut self) {
+        let reached = self.reached.take().expect("reached() was already awaited");
+        reached
+            .await
+            .expect("the operation finished without reaching its hold");
+    }
+
+    /// Lets the parked call continue.
+    pub fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // A test that forgot to release must not hang the operation.
+        self.release();
+    }
+}
+
+impl fmt::Debug for Held {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Held").finish_non_exhaustive()
+    }
+}
+
+struct Armed {
+    hold: Hold,
+    reached: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<()>>,
+}
+
+/// The armed holds of one store (each memory store owns one).
+#[derive(Default)]
+pub(crate) struct Interleave {
+    armed: Mutex<Vec<Armed>>,
+}
+
+impl Interleave {
+    /// Arms `hold` and returns the test's end of it.
+    pub(crate) fn hold(&self, hold: Hold) -> Held {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        self.armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Armed {
+                hold,
+                reached: Some(reached_tx),
+                release: Some(release_rx),
+            });
+        Held {
+            reached: Some(reached_rx),
+            release: Some(release_tx),
+        }
+    }
+
+    /// Called by a store at each point a call can be held. Parks the call when
+    /// an armed hold matches and returns once the test releases it.
+    pub(crate) async fn point(&self, call: Call, phase: Phase, slot: &str) {
+        let parked = {
+            let mut armed = self
+                .armed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let position = armed.iter_mut().position(|a| {
+                let h = &mut a.hold;
+                let matches = h.call == call
+                    && h.phase == phase
+                    && h.slot.as_deref().is_none_or(|s| s == slot);
+                if matches && h.skip > 0 {
+                    h.skip -= 1;
+                    return false;
+                }
+                matches
+            });
+            position.map(|i| armed.remove(i))
+        };
+        if let Some(mut hold) = parked {
+            if let Some(reached) = hold.reached.take() {
+                let _ = reached.send(());
+            }
+            if let Some(release) = hold.release.take() {
+                let _ = release.await;
+            }
+        }
+    }
+}
+
+impl fmt::Debug for Interleave {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Interleave").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+#[path = "interleave_test.rs"]
+mod tests;

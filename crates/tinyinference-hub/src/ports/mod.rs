@@ -31,6 +31,7 @@ mod error;
 mod events;
 mod health;
 mod http;
+mod interleave;
 pub mod memory;
 #[cfg(feature = "cli")]
 mod process;
