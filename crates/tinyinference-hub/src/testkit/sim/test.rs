@@ -341,8 +341,22 @@ async fn sim_invariants_3_and_4_a_list_matches_its_credential_and_a_fetched_reje
         Match::get("http://localhost:11434/x"),
         Scripted::text(200, "x"),
     );
+    // A read that presented no credential is not a rejected credential: the
+    // cache treats a keyless 401 as an endpoint fact and may answer with an older
+    // list, so the invariant says nothing yet.
     http.send(
         HubRequest::get("http://localhost:11434/x"),
+        &crate::policy::EndpointPolicy::desktop(),
+    )
+    .await
+    .unwrap();
+    r.after_step(&action, &result(true, None, "Fresh"), &unset())
+        .await
+        .unwrap();
+    // One that did present one (stood in for by a credentialed request) must
+    // have failed with auth.
+    http.send(
+        HubRequest::get("http://localhost:11434/x").with_credentialed(true),
         &crate::policy::EndpointPolicy::desktop(),
     )
     .await
@@ -617,4 +631,105 @@ async fn sim_every_action_kind_can_be_taken_by_hand() {
     assert!(Rng::new(5).next() != Rng::new(6).next());
     assert!(Rng::new(1).below(0) == 0);
     assert!(Rng::new(1).chance(1.0));
+}
+
+const ACME: &str = "https://llm.acme.test/v1";
+const ACME_TWO: &str = "https://llm.acme-two.test/v1";
+
+async fn chat_with(r: &ScenarioRunner, base: &str, bearer: &str) {
+    let request = HubRequest::post_json(
+        format!("{base}/chat/completions"),
+        &serde_json::json!({"messages": []}),
+    )
+    .with_header("authorization", format!("Bearer {bearer}"))
+    .with_credentialed(true);
+    r.ports()
+        .http
+        .send(request, &crate::policy::EndpointPolicy::desktop())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sim_invariant_11_a_key_sent_to_an_origin_it_was_not_entered_for_is_caught() {
+    let mut r = runner();
+    let key = r.new_key(ACME);
+    // To the origin it was entered for: fine.
+    chat_with(&r, ACME, key.expose()).await;
+    r.check_invariants().await.unwrap();
+    // To the other origin: a leak.
+    chat_with(&r, ACME_TWO, key.expose()).await;
+    let v = r.check_invariants().await.unwrap_err();
+    assert_eq!(v.number, 11);
+    assert!(v.detail.contains(ACME_TWO), "{v}");
+}
+
+#[tokio::test]
+async fn sim_invariant_11_the_platform_token_only_goes_to_the_managed_endpoint() {
+    let mut r = runner();
+    r.ports().http.route(
+        Match::prefix(ACME),
+        Scripted::json(200, &serde_json::json!({"choices": []})),
+    );
+    let token = SimToken::at_minute(0);
+    chat_with(&r, ACME, &token).await;
+    let v = r.check_invariants().await.unwrap_err();
+    assert_eq!(v.number, 11);
+    assert!(v.detail.contains("platform token"), "{v}");
+}
+
+#[tokio::test]
+async fn sim_origin_moves_kept_models_and_races_by_hand() {
+    let mut r = runner();
+    let script = [
+        Action::Connect {
+            scope: 0,
+            prov: 3,
+            keyed: true,
+            add_anyway: true,
+            make_default: true,
+            completion: false,
+        },
+        Action::Keep { scope: 0 },
+        Action::UseKept { scope: 0 },
+        Action::MoveOrigin {
+            scope: 0,
+            rotate: true,
+        },
+        // The kept model is now stale and refuses; a fresh keep works again.
+        Action::UseKept { scope: 0 },
+        Action::Keep { scope: 0 },
+        Action::UseKept { scope: 0 },
+        Action::MoveOrigin {
+            scope: 0,
+            rotate: false,
+        },
+    ];
+    for action in script {
+        r.step(action).await.unwrap_or_else(|f| panic!("{f}"));
+    }
+    // Every parking point of the race, both directions of the move.
+    for at in 0..16u8 {
+        for rotate in [true, false] {
+            r.step(Action::RaceMove {
+                scope: 0,
+                at,
+                rotate,
+            })
+            .await
+            .unwrap_or_else(|f| panic!("at {at}: {f}"));
+        }
+    }
+    // Nothing kept, or no provider to move, is a quiet no-op.
+    let mut empty = runner();
+    empty.step(Action::UseKept { scope: 1 }).await.unwrap();
+    empty
+        .step(Action::RaceMove {
+            scope: 1,
+            at: 0,
+            rotate: true,
+        })
+        .await
+        .unwrap();
+    empty.step(Action::Keep { scope: 1 }).await.unwrap();
 }

@@ -2,3 +2,8 @@
 # is replayed by `sim_random_regressions` for the rest of the crate's life.
 # A found seed is added here in the same commit as the fix and a note in the
 # test log. Blank lines and `#` comments are ignored.
+
+# Found by run 4: the seeded mix with origin moves and kept models reached a keyless
+# 401 whose older list the cache serves stale by design; the runner had wrongly
+# expected an error there (an oracle bug, fixed in invariant 4).
+1592594454 flaky

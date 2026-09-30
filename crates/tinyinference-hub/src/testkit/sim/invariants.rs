@@ -308,7 +308,18 @@ impl ScenarioRunner {
         if let Action::List { scope, prov, .. } = action {
             let world = &WORLD[*prov];
             let fetched = self.ports.http.request_count() > self.requests_before;
+            // A rejection is a fact about the *credential presented*. A read that
+            // presented none (a local runtime, a keyless custom endpoint) was
+            // rejected by the endpoint itself, which the cache remembers like any
+            // other endpoint failure and may answer with an older list.
+            let presented = self
+                .ports
+                .http
+                .requests_from(self.requests_before)
+                .iter()
+                .any(|r| r.credentialed);
             if fetched
+                && presented
                 && self.modes[*prov] == Mode::AuthFail
                 && (result.ok || result.reason != Some(crate::error::ReasonCode::Auth))
             {
