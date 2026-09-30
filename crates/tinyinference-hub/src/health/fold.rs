@@ -24,6 +24,11 @@
 //! * a probe that **proves the key** clears a rejected-key failure in the lanes
 //!   shallower than itself (key-only, catalog, completion); only a completion,
 //!   the deepest check, also clears the real-turn lane and a quota failure;
+//! * the **turn lane is latest-wins**: only the most recent real turn is kept, so a
+//!   turn that gets any answer (success, or a rate limit, which is returned only
+//!   to an accepted credential) replaces an earlier turn failure, terminal or
+//!   not. What a passive turn never does is clear a *probe* lane's terminal
+//!   failure (above);
 //! * a passing probe speaks only for failures recorded **before it started**
 //!   (`started_ms`): a failure that landed while the probe was in flight is
 //!   newer than anything the probe saw and is kept;

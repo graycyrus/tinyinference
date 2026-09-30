@@ -63,6 +63,20 @@ fn health_the_fold_table() {
         ("nothing recorded", vec![], ProviderHealth::Unknown),
         ("a passing catalog", vec![Probe(Catalog, None)], ok),
         ("a passing turn", vec![Turn(None)], ok),
+        // The turn lane is latest-wins: a turn that got an answer shows the
+        // credential was accepted *now*, so it ends a Down that only turns caused;
+        // a rate limit is an answer too. (A failing completion **probe** is the
+        // deliberate finding a passive turn does not hide; see the rows above.)
+        (
+            "a turn that works after a rejected turn ends the rejection",
+            vec![Turn(Some(ReasonCode::Auth)), Turn(None)],
+            ok,
+        ),
+        (
+            "a rate-limited turn after a rejected one shows the key was accepted",
+            vec![Turn(Some(ReasonCode::Auth)), Turn(Some(ReasonCode::RateLimited))],
+            ProviderHealth::Degraded(ReasonCode::RateLimited),
+        ),
         (
             "a rejected key is down at once",
             vec![Probe(Catalog, Some(ReasonCode::Auth))],
