@@ -122,11 +122,15 @@ pub async fn detect_local(
         let Some(descriptor) = catalogue::descriptor_for_runtime(print.runtime) else {
             continue;
         };
-        drafts.push(
-            ProviderDraft::new(descriptor.kind.as_str())
-                .with_base_url(root)
-                .with_label(format!("{} (port {})", descriptor.label, print.port)),
-        );
+        let draft = ProviderDraft::new(descriptor.kind.as_str()).with_base_url(root);
+        // Ollama and LM Studio have rows of their own. vLLM and llama.cpp share
+        // the generic local-OpenAI kind, so they get a label that keeps their
+        // slugs apart (and off the reserved `vllm` alias).
+        drafts.push(if descriptor.slug() == "local-openai" {
+            draft.with_label(format!("{} (port {})", print.runtime, print.port))
+        } else {
+            draft
+        });
     }
     drafts
 }

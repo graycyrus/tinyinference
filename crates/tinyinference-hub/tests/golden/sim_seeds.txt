@@ -1,0 +1,4 @@
+# Seeds that once broke an invariant, one per line as `seed[ flaky]`. Every line
+# is replayed by `sim_random_regressions` for the rest of the crate's life.
+# A found seed is added here in the same commit as the fix and a note in the
+# test log. Blank lines and `#` comments are ignored.

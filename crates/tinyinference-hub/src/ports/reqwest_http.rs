@@ -51,7 +51,12 @@ pub trait Resolver: Send + Sync + Debug {
     /// # Errors
     ///
     /// [`HttpError::ConnectFailed`] when the name does not resolve.
-    async fn resolve(&self, host: &str, port: u16, timeout: Duration) -> Result<Vec<IpAddr>, HttpError>;
+    async fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Vec<IpAddr>, HttpError>;
 }
 
 /// Sends one prepared request over a connection pinned to `pin`.
@@ -77,7 +82,12 @@ pub struct SystemResolver;
 
 #[async_trait]
 impl Resolver for SystemResolver {
-    async fn resolve(&self, host: &str, port: u16, timeout: Duration) -> Result<Vec<IpAddr>, HttpError> {
+    async fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Vec<IpAddr>, HttpError> {
         let name = host.to_string();
         let lookup = tokio::task::spawn_blocking(move || (name, port).to_socket_addrs());
         match tokio::time::timeout(timeout, lookup).await {
@@ -156,7 +166,8 @@ pub fn pin_addresses(
         return Err(HttpError::ConnectFailed);
     }
     for ip in ips {
-        check_address(*ip, policy).map_err(|refusal| HttpError::Policy(PolicyViolation::from(refusal)))?;
+        check_address(*ip, policy)
+            .map_err(|refusal| HttpError::Policy(PolicyViolation::from(refusal)))?;
     }
     Ok(ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
 }
@@ -195,9 +206,14 @@ impl ReqwestHttp {
         self
     }
 
-    async fn hop(&self, request: HubRequest, policy: &EndpointPolicy) -> Result<HubResponse, HttpError> {
-        let url = Url::parse(&request.url)
-            .map_err(|_| HttpError::Failed(LogOnly::new("the URL could not be parsed".to_string())))?;
+    async fn hop(
+        &self,
+        request: HubRequest,
+        policy: &EndpointPolicy,
+    ) -> Result<HubResponse, HttpError> {
+        let url = Url::parse(&request.url).map_err(|_| {
+            HttpError::Failed(LogOnly::new("the URL could not be parsed".to_string()))
+        })?;
         let port = url.port_or_known_default().unwrap_or(443);
         let (domain, ips) = match url.host() {
             Some(Host::Domain(name)) => (
@@ -213,7 +229,10 @@ impl ReqwestHttp {
             addrs: pin_addresses(&ips, port, policy)?,
         };
         let prepared = build_request(&request, url)?;
-        let response = self.executor.execute(&pin, prepared, request.timeout).await?;
+        let response = self
+            .executor
+            .execute(&pin, prepared, request.timeout)
+            .await?;
         read_response(response, request.body_cap, &request.url).await
     }
 }
@@ -245,10 +264,12 @@ pub fn build_request(request: &HubRequest, url: Url) -> Result<reqwest::Request,
     };
     let mut prepared = reqwest::Request::new(method, url);
     for (name, value) in &request.headers {
-        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| HttpError::Failed(LogOnly::new("a header name is not valid".to_string())))?;
-        let value = reqwest::header::HeaderValue::from_str(value)
-            .map_err(|_| HttpError::Failed(LogOnly::new("a header value is not valid".to_string())))?;
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            HttpError::Failed(LogOnly::new("a header name is not valid".to_string()))
+        })?;
+        let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            HttpError::Failed(LogOnly::new("a header value is not valid".to_string()))
+        })?;
         prepared.headers_mut().append(name, value);
     }
     if let Some(body) = &request.body {
@@ -273,7 +294,9 @@ pub async fn read_response(
     let headers: Vec<(String, String)> = response
         .headers()
         .iter()
-        .filter_map(|(name, value)| Some((name.as_str().to_string(), value.to_str().ok()?.to_string())))
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
         .collect();
     let mut body: Vec<u8> = Vec::new();
     let mut truncated = false;
@@ -298,7 +321,11 @@ pub async fn read_response(
 
 #[async_trait]
 impl Http for ReqwestHttp {
-    async fn send(&self, request: HubRequest, policy: &EndpointPolicy) -> Result<HubResponse, HttpError> {
+    async fn send(
+        &self,
+        request: HubRequest,
+        policy: &EndpointPolicy,
+    ) -> Result<HubResponse, HttpError> {
         follow_redirects(request, policy, &self.headers, &*self.clock, |hop| {
             self.hop(hop, policy)
         })

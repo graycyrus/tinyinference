@@ -16,6 +16,7 @@ mod http;
 mod process;
 mod rig;
 mod script;
+mod sim;
 
 pub use clock::FakeClock;
 pub use contract::{ContractFixture, ListingBody, run_contract};
@@ -24,6 +25,10 @@ pub use http::{RecordedRequest, ScriptedHttp};
 pub use process::{ScriptedSpawner, Spawned};
 pub use rig::MemoryPorts;
 pub use script::{Match, Script, Scripted};
+pub use sim::{
+    Action, FaultPlan, InvariantViolation, MANAGED_BASE, Mode, ScenarioRunner, SimFailure,
+    SimToken, StepResult, WORLD, World,
+};
 
 #[cfg(test)]
 #[path = "test.rs"]

@@ -173,6 +173,17 @@ impl ScriptedHttp {
         self.state().log.clone()
     }
 
+    /// The requests sent from index `start` on (a cheap way to read only what
+    /// is new since a previous look).
+    pub fn requests_from(&self, start: usize) -> Vec<RecordedRequest> {
+        self.state().log.iter().skip(start).cloned().collect()
+    }
+
+    /// How many requests the transport refused.
+    pub fn refused_count(&self) -> usize {
+        self.state().refused.len()
+    }
+
     /// How many requests were sent, one per hop.
     pub fn request_count(&self) -> usize {
         self.state().log.len()

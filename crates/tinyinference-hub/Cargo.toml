@@ -78,3 +78,31 @@ required-features = ["testing"]
 [[test]]
 name = "sim_engine"
 required-features = ["testing"]
+
+[[test]]
+name = "sim_random"
+required-features = ["testing"]
+
+[[test]]
+name = "sim_hub"
+required-features = ["testing"]
+
+[[test]]
+name = "contract_hub"
+required-features = ["testing"]
+
+[[test]]
+name = "example_minimal_host"
+required-features = ["testing"]
+
+[[example]]
+name = "minimal_host"
+required-features = ["testing"]
+
+[[test]]
+name = "scenario_catalogue"
+required-features = ["testing"]
+
+[[test]]
+name = "guards_engine"
+required-features = ["testing"]
