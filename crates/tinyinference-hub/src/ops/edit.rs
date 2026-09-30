@@ -24,6 +24,12 @@ impl Hub {
     /// cannot be sent somewhere its owner never chose. A new key drops the
     /// provider's health and the scope's cached catalogs.
     ///
+    /// Moving the endpoint to another origin **with** a new key is done in a
+    /// fixed order that never lets a credential meet an origin it was not entered
+    /// for: the record is committed at the new origin and disabled, the key is
+    /// written, and the record is switched back to what it was. The provider
+    /// reads as disabled for those few calls (see `edit_move.rs`).
+    ///
     /// # Errors
     ///
     /// [`HubError::NotFound`]; [`HubError::Unsupported`] for the read-only

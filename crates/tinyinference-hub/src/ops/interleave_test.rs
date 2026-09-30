@@ -517,3 +517,32 @@ async fn ops_race_a_model_parked_at_its_key_read_never_pairs_the_new_key_with_th
         assert_no_cross_origin_credential(&spy, "model parked at its key read");
     }
 }
+
+#[tokio::test]
+async fn ops_race_a_key_clear_that_waited_for_a_removal_reports_the_provider_gone() {
+    // clear_key checked the provider, then waited for the lock while a removal
+    // ran. Deciding again once it holds the lock, it finds nothing to clear: it
+    // must not report "no key to remove" for a provider that no longer exists
+    // (nor, had a new add landed, delete that add's key).
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let acme = slug("acme");
+    let mut held = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Delete).slot(&slot));
+    let removal = bed.hub.remove(&bed.scope, &acme, Confirm::in_use());
+    let clear = async {
+        held.reached().await;
+        let mut clear = std::pin::pin!(bed.hub.clear_key(&bed.scope, &acme, Confirm::in_use()));
+        assert!(
+            futures::poll!(clear.as_mut()).is_pending(),
+            "clear_key waits for the removal's lock"
+        );
+        held.release();
+        clear.await
+    };
+    let (removed, cleared) = tokio::join!(removal, clear);
+    removed.unwrap();
+    assert!(matches!(cleared, Err(HubError::NotFound(_))), "{cleared:?}");
+}

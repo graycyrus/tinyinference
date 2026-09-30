@@ -145,11 +145,14 @@ back to either host by the hub.
   `set_key` racing a `remove` in the instant between two stores can still leave
   one orphan key slot; the hub re-checks and cleans up, which narrows the window
   to two adjacent calls but cannot close it across two stores.
-- An edit that moves the endpoint to another origin **with** a key clears the old
-  key, moves the record, then writes the new key, so a credential is never usable
-  against an origin it was not entered for; a keyed request made in between fails
-  closed (`no_key`), and a `HubModel` kept from before the move refuses
-  (`stale_route`).
+- An edit that moves the endpoint to another origin **with** a key commits the
+  record at the new origin *disabled*, writes the new key, then switches the
+  record back on, so no credential, whichever source of the chain supplies it,
+  can meet an origin it was not entered for. For those few calls the provider
+  reads as disabled (a route to it fails closed; a `HubModel` kept from before
+  the move refuses with `stale_route`). A failure rolls back in the order
+  empty-slot, record back, old key back; if the record cannot be moved back it is
+  left disabled at the new origin with no key and the error says so.
 - Failover, budgets, cooldowns and streaming health are a later crate; the hub
   exposes the signals (`record_outcome`, health, `Retry`).
 

@@ -111,3 +111,14 @@ async fn interleave_a_scripted_fault_fails_the_matching_call_only() {
     assert!(store.set(&scope, "s", Secret::new("v")).await.is_err());
     assert!(store.get(&scope, "s").await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn interleave_a_slot_filter_does_not_apply_to_a_config_call() {
+    // `Hold::slot` names a credential slot; a config call has none, so the filter
+    // is ignored rather than making the hold unmatchable.
+    let config = MemoryConfig::new();
+    let scope = scope();
+    let _fault = config.hold(Hold::before(Call::Load).slot("anything").fail());
+    assert!(config.load(&scope).await.is_err());
+    assert!(config.load(&scope).await.is_ok());
+}

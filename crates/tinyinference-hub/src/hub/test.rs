@@ -432,3 +432,35 @@ async fn builder_an_extra_credential_source_answers_after_the_stored_key() {
     });
     assert!(bed.hub.kinds().get(&"brand-new".into()).is_none());
 }
+
+#[test]
+fn hub_a_credential_has_a_cache_identity_only_when_presented_and_not_rotating() {
+    use crate::credential::CredentialOrigin;
+    let with = |origin| super::Credential {
+        key: Some(crate::secret::Secret::new("sk-not-a-real-key")),
+        origin: Some(origin),
+        epoch: 0,
+    };
+    let stored = with(CredentialOrigin::ProviderKey);
+    assert_eq!(
+        stored.cache_identity(true),
+        Some(crate::secret::Secret::new("sk-not-a-real-key").id())
+    );
+    // A key that is configured but not sent (an auth style of none) shares the
+    // slot with everyone.
+    assert_eq!(stored.cache_identity(false), None);
+    // A token the source rotates by itself never splits the account's list.
+    for rotating in [
+        CredentialOrigin::InstanceIdentity,
+        CredentialOrigin::SessionJwt,
+        CredentialOrigin::OAuth,
+    ] {
+        assert_eq!(with(rotating).cache_identity(true), None);
+    }
+    let none = super::Credential {
+        key: None,
+        origin: None,
+        epoch: 0,
+    };
+    assert_eq!(none.cache_identity(true), None);
+}
