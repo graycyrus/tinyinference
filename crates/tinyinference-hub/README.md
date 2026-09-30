@@ -1,68 +1,116 @@
 # tinyinference-hub
 
-One provider taxonomy, catalogue, typed error taxonomy, and endpoint policy for
-every TinyInference host (OpenCompany, OpenHuman, the TUI, CLIs, future
-servers).
+One provider hub for every TinyInference host (OpenCompany, OpenHuman, the TUI,
+CLIs, future servers).
 
 Two hosts used to implement provider management separately: two catalogues of
-the same hosted vendors, two error classifiers, and safety invariants (SSRF
-policy, credential redaction) that only one had. This crate is the shared
-answer. It is a **leaf**: it depends on `tinyinference-llm` (plus small
-utility crates), nothing depends on it, and no existing public item of any
-other crate changed.
+the same hosted vendors, two error classifiers, two managed paths, and safety
+invariants (SSRF policy, tenant-scoped model cache, "only a rejected key rolls a
+new key back") that only one had. This crate is the shared answer. It is a
+**leaf**: it depends on `tinyinference-llm` (plus small utility crates), nothing
+depends on it, and no existing public item of any other crate changed.
 
-This build ships the foundations and the engine: ports, credential chain, model
-catalogs, probing, health and the kind drivers. Operations, route resolution and
-the `ChatModel` factory follow (see "Roadmap").
+## Plug it in (four ports)
 
-## What is here
+```rust
+use tinyinference_hub::ports::memory::{MemoryConfig, MemoryCredentials};
+use tinyinference_hub::ports::SystemClock;
+use tinyinference_hub::{
+    ConnectOptions, EndpointPolicy, Hub, ModelId, ProviderDraft, ScopeKey, Secret, TurnQuery,
+};
 
-| Module | What it gives you |
+let hub = Hub::builder()
+    .credentials(MemoryCredentials::new()) // wrap your keychain or vault
+    .config(MemoryConfig::new())           // a file, a database row
+    .http(my_http)                         // ReqwestHttp (feature `http-reqwest`) or your own
+    .clock(SystemClock)
+    .policy(EndpointPolicy::desktop())     // `hosted()` in a multi-tenant server
+    .build()?;
+
+let me = ScopeKey::new("user:local");
+let draft = ProviderDraft::new("openai")
+    .with_key(Secret::new(std::env::var("OPENAI_API_KEY")?))
+    .with_model(ModelId::parse("gpt-5")?);
+hub.connect(&me, draft, ConnectOptions::default()).await?;   // checks the key, keeps the row
+let turn = hub.resolve_for_turn(&me, &TurnQuery::new()).await?; // no credential inside
+let model = hub.chat_model(&me, &turn).await?;               // Arc<dyn ChatModel<()>>
+```
+
+`examples/minimal_host.rs` is a runnable, network-free walk-through
+(`cargo run -p tinyinference-hub --example minimal_host --features testing`); its
+output is a golden file.
+
+| Port | What it is |
 |---|---|
-| `error` | `HubError`, the stable `ReasonCode` wire vocabulary, `Retry`, and `classify(status, headers, body)`, which turns a vendor response into a `ProviderFailure`. A spend cap is `quota` and never retried; a rate limit is `rate_limited` and carries the provider's own delay. |
-| `Secret`, `LogOnly` | Wrappers that redact themselves in `Debug` and `Display`. `Secret` has no `Serialize`; `LogOnly` holds raw upstream text that may echo request material. |
-| `ids` | `Slug`, `ModelId`, `KindId`, `ScopeKey`, `AgentKey`, `WorkloadKey`, and the validators ported from OpenCompany (`slugify`, `check_provider_name`, `check_slug`, `check_model_id`). |
-| `taxonomy` | Groups, transports, protocols, `AuthStyle`, catalog shapes, `TestDepth`, `CliKind`, and `LocalRuntime`, which reconciles the four local-runtime enums by conversion. |
-| `catalogue`, `descriptor` | Every built-in kind as data: the managed kind, 26 cloud providers, 5 local runtimes, 2 CLI logins, with typed quirks. `ProviderRecord` is a configured instance and has no credential field. |
-| `config` | `HubConfig` (the persisted document: providers, default, per-agent pins, forward-compatible extra fields; refuses credentials at any depth and documents from a newer schema), `DefaultChoice`, `ModelChoice`, `ProviderDraft`. |
-| `policy`, `endpoint` | `EndpointPolicy` presets (`hosted`, `desktop`, `local_only`), `check_endpoint`, `check_address`, redirect checks, `HeaderPolicy`, and endpoint credential refusal, redaction and scrubbing. |
-| `ports` | The traits a host implements: `CredentialStore` (get/set/delete; an error is never "no key"), `ConfigStore` (compare-and-swap), `Http`, `Clock`, plus `HealthStore`, `EventSink` and `EnvSource` (in-memory or no-op defaults in `ports::memory`) and the optional `TokenSource` and `Detector` (a host supplies them when it has a rotating token or first-run detection). `ports::memory` has in-memory implementations; `follow_redirects` is the policy-enforcing redirect loop an `Http` implementation shares. |
-| `credential` | The ordered `CredentialChain` of `CredentialSource`s (store, environment, static, rotating token, legacy slot). It reports which source answered, re-reads on every call, stops on an unreadable source instead of falling through, and treats a blank value as "not here". |
-| `catalog` | Tolerant listing parsers (OpenAI shape including a bare array, Ollama `/api/tags`, LM Studio `/api/v0/models`, the TinyHumans paged envelope), the `CatalogCache` (endpoint-keyed, scope-partitioned when a credential was sent, a rejected key or `403` never remembered, single-flight, stale on error), and `merge_metadata` for registries and operator overrides. |
-| `probe`, `health` | `run_probe` at three depths (`KeyOnly`, `Catalog`, `Completion`) with a `ProbeReport`; `HealthTracker` folds probes and real turns (`Outcome`) into `ProviderHealth` (`Ok`, `Degraded`, `Down`, `SignedOut`, ...). |
-| `kinds` | `KindDriver` and the built-in drivers (OpenAI-compatible, Anthropic, managed, local, CLI) plus the `DriverRegistry`. A host adds a kind with `register`. |
-| `testkit` (feature `testing`) | `FakeClock`, `ScriptedHttp` (applies the same endpoint policy a real `Http` must), and `run_contract`, the suite every driver passes. No sockets, no wall clock. |
+| `CredentialStore` | where keys live. `get`/`set`/`delete`; an error means *unreadable*, never *no key* |
+| `ConfigStore` | the persisted `HubConfig`, with compare-and-swap |
+| `Http` | the transport for probes and catalogs; applies the endpoint policy on every redirect hop and pins the address it checked |
+| `Clock` | the only source of time |
+
+Optional: `HealthStore` and `EventSink` (in-memory or no-op by default),
+`TokenSource` (a rotating managed token), `EnvSource`, `Detector`, `UsageQuery`
+(references only your host knows about), `ProcessSpawner` (feature `cli`),
+`ModelFactory` (how the model behind a turn is built), `ModelMetadataSource`.
+
+## What the hub does
+
+| Area | Operations |
+|---|---|
+| Providers | `connect` (add, check, roll back on a rejected key), `add`, `edit`, `remove`, `set_enabled`, `set_key`, `clear_key` |
+| Checking | `probe_draft` (nothing stored), `test` at `KeyOnly`, `Catalog` or `Completion` depth, `list_models` (cached, single-flight, `refresh`), `retest_down` |
+| State | `health`, `status` (managed first), `record_outcome` |
+| Choosing | `set_default`, `clear_default`, `pin_agent`, `set_workload_route`, `resolve_for_turn` |
+| Using | `chat_model` (resolves the credential on every call; feeds real turns back into health) |
+| Discovering | `detect` (local runtimes by fingerprint, provider keys in the environment; never persisted), `local_status` |
+| Feature-gated | `cli_readiness` (`cli`), `oauth_start`/`oauth_complete` (`oauth`, types only) |
+
+Every change is *load, check the guards, save with the version loaded*, retried
+on a lost compare-and-swap with the guards re-run. The state machine is written
+out once, in the `hub` module docs.
 
 ## Guarantees
 
 - **A credential is never printed or stored on a record.** `Secret` redacts in
-  `Debug` and `Display` and does not implement `Serialize`; `ProviderRecord` has
-  no credential field.
-- **Raw upstream error text is log-only.** It never reaches `Display`, `Debug`,
+  `Debug` and `Display` and has no `Serialize`; `ProviderRecord` has no
+  credential field and refuses credential-shaped fields at any depth on load.
+- **Raw upstream error text is log-only.** It never reaches `Display`, `Debug`
   or `HubError::user_message`.
-- **Only a rejected credential rolls back an add** (a local runtime also rolls
-  back when it is unreachable). The classifier's auth branch is a positive list
-  of phrases, so a body it does not recognise keeps the key.
-- **SSRF policy on every URL and address.** Link-local and metadata addresses
-  are refused under every policy; alternative IPv4 spellings, `localhost` by
-  name, and IPv4 embedded in IPv6 (mapped, NAT64, compatible) get the answer for
-  the address a client would actually connect to.
+- **Only a rejected credential rolls back an add** (a local runtime also when it
+  is unreachable), never with `add_anyway`, and the previous key is restored.
+- **SSRF policy on every URL and address.** Link-local and metadata addresses are
+  refused under every policy; alternative IPv4 spellings, `localhost` by name and
+  IPv4 embedded in IPv6 get the answer for the address a client would connect to;
+  a credential never crosses an origin.
+- **Tenants never see each other.** A model list cached for one scope is never
+  served to another; a rejected key or a `403` is never remembered.
+- **Signed out is a typed state**, not an empty list.
+- **The default is never silently changed.** Removing a provider leaves the
+  default, every pin and every route in place, where they fail closed.
 
-## Example
+## Migration readers
 
-```rust
-use tinyinference_hub::{ReasonCode, Retry, classify};
+`import::oc` and `import::oh` are pure functions from the stored shapes of
+OpenCompany and OpenHuman (plain structs that also `Deserialize` from the stored
+JSON) to a `HubConfig` plus a `LossReport` naming every step that was dropped,
+ambiguous, normalised, synthesised or fail-closed. `route::legacy_oc` and
+`route::legacy_oh` read and write both string route grammars. Nothing is written
+back to either host by the hub.
 
-// An Anthropic spend cap arrives as a 429. It is a quota problem, not a
-// cooldown: never retried.
-let failure = classify(
-    429,
-    &[],
-    r#"{"type":"error","error":{"type":"rate_limit_error","message":"You have reached your specified API usage limits."}}"#,
-);
-assert_eq!(failure.reason, ReasonCode::Quota);
-assert_eq!(failure.retry, Retry::Never);
-```
+## Modules
+
+| Module | What it gives you |
+|---|---|
+| `hub` | `Hub`, `HubBuilder`, `ManagedConfig`, `HubPolicy` and the value types the operations return |
+| `error` | `HubError`, `ReasonCode`, `Retry`, `classify` |
+| `ids`, `Secret`, `LogOnly` | validated identifiers and redacting wrappers |
+| `taxonomy`, `catalogue`, `descriptor` | every built-in kind as data; `LocalRuntime` reconciles the four local-runtime enums |
+| `policy`, `endpoint` | `EndpointPolicy` presets, redirect and address checks, endpoint redaction |
+| `ports` | the traits, in-memory defaults, `follow_redirects`, `ReqwestHttp` (feature) |
+| `credential` | the ordered `CredentialChain` and its sources |
+| `catalog`, `probe`, `health`, `kinds` | parsers and cache, three-depth probes, folded health, kind drivers |
+| `config`, `route`, `import` | the persisted document, structured routes, migration readers |
+| `client`, `detect`, `cli`, `oauth` | the `ChatModel`, detection, CLI readiness, OAuth types |
+| `testkit` (feature `testing`) | `FakeClock`, `ScriptedHttp`, `MemoryPorts`, `ScenarioRunner`, the contract suite |
 
 ## Features
 
@@ -70,25 +118,30 @@ assert_eq!(failure.retry, Retry::Never);
 
 | Feature | Effect |
 |---|---|
-| `local-bridge` | `From`/`TryFrom` between `LocalRuntime` and `tinyinference-local`'s `LocalProviderKind` and `LocalAiProvider`. |
-| `testing` | The `testkit` module: `FakeClock`, `ScriptedHttp`, `ContractFixture`, `run_contract`. Always available to this crate's own tests. |
-| `cli`, `oauth`, `http-reqwest` | `cli` adds the `ProcessSpawner` port (readiness arrives later). `oauth` and `http-reqwest` are reserved and add nothing yet; `oauth` will only ever define types: no OAuth flow is enabled. |
+| `testing` | the no-socket simulation kit (also always available to this crate's own tests) |
+| `cli` | the `ProcessSpawner` port and `Hub::cli_readiness`; a CLI login is a route target, never a record |
+| `oauth` | OAuth **types only**; every flow answers `Unsupported`. Claude subscription OAuth is excluded permanently: Claude is a CLI login |
+| `http-reqwest` | `ReqwestHttp`: no automatic redirects, DNS resolved once per hop, every address checked, connection pinned to the checked addresses, proxies ignored |
+| `local-bridge` | `From`/`TryFrom` between `LocalRuntime` and `tinyinference-local`'s enums |
 
-## Known limits of this slice
+## Known limits
 
-- `Http` is a port the host implements; the hub ships the scripted double, not a
-  socket implementation (`http-reqwest` is reserved). Turn traffic uses
-  `tinyinference-llm`'s own transport, so the hub's per-hop redirect and
-  IP-pinning guarantees will cover probes and catalogs, not chat turns.
-- The managed kind's endpoint, catalog shape and query are supplied by the host,
-  because OpenCompany and OpenHuman reach different backends.
+- Turn traffic uses `tinyinference-llm`'s own transport, so per-redirect policy
+  and address pinning cover probes and catalogs, not chat turns. The resolved
+  endpoint is re-checked against the policy at `resolve_for_turn`.
+- `ReqwestHttp`'s two network touch points (`SystemResolver::resolve` and
+  `ReqwestExecutor::execute`) are not exercised by this crate's tests, which open
+  no sockets; everything around them is.
+- The managed provider's backend differs between OpenCompany and OpenHuman; the
+  host names its endpoint and catalog shape.
+- An ephemeral route parses but is not resolved by the hub.
+- Failover, budgets, cooldowns and streaming health are a later crate; the hub
+  exposes the signals (`record_outcome`, health, `Retry`).
 
-## Roadmap
+## Testing
 
-1. Foundations (done): errors, secrets, identifiers, taxonomy, catalogue,
-   endpoint policy.
-2. Engine (this crate as it stands): ports, credential chain, model catalog
-   cache, probing, health, kind drivers, contract suite.
-3. Operations: the `Hub` facade and operation set over the `ConfigStore` (the
-   types and the compare-and-swap store already exist), route resolution, import
-   readers, the `ChatModel` factory, detection, and the seeded scenario runner.
+`cargo test -p tinyinference-hub --all-features` runs the unit, contract,
+property, golden, compat and simulated-e2e suites; `PROPTEST_CASES=6000` widens
+the property tests. `testkit::ScenarioRunner` plays seeded random sessions over
+a full `Hub` and checks ten invariants after every step; a seed that ever failed
+is kept in `tests/golden/sim_seeds.txt` and replayed forever.

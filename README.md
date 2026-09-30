@@ -126,7 +126,8 @@ crates/tinyinference-video/
 crates/tinyinference-decisions/
 └── src/            typed Jev and Sage decisions and HTTP clients
 crates/tinyinference-hub/
-└── src/            provider taxonomy, catalogue, typed errors, endpoint policy
+└── src/            provider hub: taxonomy, catalogue, typed errors, endpoint
+                    policy, operations, health, routes, chat-model factory
 ```
 
 ### Media generation
