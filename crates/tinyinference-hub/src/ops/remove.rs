@@ -98,8 +98,9 @@ impl Hub {
                 // it: putting the key back would leave a slot no record owns.
                 if !matches!(error, HubError::NotFound(_))
                     && let Some(previous) = previous
+                    && let Err(restore) = self.restore_slot(scope, slug, Some(previous)).await
                 {
-                    self.restore_slot(scope, slug, Some(previous)).await?;
+                    tracing::warn!(%slug, ?restore, "could not restore the previous key");
                 }
                 return Err(error);
             }

@@ -276,7 +276,8 @@ impl Hub {
         };
         if let Some(key) = &plan.key {
             if let Err(error) = self.write_slot(scope, &plan.slug, key.clone()).await {
-                // Nothing was written to the slot, so there is nothing to put back.
+                // A store can commit and then time out: put back what was there.
+                added.key_was = key_was;
                 self.undo_add(scope, &added).await;
                 return Err(error);
             }
@@ -284,12 +285,15 @@ impl Hub {
             // A removal that landed between the record's commit and the write
             // found an empty slot to delete: the key just written would belong to
             // nothing, and to whoever adds that slug next.
-            let still_there = self
-                .read_config(scope)
-                .await?
-                .providers
-                .iter()
-                .any(|p| p.id == added.record.id);
+            let still_there = match self.read_config(scope).await {
+                Ok(config) => config.providers.iter().any(|p| p.id == added.record.id),
+                Err(error) => {
+                    // The add is half done and cannot be confirmed: undo it,
+                    // and report why.
+                    self.undo_add(scope, &added).await;
+                    return Err(error);
+                }
+            };
             if !still_there {
                 self.delete_slot(scope, &plan.slug).await.ok();
                 return Err(HubError::NotFound(crate::error::NotFound::Provider(
@@ -426,7 +430,27 @@ impl Hub {
     /// a failure of the cleanup must not replace that reason.
     async fn undo_add(&self, scope: &ScopeKey, added: &Added) {
         let (slug, id) = (added.record.slug.clone(), added.record.id.clone());
-        let mut existed = false;
+        // Put the key slot back while this add's record still owns the slug: no
+        // other add of that slug can be writing it, so this cannot clobber a
+        // winner's key. A record already gone means the slot is not ours.
+        let existed = match self.read_config(scope).await {
+            Ok(config) => config.providers.iter().any(|p| p.id == id),
+            Err(_) => false,
+        };
+        if existed && let Some(previous) = added.key_was.clone() {
+            let present = previous.is_some();
+            match self.restore_slot(scope, &slug, previous).await {
+                Ok(()) => self.inner.events.emit(HubEvent::KeyChanged {
+                    scope: scope.clone(),
+                    slug: slug.clone(),
+                    present,
+                }),
+                Err(error) => {
+                    tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
+                }
+            }
+        }
+        let mut existed = existed;
         let removed = self
             .transact(scope, |config| {
                 existed = config.providers.iter().any(|p| p.id == id);
@@ -444,17 +468,6 @@ impl Hub {
             .await;
         if let Err(error) = &removed {
             tracing::warn!(%slug, reason = %error.reason(), "could not take an undone add's record out");
-        }
-        if existed && let Some(previous) = added.key_was.clone() {
-            let present = previous.is_some();
-            if let Err(error) = self.restore_slot(scope, &slug, previous).await {
-                tracing::warn!(%slug, reason = %error.reason(), "could not restore the key an undone add replaced");
-            }
-            self.inner.events.emit(HubEvent::KeyChanged {
-                scope: scope.clone(),
-                slug: slug.clone(),
-                present,
-            });
         }
         self.forget_health(scope, &slug).await;
         self.inner.cache.evict_scope(scope);

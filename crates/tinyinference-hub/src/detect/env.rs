@@ -5,8 +5,9 @@ use crate::ports::EnvSource;
 
 /// The well-known environment variables and the catalogue kind each one is the
 /// key for, in the order detection reports them. The first variable listed for
-/// a kind is the one the credential chain reads when the builder enables
-/// environment credentials.
+/// a kind is the primary one; the credential chain reads every variable listed
+/// for the kind (first non-blank wins) when the builder enables environment
+/// credentials.
 pub const ENV_KEYS: &[(&str, &str)] = &[
     ("OPENAI_API_KEY", "openai"),
     ("ANTHROPIC_API_KEY", "anthropic"),

@@ -827,3 +827,42 @@ fn import_inputs_deserialize_from_partial_stored_json() {
     let extra: OcSnapshot = serde_json::from_str(r#"{"providers":[],"future_field":1}"#).unwrap();
     assert!(extra.providers.is_empty());
 }
+
+#[test]
+fn import_oc_references_to_a_dropped_managed_alias_are_rewritten_to_the_managed_slug() {
+    let imported = import_oc(&oc(json!({
+        "providers": [{"id": "b", "slug": "cloud", "kind": "managed"}],
+        "default": "{\"provider\":\"cloud\",\"model\":\"m\"}",
+        "routes": {"chat": "cloud:m"},
+        "health": "{\"cloud\": {\"state\": \"ok\"}}"
+    })))
+    .unwrap();
+    assert!(matches!(
+        &imported.config.default,
+        DefaultChoice::Full { provider, .. } if provider.as_str() == "tinyhumans"
+    ));
+    let route = imported
+        .config
+        .workload_routes
+        .get(&WorkloadKey::new("chat"))
+        .unwrap();
+    assert_eq!(route.target, RouteTarget::Provider(slug("tinyhumans")));
+    assert!(imported.health.contains_key(&slug("tinyhumans")));
+    assert!(!imported.health.contains_key(&slug("cloud")));
+    assert!(imported.loss.has("inference/default", LossKind::Normalised));
+}
+
+#[test]
+fn import_oc_a_cloud_presets_stored_endpoint_is_replaced_by_the_preset() {
+    let imported = import_oc(&oc(json!({"providers": [
+        {"id": "a", "slug": "openai", "kind": "openai", "base_url": "https://evil.test/v1"}
+    ]})))
+    .unwrap();
+    let record = imported.config.provider(&slug("openai")).unwrap();
+    assert_eq!(record.base_url, "https://api.openai.com/v1");
+    assert!(
+        imported
+            .loss
+            .has("inference/providers/openai", LossKind::Normalised)
+    );
+}

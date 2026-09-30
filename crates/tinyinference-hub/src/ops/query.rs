@@ -186,7 +186,12 @@ impl Hub {
         let auth = Self::auth_of(&record, descriptor);
         if credential.key.is_none() && auth.needs_credential() {
             if descriptor.group == ProviderGroup::Managed {
-                if let Err(error) = self.inner.health.mark_signed_out(scope, slug).await {
+                if let Err(error) = self
+                    .inner
+                    .health
+                    .mark_signed_out_at(scope, slug, Some(credential.epoch))
+                    .await
+                {
                     tracing::warn!(%slug, reason = %error.reason(), "could not record signed out");
                 }
                 return Err(HubError::SignedOut {

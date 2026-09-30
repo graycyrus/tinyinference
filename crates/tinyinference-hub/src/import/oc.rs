@@ -19,7 +19,7 @@ use crate::ids::{KindId, ModelId, Slug, WorkloadKey};
 use crate::route::{RouteTarget, legacy_oc};
 use crate::taxonomy::ProviderGroup;
 
-use super::{Imported, LossKind};
+use super::{Imported, LossKind, LossReport};
 
 /// One entry of OpenCompany's `inference/providers`.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -96,6 +96,29 @@ fn model_on_row(models: &BTreeMap<String, String>) -> ModelOnRow {
     } else {
         ModelOnRow::Ambiguous
     }
+}
+
+/// A slug that names the managed provider by a legacy alias (`cloud`) becomes
+/// the managed provider's own slug, so a default, route or health entry that
+/// pointed at a dropped alias row still resolves. Reported when it rewrites.
+fn canon(loss: &mut LossReport, at: &str, slug: Slug) -> Slug {
+    if catalogue::group_of(slug.as_str()) != ProviderGroup::Managed {
+        return slug;
+    }
+    let Some(managed) = catalogue::descriptors_in(ProviderGroup::Managed)
+        .next()
+        .and_then(|d| Slug::parse(d.slug()).ok())
+    else {
+        return slug;
+    };
+    if managed != slug {
+        loss.push(
+            at,
+            LossKind::Normalised,
+            "a legacy alias of the managed provider was rewritten to its own slug",
+        );
+    }
+    managed
 }
 
 /// Maps a stored kind to a catalogue kind, or refuses it (guard G27: an unknown
@@ -214,11 +237,25 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
             managed_off |= !stored.enabled;
             continue;
         }
+        let preset = descriptor
+            .filter(|d| !d.endpoint_editable)
+            .and_then(|d| d.default_endpoint);
         let base_url = if stored.base_url.trim().is_empty() {
             descriptor
                 .and_then(|d| d.default_endpoint)
                 .unwrap_or("")
                 .to_string()
+        } else if let Some(preset) = preset
+            && stored.base_url.trim() != preset
+        {
+            // G2: a cloud preset's endpoint is data, not something a stored
+            // row can point a key at.
+            out.loss.push(
+                format!("inference/providers/{}", stored.slug),
+                LossKind::Normalised,
+                "a cloud preset's endpoint is fixed; the stored base_url was replaced by the preset",
+            );
+            preset.to_string()
         } else {
             stored.base_url.trim().to_string()
         };
@@ -327,7 +364,16 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
     }
 
     if let Some(raw) = &snapshot.default {
-        out.config.default = parse_default(raw)?;
+        out.config.default = match parse_default(raw)? {
+            DefaultChoice::ProviderOnly { provider } => DefaultChoice::ProviderOnly {
+                provider: canon(&mut out.loss, "inference/default", provider),
+            },
+            DefaultChoice::Full { provider, model } => DefaultChoice::Full {
+                provider: canon(&mut out.loss, "inference/default", provider),
+                model,
+            },
+            other => other,
+        };
     }
 
     let local_records = out
@@ -337,7 +383,14 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
         .filter(|p| catalogue::group_of(p.kind.as_str()) == ProviderGroup::Local)
         .count();
     for (tier, text) in &snapshot.routes {
-        let route = legacy_oc::parse(text)?;
+        let mut route = legacy_oc::parse(text)?;
+        if let RouteTarget::Provider(slug) = route.target.clone() {
+            route.target = RouteTarget::Provider(canon(
+                &mut out.loss,
+                &format!("inference/routes/{tier}"),
+                slug,
+            ));
+        }
         if route.target == RouteTarget::Default {
             out.loss.push(
                 format!("inference/routes/{tier}"),
@@ -378,6 +431,7 @@ pub fn import(snapshot: &OcSnapshot) -> Result<Imported, HubError> {
                     ) else {
                         continue;
                     };
+                    let slug = canon(&mut out.loss, "inference/health", slug);
                     out.health.insert(slug, health_state(state));
                 }
                 out.loss.push(

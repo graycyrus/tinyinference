@@ -332,11 +332,17 @@ pub fn to_string(route: &ProviderRoute) -> Option<String> {
         }
         RouteTarget::Provider(slug) => {
             model?;
+            // A slug that is a local runtime's prefix would read back as that runtime.
+            if local_runtime_of(&slug.as_str().to_ascii_lowercase()).is_some() {
+                return None;
+            }
             with_model(slug.as_str())
         }
         RouteTarget::Local(Some(runtime)) => with_model(prefix_of(*runtime)),
         RouteTarget::Local(None) => with_model("ollama"),
-        RouteTarget::Cli(_) => with_model("claude-code"),
+        RouteTarget::Cli(CliKind::ClaudeCode) => with_model("claude-code"),
+        // OpenHuman's grammar names one CLI; another would read back as it.
+        RouteTarget::Cli(_) => return None,
         RouteTarget::Ephemeral => with_model("ephemeral-route"),
     })
 }

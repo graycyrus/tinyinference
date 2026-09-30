@@ -86,7 +86,7 @@ impl Hub {
         let origin_changes = base_url
             .as_deref()
             .is_some_and(|new| !same_origin(&record.base_url, new));
-        if origin_changes && key.is_none() && self.read_slot(scope, slug).await?.is_some() {
+        if origin_changes && key.is_none() && self.credential(scope, &record).await?.key.is_some() {
             return Err(HubError::Invalid(InvalidInput::Malformed {
                 field: InputField::Endpoint,
                 reason: "changing the endpoint to another origin needs the key entered again",
@@ -128,7 +128,11 @@ impl Hub {
                         self.delete_slot(scope, slug).await.ok();
                     }
                 } else if let Some(previous) = previous {
-                    self.restore_slot(scope, slug, previous).await?;
+                    // The operation's own error is the reason; a failed restore
+                    // must not replace it.
+                    if let Err(restore) = self.restore_slot(scope, slug, previous).await {
+                        tracing::warn!(%slug, ?restore, "could not restore the previous key");
+                    }
                 }
                 return Err(error);
             }

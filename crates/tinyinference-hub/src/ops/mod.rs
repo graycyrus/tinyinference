@@ -24,5 +24,8 @@ mod query_tests;
 #[path = "race_test.rs"]
 mod race_tests;
 #[cfg(test)]
+#[path = "round3_test.rs"]
+mod round3_tests;
+#[cfg(test)]
 #[path = "test.rs"]
 mod tests;

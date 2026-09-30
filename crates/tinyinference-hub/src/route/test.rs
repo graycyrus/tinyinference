@@ -471,6 +471,18 @@ fn oh_to_string_says_none_for_what_the_grammar_cannot_say() {
         "a bare provider name does not read back as that provider"
     );
     assert_eq!(
+        legacy_oh::to_string(
+            &ProviderRoute::new(RouteTarget::Cli(CliKind::Codex)).with_model(model("m"))
+        ),
+        None,
+        "another CLI would read back as claude-code"
+    );
+    assert_eq!(
+        legacy_oh::to_string(&ProviderRoute::provider(slug("ollama")).with_model(model("m"))),
+        None,
+        "a slug that is a local runtime prefix would read back as the runtime"
+    );
+    assert_eq!(
         legacy_oh::to_string(&ProviderRoute::provider(slug("openrouter")).with_model(model("m")))
             .as_deref(),
         Some("openrouter:m")

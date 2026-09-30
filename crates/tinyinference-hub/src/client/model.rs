@@ -73,6 +73,7 @@ impl HubModel {
     /// The model for this call: the credential chain is resolved **now**, and
     /// the underlying client is rebuilt only when the credential changed.
     async fn current(&self) -> Result<Current> {
+        let epoch = self.hub.inner.health.epoch(&self.scope, &self.turn.slug);
         let resolved = self
             .hub
             .chain_for(&self.turn.kind)
@@ -106,7 +107,7 @@ impl HubModel {
                 .hub
                 .inner
                 .health
-                .mark_signed_out(&self.scope, &self.turn.slug)
+                .mark_signed_out_at(&self.scope, &self.turn.slug, Some(epoch))
                 .await;
             return Err(self.provider_error("signed_out", "signed out", false));
         }
