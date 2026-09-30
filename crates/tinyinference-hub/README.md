@@ -138,9 +138,18 @@ back to either host by the hub.
 - The managed provider's backend differs between OpenCompany and OpenHuman; the
   host names its endpoint and catalog shape.
 - An ephemeral route parses but is not resolved by the hub.
-- A `set_key` racing a `remove` in the instant between two stores can leave one
-  orphan key slot; the hub re-checks and cleans up, which narrows the window to
-  two adjacent calls but cannot close it across two stores.
+- Every operation that touches a provider's key slot holds one lock per
+  `(scope, slug)`, so within **one** `Hub` (and its clones) a key change, an
+  origin move, an add and a removal of the same provider are ordered. Two hubs
+  over one store are ordered only by the stores' own guarantees: there a
+  `set_key` racing a `remove` in the instant between two stores can still leave
+  one orphan key slot; the hub re-checks and cleans up, which narrows the window
+  to two adjacent calls but cannot close it across two stores.
+- An edit that moves the endpoint to another origin **with** a key clears the old
+  key, moves the record, then writes the new key, so a credential is never usable
+  against an origin it was not entered for; a keyed request made in between fails
+  closed (`no_key`), and a `HubModel` kept from before the move refuses
+  (`stale_route`).
 - Failover, budgets, cooldowns and streaming health are a later crate; the hub
   exposes the signals (`record_outcome`, health, `Retry`).
 
@@ -149,5 +158,9 @@ back to either host by the hub.
 `cargo test -p tinyinference-hub --all-features` runs the unit, contract,
 property, golden, compat and simulated-e2e suites; `PROPTEST_CASES=6000` widens
 the property tests. `testkit::ScenarioRunner` plays seeded random sessions over
-a full `Hub` and checks ten invariants after every step; a seed that ever failed
-is kept in `tests/golden/sim_seeds.txt` and replayed forever.
+a full `Hub` and checks eleven invariants after every step (the eleventh: a
+credential is only ever sent to the origin it was entered for, including while
+an edit is parked mid-way by the `Hold` interleaving hook); a seed that ever
+failed is kept in `tests/golden/sim_seeds.txt` and replayed forever. The long
+soak (`tests/sim_soak.rs`: 20,000 seeds, each plain and with flaky stores) is `#[ignore]`d: run it with
+`cargo test -p tinyinference-hub --all-features --release --test sim_soak -- --ignored`.
