@@ -197,6 +197,7 @@ impl Hub {
             }
         };
         let changed = committed.changed;
+        drop(slot_guard);
         self.finish_edit(scope, slug, &record, &base_url, key.is_some(), changed)
             .await
     }

@@ -143,7 +143,7 @@ impl Hub {
             .provider(slug)
             .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
             .clone();
-        let credential = self.credential(scope, &record).await?;
+        let credential = self.credential_checked(scope, &record).await?;
         self.probe_record(scope, &record, depth, model, &credential)
             .await
     }
@@ -182,7 +182,7 @@ impl Hub {
                 kind: record.kind.clone(),
             });
         }
-        let credential = self.credential(scope, &record).await?;
+        let credential = self.credential_checked(scope, &record).await?;
         let auth = Self::auth_of(&record, descriptor);
         if credential.key.is_none() && auth.needs_credential() {
             if descriptor.group == ProviderGroup::Managed {
@@ -364,7 +364,7 @@ impl Hub {
             && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
             && let Ok(credential) = self.credential(scope, record).await
         {
-            self.note_rejection(scope, &record.kind, &credential, failure);
+            self.note_rejection_unattributed(scope, &record.kind, &credential, failure);
         }
         Ok(())
     }
@@ -424,7 +424,7 @@ impl Hub {
                 } else {
                     continue;
                 };
-            let Ok(credential) = self.credential(scope, record).await else {
+            let Ok(credential) = self.credential_checked(scope, record).await else {
                 continue;
             };
             if credential.key.is_none() && Self::auth_of(record, descriptor).needs_credential() {

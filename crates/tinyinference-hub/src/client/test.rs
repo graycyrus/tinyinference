@@ -515,6 +515,8 @@ async fn client_a_stale_rejection_does_not_refresh_a_token_rotated_meanwhile() {
 struct Identifying {
     generation: AtomicUsize,
     refreshes: AtomicUsize,
+    /// Calls to the plain (unattributed) `invalidate`.
+    plain: AtomicUsize,
 }
 
 impl Identifying {
@@ -527,6 +529,10 @@ impl Identifying {
 impl TokenSource for Identifying {
     async fn token(&self, _: &crate::ids::ScopeKey) -> Result<Option<Secret>, PortError> {
         Ok(Some(Secret::new(self.current())))
+    }
+
+    fn invalidate(&self, _: &crate::ids::ScopeKey) {
+        self.plain.fetch_add(1, Ordering::SeqCst);
     }
 
     fn invalidate_rejected(&self, _: &crate::ids::ScopeKey, rejected: crate::secret::SecretId) {
@@ -544,6 +550,7 @@ async fn client_two_rejections_of_one_token_refresh_a_rotating_source_once() {
     let tokens = Arc::new(Identifying {
         generation: AtomicUsize::new(0),
         refreshes: AtomicUsize::new(0),
+        plain: AtomicUsize::new(0),
     });
     let (factory, _fake) = recording(vec![]);
     let bed = Bed::with(|b| {
@@ -962,4 +969,43 @@ async fn client_a_signed_out_mark_does_not_outlive_a_sign_in_the_hub_was_not_tol
     // And signing out again reads signed out again.
     *tokens.token.lock().unwrap() = None;
     assert_eq!(health(&bed).await.health, ProviderHealth::SignedOut);
+}
+
+#[tokio::test]
+async fn client_a_rejection_the_host_reports_names_no_token_because_the_hub_does_not_know_which() {
+    // `record_outcome` is told a turn was rejected, not which token it used; the
+    // token answering now may be a newer one. Naming it would make a source that
+    // honours identity treat the rejection as current and discard a fresh token,
+    // so the source is told plainly and refreshes as it always did.
+    let tokens = Arc::new(Identifying {
+        generation: AtomicUsize::new(1),
+        refreshes: AtomicUsize::new(0),
+        plain: AtomicUsize::new(0),
+    });
+    let (factory, _fake) = recording(vec![]);
+    let bed = Bed::with(|b| {
+        b.model_factory(factory).managed(
+            ManagedConfig::new("https://api.tinyhumans.test/x").source(TokenSourceAdapter::new(
+                tokens.clone(),
+                CredentialOrigin::SessionJwt,
+            )),
+        )
+    });
+    let mut failure =
+        crate::error::ProviderFailure::new(ReasonCode::Auth, crate::error::Retry::Never);
+    failure.status = Some(401);
+    bed.hub
+        .record_outcome(
+            &bed.scope,
+            &slug("tinyhumans"),
+            crate::health::Outcome::Failed(failure),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tokens.plain.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        tokens.refreshes.load(Ordering::SeqCst),
+        0,
+        "no id was named"
+    );
 }

@@ -476,7 +476,8 @@ impl ScenarioRunner {
         &self,
         request: &crate::testkit::RecordedRequest,
     ) -> Result<(), InvariantViolation> {
-        if request.header("authorization").is_none() {
+        // Whatever header carries it: a key in `x-api-key` is as much a leak.
+        if request.headers.is_empty() {
             return Ok(());
         }
         for (secret, entered_for) in &self.bound {
@@ -498,11 +499,9 @@ impl ScenarioRunner {
                 ));
             }
         }
-        let elapsed_ms = request
-            .at_wall_ms
-            .saturating_sub(crate::testkit::FakeClock::START_WALL_MS);
-        let token = Secret::new(SimToken::at_minute(elapsed_ms / 60_000));
-        if !request.url.starts_with(MANAGED_BASE) && request.carried(&token) {
+        // A platform token of any minute (a stale one is as wrong as a fresh one).
+        let any_token = Secret::new("platform-token-");
+        if !request.url.starts_with(MANAGED_BASE) && request.carried(&any_token) {
             return Err(broken(
                 11,
                 format!("the platform token was sent to {}", request.url),

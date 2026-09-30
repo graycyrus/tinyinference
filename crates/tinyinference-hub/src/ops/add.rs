@@ -385,7 +385,7 @@ impl Hub {
 
         // Is there anything to check with? A keyed kind saved without a key is
         // saved unchecked.
-        let credential = match self.credential(scope, &record).await {
+        let credential = match self.credential_checked(scope, &record).await {
             Ok(credential) => credential,
             Err(error) => {
                 self.undo_add(scope, &added).await;

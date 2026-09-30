@@ -126,6 +126,41 @@ impl Hub {
         })
     }
 
+    /// [`Hub::credential`] for a caller that is about to **send** the credential
+    /// to `record`'s endpoint: resolved under the provider's lock, after
+    /// re-reading the record.
+    ///
+    /// An endpoint move holds the same lock across every step, so a credential
+    /// resolved here is one the record's endpoint, as of now, was entered for: a
+    /// probe or a listing that read the record just before a move cannot pair it
+    /// with the key the move writes. The managed provider's endpoint is the
+    /// host's and cannot move, so it skips the extra read.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::Conflict`] when the record's endpoint changed (or the record
+    /// went) since the caller read it: retry against the new one. Otherwise as
+    /// [`Hub::credential`].
+    pub(crate) async fn credential_checked(
+        &self,
+        scope: &ScopeKey,
+        record: &ProviderRecord,
+    ) -> Result<Credential, HubError> {
+        if self.group_of(record) == ProviderGroup::Managed {
+            return self.credential(scope, record).await;
+        }
+        let _guard = self.slot_lock(scope, &record.slug).await;
+        let unchanged = self
+            .read_config(scope)
+            .await?
+            .provider(&record.slug)
+            .is_some_and(|now| now.base_url == record.base_url);
+        if !unchanged {
+            return Err(HubError::Conflict);
+        }
+        self.credential(scope, record).await
+    }
+
     pub(crate) fn group_of(&self, record: &ProviderRecord) -> ProviderGroup {
         self.inner.registry.get(&record.kind).map_or_else(
             || catalogue::group_of(record.kind.as_str()),
@@ -256,6 +291,24 @@ impl Hub {
                 }
                 None => self.chain_for(kind).invalidate_origin(scope, origin),
             }
+        }
+    }
+
+    /// A rejection reported by the host for a turn whose credential the hub does
+    /// not know (`record_outcome`): the credential answering now may not be the
+    /// one that was rejected, so the source is told without naming one and
+    /// refreshes as it always did.
+    pub(crate) fn note_rejection_unattributed(
+        &self,
+        scope: &ScopeKey,
+        kind: &KindId,
+        credential: &Credential,
+        failure: &ProviderFailure,
+    ) {
+        if let Some(origin) = credential.origin.as_ref()
+            && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
+        {
+            self.chain_for(kind).invalidate_origin(scope, origin);
         }
     }
 

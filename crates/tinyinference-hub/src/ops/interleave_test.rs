@@ -703,3 +703,178 @@ async fn ops_an_undone_origin_move_whose_old_key_cannot_come_back_ends_with_no_k
     assert_eq!(state_of(&bed).await, (OLD.to_string(), None));
     assert!(enabled_of(&bed).await);
 }
+
+#[tokio::test]
+async fn ops_a_probe_that_read_the_record_before_an_origin_move_never_sends_after_it() {
+    // A probe reads the record (old origin) and is parked; the whole move runs;
+    // the probe then resolves its credential. It must notice the endpoint changed
+    // since it read the record and refuse with a conflict, not pair the new key
+    // (or a host credential) with the old endpoint. Both credential shapes.
+    for stored in [true, false] {
+        let (bed, spy) = acme_bed_with(stored).await;
+        let acme = slug("acme");
+        let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+        let test = bed
+            .hub
+            .test(&bed.scope, &acme, crate::taxonomy::TestDepth::Catalog, None);
+        let moving = async {
+            held.reached().await;
+            bed.hub.edit(&bed.scope, &acme, move_patch()).await.unwrap();
+            held.release();
+        };
+        let (tested, ()) = tokio::join!(test, moving);
+        assert!(matches!(tested, Err(HubError::Conflict)), "{tested:?}");
+        assert_eq!(bed.ports.http.request_count(), 0, "nothing was sent");
+        assert_no_cross_origin_credential(&spy, "probe read before a move");
+    }
+}
+
+#[tokio::test]
+async fn ops_a_probe_started_during_an_origin_move_waits_for_it_and_sends_the_new_pair() {
+    for stored in [true, false] {
+        let (bed, _spy) = acme_bed_with(stored).await;
+        bed.ports.http.route(
+            crate::testkit::Match::prefix(NEW),
+            crate::testkit::Scripted::json(200, &crate::hub::fixtures::models_body(&["m"])),
+        );
+        let acme = slug("acme");
+        let mut held = bed.ports.config.hold(Hold::after(Call::Save));
+        let edit = bed.hub.edit(&bed.scope, &acme, move_patch());
+        let others = async {
+            held.reached().await;
+            // The move has committed (disabled, at the new origin) and is parked.
+            let mut test = std::pin::pin!(bed.hub.test(
+                &bed.scope,
+                &acme,
+                crate::taxonomy::TestDepth::Catalog,
+                None
+            ));
+            assert!(
+                futures::poll!(test.as_mut()).is_pending(),
+                "waits for the move"
+            );
+            held.release();
+            test.await
+        };
+        let (edited, tested) = tokio::join!(edit, others);
+        edited.unwrap();
+        tested.unwrap();
+        for request in bed.ports.http.requests_from(0) {
+            assert!(request.url.starts_with(NEW), "{}", request.url);
+            assert!(
+                !request.carried(&Secret::new(K_OLD)) && !request.carried(&Secret::new(K_HOST)),
+                "an old credential reached {}",
+                request.url
+            );
+            assert!(request.carried(&Secret::new(K_NEW)));
+        }
+        assert!(bed.ports.http.request_count() > 0);
+    }
+}
+
+#[tokio::test]
+async fn ops_a_store_that_commits_the_move_and_then_fails_is_read_back_not_assumed_away() {
+    // The record commit reaches the store and the answer is lost: the record is
+    // at the new origin. The edit must carry on from there (it did move), not
+    // put the old key back beside the new origin.
+    let (bed, _spy) = acme_bed().await;
+    let _fault = bed.ports.config.hold(Hold::after(Call::Save).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap();
+    assert_eq!(state_of(&bed).await, (NEW.to_string(), Some(K_NEW.into())));
+    assert!(enabled_of(&bed).await);
+}
+
+#[tokio::test]
+async fn ops_a_move_whose_outcome_cannot_be_read_back_leaves_the_slot_empty() {
+    // The commit's answer is lost and so is the read that would say where the
+    // record is: the old key must not be restored beside a record that may be at
+    // the new origin.
+    let (bed, _spy) = acme_bed().await;
+    let _lost = bed.ports.config.hold(Hold::after(Call::Save).fail());
+    // Loads: the first read (#0), the re-read under the lock (#1), the
+    // transaction's (#2), then the read-back (#3).
+    let _blind = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Load).skip(3).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    let (base, key) = state_of(&bed).await;
+    assert_eq!((base.as_str(), key), (NEW, None));
+}
+
+#[tokio::test]
+async fn ops_a_delete_that_commits_and_then_fails_still_gets_the_old_key_back() {
+    let (bed, _spy) = acme_bed().await;
+    let slot = slug("acme").key_slot();
+    let _fault = bed
+        .ports
+        .credentials
+        .hold(Hold::after(Call::Delete).slot(&slot).fail());
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    assert_eq!(state_of(&bed).await, (OLD.to_string(), Some(K_OLD.into())));
+}
+
+#[tokio::test]
+async fn ops_a_disable_made_during_an_origin_move_is_applied_after_it_not_overwritten() {
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    let mut held = bed.ports.config.hold(Hold::after(Call::Save));
+    let edit = bed.hub.edit(&bed.scope, &acme, move_patch());
+    let disable = async {
+        held.reached().await;
+        let mut off =
+            std::pin::pin!(
+                bed.hub
+                    .set_enabled(&bed.scope, &acme, false, Confirm::in_use())
+            );
+        assert!(
+            futures::poll!(off.as_mut()).is_pending(),
+            "the switch waits for the move"
+        );
+        held.release();
+        off.await
+    };
+    let (edited, disabled) = tokio::join!(edit, disable);
+    edited.unwrap();
+    disabled.unwrap();
+    assert!(
+        !enabled_of(&bed).await,
+        "the operator's disable is the last word"
+    );
+}
+
+#[tokio::test]
+async fn ops_a_move_that_cannot_switch_the_provider_on_still_announces_the_change() {
+    let (bed, _spy) = acme_bed().await;
+    let _fault = bed
+        .ports
+        .config
+        .hold(Hold::before(Call::Save).skip(1).fail());
+    bed.ports.events.drain();
+    bed.hub
+        .edit(&bed.scope, &slug("acme"), move_patch())
+        .await
+        .unwrap_err();
+    let events = bed.ports.events.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::ProviderEdited { .. })),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::KeyChanged { .. })),
+        "{events:?}"
+    );
+}

@@ -636,6 +636,25 @@ impl CredentialStore for StaleGet {
     }
 }
 
+/// The rotation an operator makes "while a key is being read", staged from inside
+/// the credential store's `get`. Reads for sending now happen under the
+/// provider's lock, so the rotation cannot go through `set_key` (it would wait
+/// for the lock its own reader holds); it writes the slot and runs the hooks a
+/// `set_key` runs, which is the state the guards under test must handle.
+fn rotate_while_the_key_is_being_read(
+    hub: &crate::hub::Hub,
+    store: &Arc<crate::ports::memory::MemoryCredentials>,
+    scope: &ScopeKey,
+) {
+    futures::executor::block_on(async {
+        store
+            .set(scope, &slug("openai").key_slot(), Secret::new("sk-new"))
+            .await
+            .unwrap();
+        hub.after_key_change(scope, &slug("openai"), true).await;
+    });
+}
+
 fn stale_get_hub(
     ports: &MemoryPorts,
 ) -> (
@@ -679,9 +698,9 @@ async fn health_a_check_whose_credential_was_read_before_a_key_change_is_not_rec
         ),
     );
     let target = me.clone();
+    let store = ports.credentials.clone();
     *creds.hook.lock().unwrap() = Some(Box::new(move |hub| {
-        futures::executor::block_on(hub.set_key(&target, &slug("openai"), Secret::new("sk-new")))
-            .unwrap();
+        rotate_while_the_key_is_being_read(hub, &store, &target);
     }));
     // The key is read (old), then rotated, then the probe runs with the old one.
     let report = hub
@@ -716,9 +735,9 @@ async fn ops_a_list_read_with_an_old_key_does_not_serve_the_new_key_from_the_cac
         ),
     );
     let target = me.clone();
+    let store = ports.credentials.clone();
     *creds.hook.lock().unwrap() = Some(Box::new(move |hub| {
-        futures::executor::block_on(hub.set_key(&target, &slug("openai"), Secret::new("sk-new")))
-            .unwrap();
+        rotate_while_the_key_is_being_read(hub, &store, &target);
     }));
     hub.list_models(&me, &slug("openai"), false).await.unwrap();
     ports.http.route(

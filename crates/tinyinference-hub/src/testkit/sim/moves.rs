@@ -145,8 +145,9 @@ impl ScenarioRunner {
         }
     }
 
-    /// Uses the movable provider the two ways a host does, mid-edit.
-    async fn use_it(&self, scope: &ScopeKey, prov: usize, kept: &Arc<dyn ChatModel<()>>) {
+    /// Uses the movable provider the two ways a host does, mid-edit: through the
+    /// model it kept and through a fresh resolve.
+    async fn use_models(&self, scope: &ScopeKey, prov: usize, kept: &Arc<dyn ChatModel<()>>) {
         let _ = Self::send(kept).await;
         let query = TurnQuery::new().with_override(
             ProviderRoute::provider(Slug::parse(WORLD[prov].slug).expect("a constant slug"))
@@ -157,6 +158,24 @@ impl ScenarioRunner {
         {
             let _ = Self::send(&fresh).await;
         }
+    }
+
+    /// The operations that send a credential of their own: a probe and a
+    /// listing, which read the record and then the key. They wait for an endpoint
+    /// move of the same provider (it holds the provider's lock throughout).
+    async fn probe_and_list(&self, scope: &ScopeKey, prov: usize) {
+        let slug = Slug::parse(WORLD[prov].slug).expect("a constant slug is valid");
+        let _ = self
+            .hub
+            .test(scope, &slug, crate::taxonomy::TestDepth::Catalog, None)
+            .await;
+        let _ = self.hub.list_models(scope, &slug, true).await;
+    }
+
+    /// Everything a host can do with the provider once nothing is parked.
+    async fn use_it(&self, scope: &ScopeKey, prov: usize, kept: &Arc<dyn ChatModel<()>>) {
+        self.use_models(scope, prov, kept).await;
+        self.probe_and_list(scope, prov).await;
     }
 
     /// The mirror race: the kept model is parked at its credential read (before
@@ -188,7 +207,11 @@ impl ScenarioRunner {
             // A model that refuses before reading its credential never parks.
             tokio::select! {
                 () = held.reached() => {}
-                _ = sent_rx => {}
+                _ = sent_rx => {
+                    // The hold was never reached; the edit's own credential reads
+                    // must not be parked by it.
+                    held.release();
+                }
             }
             let edited = self.hub.edit(scope, slug, patch).await;
             held.release();
@@ -261,8 +284,17 @@ impl ScenarioRunner {
         let others = async {
             tokio::select! {
                 () = held.reached() => {
-                    self.use_it(&scope_key, prov, &kept).await;
+                    self.use_models(&scope_key, prov, &kept).await;
+                    // A probe and a listing wait for the parked edit's lock:
+                    // start them, let them queue, then let the edit go.
+                    let mut probes = std::pin::pin!(self.probe_and_list(&scope_key, prov));
+                    tokio::select! {
+                        biased;
+                        () = &mut probes => {}
+                        () = std::future::ready(()) => {}
+                    }
                     held.release();
+                    probes.await;
                 }
                 _ = done_rx => {}
             }

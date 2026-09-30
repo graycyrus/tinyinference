@@ -22,6 +22,10 @@
 //! the slot holds nothing or the new key while the record is at the new origin,
 //! and nothing or the old key while it is at the old one.
 //!
+//! A store that commits and then reports a failure is looked at, not assumed
+//! away: after an error from the record commit the record is read back before
+//! the old key is restored, and if it cannot be read the slot is left empty.
+//!
 //! An undo runs in the order that keeps that true at every instant: empty the
 //! slot, move the record back and re-enable it, then restore the old key. A step
 //! that cannot run stops the undo there; the record stays **disabled at the new
@@ -64,9 +68,16 @@ impl Hub {
         slug: &Slug,
         plan: MovePlan<'_>,
     ) -> Result<bool, HubError> {
-        // 1. The old key leaves the slot before anything else moves.
-        if plan.previous.is_some() {
-            self.delete_slot(scope, slug).await?;
+        // 1. The old key leaves the slot before anything else moves. A store can
+        // delete and then report a failure: the old key goes back (the record has
+        // not moved), so "nothing changed" is true of what the caller is told.
+        if plan.previous.is_some()
+            && let Err(error) = self.delete_slot(scope, slug).await
+        {
+            if let Err(restore) = self.restore_slot(scope, slug, plan.previous.clone()).await {
+                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+            }
+            return Err(error);
         }
         // 2. The record moves, disabled.
         let committed = self
@@ -91,18 +102,40 @@ impl Hub {
                 Ok(())
             })
             .await;
-        let committed = match committed {
-            Ok(committed) => committed,
+        let changed = match committed {
+            Ok(committed) => committed.changed,
             Err(error) => {
-                // Nothing moved: the old key goes back, unless the provider is
-                // gone (its key went with it).
-                if !matches!(error, HubError::NotFound(_))
-                    && let Err(restore) =
-                        self.restore_slot(scope, slug, plan.previous.clone()).await
-                {
-                    tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                // What the closure or the compare-and-swap refused did not
+                // commit. Any other error is a store that may have committed and
+                // then failed to say so: look, rather than guess.
+                let moved = match &error {
+                    HubError::NotFound(_) | HubError::Conflict | HubError::Invalid(_) => {
+                        Some(false)
+                    }
+                    _ => self.record_is_at(scope, slug, plan.target).await,
+                };
+                match moved {
+                    // It did commit: carry on from there.
+                    Some(true) => true,
+                    // Nothing moved: the old key goes back, unless the provider is
+                    // gone (its key went with it).
+                    Some(false) => {
+                        if !matches!(error, HubError::NotFound(_))
+                            && let Err(restore) =
+                                self.restore_slot(scope, slug, plan.previous.clone()).await
+                        {
+                            tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                        }
+                        return Err(error);
+                    }
+                    // Cannot tell where the record is: leave the slot empty. An
+                    // old key restored beside a record that may be at the new
+                    // origin is the one pairing this must never produce.
+                    None => {
+                        tracing::warn!(%slug, reason = %error.reason(), "could not tell whether the endpoint moved; the key slot is left empty");
+                        return Err(error);
+                    }
                 }
-                return Err(error);
             }
         };
 
@@ -124,11 +157,29 @@ impl Hub {
                 .await
         {
             // The move and the key are in place; only switching it back on
-            // failed. Unusable rather than half-usable: say so.
+            // failed. Unusable rather than half-usable: say so, and do what a
+            // finished edit does (the endpoint and the key did change, so what
+            // was learned about the old ones, cached for them or announced about
+            // them is stale). Switching it on is then `set_enabled`.
             tracing::warn!(%slug, reason = %error.reason(), "the provider was moved and its key saved but it could not be switched back on");
+            self.after_key_change(scope, slug, true).await;
+            self.inner.cache.evict_scope(scope);
+            self.forget_health(scope, slug).await;
+            self.inner
+                .events
+                .emit(crate::ports::HubEvent::ProviderEdited {
+                    scope: scope.clone(),
+                    slug: slug.clone(),
+                });
             return Err(error);
         }
-        Ok(committed.changed)
+        Ok(changed)
+    }
+
+    /// Whether the record is at `target` now: `None` when the store cannot say.
+    async fn record_is_at(&self, scope: &ScopeKey, slug: &Slug, target: &str) -> Option<bool> {
+        let config = self.read_config(scope).await.ok()?;
+        Some(config.provider(slug).is_some_and(|r| r.base_url == target))
     }
 
     /// Undoes a move whose key could not be written, in the order that is safe

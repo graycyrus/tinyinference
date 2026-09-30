@@ -168,6 +168,10 @@ impl Hub {
         } else {
             self.host_used_by(scope, slug).await?
         };
+        // Ordered with an endpoint move of this provider, which parks the record
+        // disabled and restores its flag at the end: a switch made in between
+        // would otherwise be overwritten by that restore.
+        let _guard = self.slot_lock(scope, slug).await;
         let committed = self
             .transact(scope, |config| {
                 if !on {
