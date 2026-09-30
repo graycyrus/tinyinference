@@ -307,7 +307,14 @@ impl Hub {
                 // Somebody moved it to another endpoint meanwhile: this key was
                 // entered for the one it was added at, so it is not stored. The
                 // record is theirs now and stays as they left it.
-                Ownership::Moved => return Err(HubError::Conflict),
+                Ownership::Moved => {
+                    // The add did commit its record; only its key was refused.
+                    self.inner.events.emit(HubEvent::ProviderAdded {
+                        scope: scope.clone(),
+                        slug: plan.slug.clone(),
+                    });
+                    return Err(HubError::Conflict);
+                }
             }
             // What to put back if this add is undone: read under the lock, so it
             // is the slot as this add found it, not as it was before a removal.
@@ -340,7 +347,7 @@ impl Hub {
                 }
             };
             if still != Ownership::Ours {
-                self.delete_slot(scope, &plan.slug).await.ok();
+                self.delete_orphan_slot(scope, &plan.slug).await;
                 return Err(match still {
                     Ownership::Moved => HubError::Conflict,
                     _ => HubError::NotFound(crate::error::NotFound::Provider(plan.slug.clone())),

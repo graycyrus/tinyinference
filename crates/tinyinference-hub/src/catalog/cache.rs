@@ -283,19 +283,12 @@ impl Slot {
     }
 }
 
-/// Whether the provider **rejected the credential** (`401`, or classified
-/// `auth`). Reported, shared with callers already queued, never remembered, and
-/// the list read with that key is dropped.
-fn is_rejection(failure: &ProviderFailure) -> bool {
-    failure.is_rejection()
-}
-
 /// A `403` that is not a rejection (the classifier has no bare-403 rule: a WAF,
 /// a geo block, an entitlement wall all read `unknown`). It is still about the
 /// presented key rather than the endpoint, so it is never remembered, but it
 /// proves nothing about the older list, which is served stale.
 fn is_forbidden(failure: &ProviderFailure) -> bool {
-    failure.status == Some(403) && !is_rejection(failure)
+    failure.status == Some(403) && !failure.is_rejection()
 }
 
 /// The catalog cache: one slot per [`CatalogKey`].
@@ -528,7 +521,7 @@ impl CatalogCache {
             // About the presented key: reported to this caller, never
             // remembered, and never answered with an older list (a bad key must
             // show).
-            Err(HubError::Provider(failure)) if credentialed && is_rejection(&failure) => {
+            Err(HubError::Provider(failure)) if credentialed && failure.is_rejection() => {
                 let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 {
                     let mut state = slot.state();

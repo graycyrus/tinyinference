@@ -89,6 +89,11 @@ pub struct Hold {
 }
 
 impl Hold {
+    /// The call this hold names.
+    pub(crate) fn call(&self) -> Call {
+        self.call
+    }
+
     /// Holds the next `call` before it takes effect.
     pub fn before(call: Call) -> Self {
         Self {
@@ -140,10 +145,14 @@ pub struct Held {
 impl Held {
     /// Resolves once the operation under test is parked at the hold.
     ///
+    /// **It waits forever if the operation never makes the call the hold names**
+    /// (the store cannot tell "not yet" from "never"): when the schedule might not
+    /// be reached, race this against the operation finishing, as this crate's own
+    /// tests do with `tokio::select!`.
+    ///
     /// # Panics
     ///
-    /// When the store was dropped, or the operation ended, without reaching the
-    /// hold (the schedule never matched: a test bug worth failing loudly).
+    /// When the store was dropped without the hold being reached.
     pub async fn reached(&mut self) {
         let reached = self.reached.take().expect("reached() was already awaited");
         reached
@@ -186,7 +195,14 @@ pub(crate) struct Interleave {
 
 impl Interleave {
     /// Arms `hold` and returns the test's end of it.
-    pub(crate) fn hold(&self, hold: Hold) -> Held {
+    pub(crate) fn hold(&self, hold: Hold, allowed: &[Call]) -> Held {
+        // A hold on a call the store never makes would never fire: refuse it now
+        // rather than let a test hang.
+        assert!(
+            allowed.contains(&hold.call()),
+            "this store has no interleave point for {:?} (it has {allowed:?})",
+            hold.call()
+        );
         let (reached_tx, reached_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         self.armed

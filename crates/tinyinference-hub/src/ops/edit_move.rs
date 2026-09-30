@@ -81,6 +81,8 @@ impl Hub {
         {
             if let Err(restore) = self.restore_slot(scope, slug, plan.previous.clone()).await {
                 tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                // The key is gone though the record never moved: say so.
+                self.after_key_change(scope, slug, false).await;
             }
             return Err(error);
         }
@@ -130,6 +132,7 @@ impl Hub {
                                 self.restore_slot(scope, slug, plan.previous.clone()).await
                         {
                             tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                            self.after_key_change(scope, slug, false).await;
                         }
                         return Err(error);
                     }
@@ -138,6 +141,9 @@ impl Hub {
                     // origin is the one pairing this must never produce.
                     None => {
                         tracing::warn!(%slug, reason = %error.reason(), "could not tell whether the endpoint moved; the key slot is left empty");
+                        if plan.previous.is_some() {
+                            self.after_key_change(scope, slug, false).await;
+                        }
                         return Err(error);
                     }
                 }
@@ -213,8 +219,14 @@ impl Hub {
                 {
                     record.base_url = plan.validated_base.to_string();
                     record.enabled = plan.was_enabled;
-                    record.label = plan.was_label.to_string();
-                    record.model = plan.was_model.cloned();
+                    // Only what this move set: a label or model another writer
+                    // changed since (those edits take no lock) is theirs.
+                    if plan.label == Some(record.label.as_str()) {
+                        record.label = plan.was_label.to_string();
+                    }
+                    if plan.model.is_some() && plan.model == record.model.as_ref() {
+                        record.model = plan.was_model.cloned();
+                    }
                 }
                 Ok(())
             })

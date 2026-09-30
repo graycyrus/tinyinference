@@ -169,6 +169,42 @@ impl Hub {
         self.credential(scope, record).await
     }
 
+    /// [`Hub::credential_checked`] that answers a benign concurrent endpoint move
+    /// by looking at the record again (up to three times) instead of failing:
+    /// returns the record the credential was resolved for, which the caller
+    /// must use, with the credential.
+    ///
+    /// # Errors
+    ///
+    /// [`HubError::NotFound`] when the provider went; [`HubError::Conflict`] when
+    /// it was replaced by another provider under the same slug, or kept moving.
+    pub(crate) async fn checked_credential(
+        &self,
+        scope: &ScopeKey,
+        record: &ProviderRecord,
+    ) -> Result<(ProviderRecord, Credential), HubError> {
+        let mut current = record.clone();
+        for _ in 0..3 {
+            match self.credential_checked(scope, &current).await {
+                Ok(credential) => return Ok((current, credential)),
+                Err(HubError::Conflict) => {
+                    let fresh = self
+                        .read_config(scope)
+                        .await?
+                        .provider(&record.slug)
+                        .ok_or_else(|| HubError::NotFound(NotFound::Provider(record.slug.clone())))?
+                        .clone();
+                    if fresh.id != record.id {
+                        return Err(HubError::Conflict);
+                    }
+                    current = fresh;
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Err(HubError::Conflict)
+    }
+
     pub(crate) fn group_of(&self, record: &ProviderRecord) -> ProviderGroup {
         self.inner.registry.get(&record.kind).map_or_else(
             || catalogue::group_of(record.kind.as_str()),
@@ -410,6 +446,16 @@ impl Hub {
             .delete(scope, &slug.key_slot())
             .await
             .map_err(|e| e.into_hub(crate::error::PortName::Credentials))
+    }
+
+    /// Deletes a slot that belongs to nothing (its provider went, or moved, while
+    /// a key was being stored). A failure cannot be reported to the caller, whose
+    /// operation is already failing for another reason, but it is logged: the key
+    /// left behind would answer for the next provider of that slug.
+    pub(crate) async fn delete_orphan_slot(&self, scope: &ScopeKey, slug: &Slug) {
+        if let Err(error) = self.delete_slot(scope, slug).await {
+            tracing::warn!(%slug, reason = %error.reason(), "could not delete a key that belongs to no provider");
+        }
     }
 
     /// Puts a slot back to what it held before an operation touched it.

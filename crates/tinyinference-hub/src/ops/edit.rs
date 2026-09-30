@@ -35,9 +35,15 @@ impl Hub {
     /// [`HubError::NotFound`]; [`HubError::Unsupported`] for the read-only
     /// entry-zero record or a label/endpoint change on the managed provider;
     /// [`HubError::Invalid`] and [`HubError::Policy`] for a patch that fails
-    /// validation; [`HubError::Conflict`] when the endpoint's origin was moved
-    /// by another writer while a key-less origin change was being applied; and
-    /// the stores' errors.
+    /// validation; [`HubError::Conflict`] when another writer moved the
+    /// endpoint's origin, or removed and re-added the provider, after this edit
+    /// validated its patch; and the stores' errors. **A failure while moving the
+    /// endpoint with a new key can leave the change partly applied, always in a
+    /// state that cannot send a credential to the wrong origin:** the provider
+    /// disabled at the new endpoint with its new key (only switching it back on
+    /// failed: call [`Hub::set_enabled`]), or disabled there with no key (the
+    /// move could not be undone). The failure is logged and the change announced
+    /// (`ProviderEdited`, `KeyChanged`) in those cases.
     pub async fn edit(
         &self,
         scope: &ScopeKey,
@@ -103,12 +109,21 @@ impl Hub {
         // The record as it is now that nobody else can be changing this
         // provider's key or endpoint.
         let record = match &slot_guard {
-            Some(_) => self
-                .read_config(scope)
-                .await?
-                .provider(slug)
-                .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
-                .clone(),
+            Some(_) => {
+                let fresh = self
+                    .read_config(scope)
+                    .await?
+                    .provider(slug)
+                    .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?
+                    .clone();
+                // The patch was validated against one provider (its kind, its
+                // endpoint rules); if the slug now names another, it is not this
+                // edit's to change.
+                if fresh.id != record.id {
+                    return Err(HubError::Conflict);
+                }
+                fresh
+            }
             None => record,
         };
         let origin_changes = base_url
@@ -148,7 +163,7 @@ impl Hub {
             let changed = self.move_origin_with_key(scope, slug, plan).await?;
             drop(slot_guard);
             return self
-                .finish_edit(scope, slug, &record, &base_url, true, changed)
+                .finish_edit(scope, slug, &record, base_url.as_deref(), true, changed)
                 .await;
         }
         if let Some(key) = &key {
@@ -187,7 +202,7 @@ impl Hub {
                 // written belongs to nothing. Anything else puts the old key back.
                 if matches!(error, HubError::NotFound(_)) {
                     if key.is_some() {
-                        self.delete_slot(scope, slug).await.ok();
+                        self.delete_orphan_slot(scope, slug).await;
                     }
                 } else if let Some(previous) = previous {
                     // The operation's own error is the reason; a failed restore
@@ -201,8 +216,15 @@ impl Hub {
         };
         let changed = committed.changed;
         drop(slot_guard);
-        self.finish_edit(scope, slug, &record, &base_url, key.is_some(), changed)
-            .await
+        self.finish_edit(
+            scope,
+            slug,
+            &record,
+            base_url.as_deref(),
+            key.is_some(),
+            changed,
+        )
+        .await
     }
 
     /// What every successful edit does last: hooks for a new key or endpoint, the
@@ -212,7 +234,7 @@ impl Hub {
         scope: &ScopeKey,
         slug: &Slug,
         record: &ProviderRecord,
-        base_url: &Option<String>,
+        base_url: Option<&str>,
         key_set: bool,
         committed_changed: bool,
     ) -> Result<Mutation, HubError> {
@@ -220,7 +242,7 @@ impl Hub {
             self.after_key_change(scope, slug, true).await;
         }
         if let Some(new) = base_url
-            && *new != record.base_url
+            && new != record.base_url
         {
             // A different endpoint says nothing about what the old one said.
             self.inner.cache.evict_scope(scope);

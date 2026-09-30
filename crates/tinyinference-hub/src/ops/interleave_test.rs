@@ -705,13 +705,18 @@ async fn ops_an_undone_origin_move_whose_old_key_cannot_come_back_ends_with_no_k
 }
 
 #[tokio::test]
-async fn ops_a_probe_that_read_the_record_before_an_origin_move_never_sends_after_it() {
+async fn ops_a_probe_that_read_the_record_before_an_origin_move_follows_the_move_never_mixes_it() {
     // A probe reads the record (old origin) and is parked; the whole move runs;
-    // the probe then resolves its credential. It must notice the endpoint changed
-    // since it read the record and refuse with a conflict, not pair the new key
-    // (or a host credential) with the old endpoint. Both credential shapes.
+    // the probe then resolves its credential. It notices the endpoint changed
+    // since it read the record and starts again from the new one: what it sends
+    // is the new key to the new origin, never the new key (or a host credential)
+    // to the old endpoint. Both credential shapes.
     for stored in [true, false] {
         let (bed, spy) = acme_bed_with(stored).await;
+        bed.ports.http.route(
+            crate::testkit::Match::prefix(NEW),
+            crate::testkit::Scripted::json(200, &crate::hub::fixtures::models_body(&["m"])),
+        );
         let acme = slug("acme");
         let mut held = bed.ports.config.hold(Hold::after(Call::Load));
         let test = bed
@@ -723,8 +728,12 @@ async fn ops_a_probe_that_read_the_record_before_an_origin_move_never_sends_afte
             held.release();
         };
         let (tested, ()) = tokio::join!(test, moving);
-        assert!(matches!(tested, Err(HubError::Conflict)), "{tested:?}");
-        assert_eq!(bed.ports.http.request_count(), 0, "nothing was sent");
+        tested.unwrap();
+        assert!(bed.ports.http.request_count() > 0);
+        for request in bed.ports.http.requests_from(0) {
+            assert!(request.url.starts_with(NEW), "{}", request.url);
+            assert!(request.carried(&Secret::new(K_NEW)));
+        }
         assert_no_cross_origin_credential(&spy, "probe read before a move");
     }
 }
@@ -903,6 +912,14 @@ async fn ops_an_add_whose_provider_another_writer_moved_before_its_key_landed_st
     let (added, ()) = tokio::join!(add, mover);
     assert!(matches!(added, Err(HubError::Conflict)), "{added:?}");
     assert_eq!(state_of(&bed).await, (NEW.to_string(), None));
+    assert!(
+        bed.ports
+            .events
+            .events()
+            .iter()
+            .any(|e| matches!(e, crate::ports::HubEvent::ProviderAdded { .. })),
+        "the record was created, so it is announced"
+    );
 }
 
 #[tokio::test]
@@ -1020,4 +1037,142 @@ async fn ops_an_undone_origin_move_puts_the_label_and_model_back_too() {
     assert_eq!(record.label, "Acme");
     assert_eq!(record.model.as_ref().map(ModelId::as_str), Some("m"));
     assert_eq!(record.base_url, OLD);
+}
+
+#[tokio::test]
+async fn ops_an_edit_that_waited_while_the_slug_was_re_added_does_not_touch_the_new_provider() {
+    // Round 4: the edit validated its patch against one provider and, after the
+    // lock, must not apply it to another that took the slug.
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+    let stale_edit = bed.hub.edit(&bed.scope, &acme, move_patch());
+    let replacement = async {
+        held.reached().await;
+        bed.hub
+            .remove(&bed.scope, &acme, Confirm::in_use())
+            .await
+            .unwrap();
+        bed.hub
+            .add(
+                &bed.scope,
+                ProviderDraft::new("custom")
+                    .with_label("Acme")
+                    .with_base_url(OLD)
+                    .with_key(Secret::new("sk-not-a-real-key-second"))
+                    .with_model(model("m")),
+            )
+            .await
+            .unwrap();
+        held.release();
+    };
+    let (edited, ()) = tokio::join!(stale_edit, replacement);
+    assert!(matches!(edited, Err(HubError::Conflict)), "{edited:?}");
+    assert_eq!(
+        state_of(&bed).await,
+        (OLD.to_string(), Some("sk-not-a-real-key-second".into()))
+    );
+}
+
+#[tokio::test]
+async fn ops_a_key_set_and_a_disable_that_waited_while_the_slug_was_re_added_do_not_touch_the_new_provider()
+ {
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    let readd = |bed: &Bed| {
+        let hub = bed.hub.clone();
+        let scope = bed.scope.clone();
+        async move {
+            hub.remove(&scope, &slug("acme"), Confirm::in_use())
+                .await
+                .unwrap();
+            hub.add(
+                &scope,
+                ProviderDraft::new("custom")
+                    .with_label("Acme")
+                    .with_base_url(OLD)
+                    .with_key(Secret::new("sk-not-a-real-key-second"))
+                    .with_model(model("m")),
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+    let set = bed
+        .hub
+        .set_key(&bed.scope, &acme, Secret::new("sk-not-a-real-key-late"));
+    let replacement = async {
+        held.reached().await;
+        readd(&bed).await;
+        held.release();
+    };
+    let (set, ()) = tokio::join!(set, replacement);
+    assert!(matches!(set, Err(HubError::Conflict)), "{set:?}");
+    assert_eq!(
+        bed.key_of("acme").await.as_deref(),
+        Some("sk-not-a-real-key-second")
+    );
+
+    let mut held = bed.ports.config.hold(Hold::after(Call::Load));
+    let off = bed
+        .hub
+        .set_enabled(&bed.scope, &acme, false, Confirm::in_use());
+    let replacement = async {
+        held.reached().await;
+        readd(&bed).await;
+        held.release();
+    };
+    let (off, ()) = tokio::join!(off, replacement);
+    assert!(matches!(off, Err(HubError::Conflict)), "{off:?}");
+    assert!(enabled_of(&bed).await, "the new provider is still on");
+}
+
+#[tokio::test]
+async fn ops_an_undone_origin_move_leaves_a_label_another_writer_set_meanwhile() {
+    let (bed, _spy) = acme_bed().await;
+    let acme = slug("acme");
+    let slot = acme.key_slot();
+    // Park the new key's write; run a label edit (no lock) in the gap; make the
+    // write fail; let the undo's slot cleanup through once the store is healed.
+    let mut write = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Set).slot(&slot));
+    let mut cleanup = bed
+        .ports
+        .credentials
+        .hold(Hold::before(Call::Delete).slot(&slot).skip(1));
+    let moving = bed.hub.edit(&bed.scope, &acme, move_patch().label("Moved"));
+    let meanwhile = async {
+        write.reached().await;
+        bed.hub
+            .edit(
+                &bed.scope,
+                &acme,
+                ProviderPatch::new().label("Someone else"),
+            )
+            .await
+            .unwrap();
+        bed.ports
+            .credentials
+            .inject(crate::ports::memory::CredentialFault::Write);
+        write.release();
+        cleanup.reached().await;
+        bed.ports.credentials.heal();
+        cleanup.release();
+    };
+    let (moved, ()) = tokio::join!(moving, meanwhile);
+    moved.unwrap_err();
+    let status = bed.hub.status(&bed.scope).await.unwrap();
+    let record = &status
+        .providers
+        .iter()
+        .find(|p| p.view.record.slug == acme)
+        .unwrap()
+        .view
+        .record;
+    assert_eq!(record.label, "Someone else", "not overwritten by the undo");
+    assert_eq!(record.base_url, OLD);
+    assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_OLD));
 }

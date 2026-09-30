@@ -76,7 +76,8 @@ impl MemoryCredentials {
     /// Parks the matching call until the returned [`Held`] is released, so a
     /// test can run another operation in the middle of it.
     pub fn hold(&self, hold: Hold) -> Held {
-        self.interleave.hold(hold)
+        self.interleave
+            .hold(hold, &[Call::Get, Call::Set, Call::Delete])
     }
 
     /// How many slots are stored, across every scope.
@@ -191,7 +192,7 @@ impl MemoryConfig {
     /// Parks the matching `load` or `save` until the returned [`Held`] is
     /// released, so a test can run another operation in the middle of one.
     pub fn hold(&self, hold: Hold) -> Held {
-        self.interleave.hold(hold)
+        self.interleave.hold(hold, &[Call::Load, Call::Save])
     }
 
     /// Replaces a scope's stored JSON directly, bumping the version, to stage a
@@ -304,7 +305,7 @@ impl MemoryHealth {
     /// endpoint change ends with: it runs after the change is committed and after
     /// the provider's lock is released, so a test can act in that gap.
     pub fn hold(&self, hold: Hold) -> Held {
-        self.interleave.hold(hold)
+        self.interleave.hold(hold, &[Call::Forget])
     }
 
     fn check(&self) -> Result<(), PortError> {

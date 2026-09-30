@@ -723,8 +723,11 @@ async fn sim_origin_moves_kept_models_and_races_by_hand() {
         assert_eq!(sent.ok, mode == Mode::Healthy, "{mode:?}: {sent:?}");
     }
     // Every parking point of the race, both directions of the move.
+    use crate::testkit::sim::RaceStats;
     for at in 0..16u8 {
         for rotate in [true, false] {
+            let parked_before = RaceStats::get(&r.races.parked);
+            let moved_before = RaceStats::get(&r.races.moved);
             r.step(Action::RaceMove {
                 scope: 0,
                 at,
@@ -732,12 +735,25 @@ async fn sim_origin_moves_kept_models_and_races_by_hand() {
             })
             .await
             .unwrap_or_else(|f| panic!("at {at}: {f}"));
+            if rotate {
+                // With a key entered for the move every point is reached and the
+                // edit goes through: the race was not vacuous at any of them.
+                assert_eq!(
+                    RaceStats::get(&r.races.parked),
+                    parked_before + 1,
+                    "point {at} was not reached"
+                );
+                assert_eq!(
+                    RaceStats::get(&r.races.moved),
+                    moved_before + 1,
+                    "the move at point {at} did not go through"
+                );
+            }
         }
     }
     // The races were not vacuous: every one with a key entered for the move
     // (half of them) parked at the store call it named and moved the record.
     // (Points 14 and 15 park the kept model instead, at its credential read.)
-    use crate::testkit::sim::RaceStats;
     let attempted = RaceStats::get(&r.races.attempted);
     let parked = RaceStats::get(&r.races.parked);
     let moved = RaceStats::get(&r.races.moved);

@@ -142,3 +142,10 @@ async fn interleave_a_health_forget_can_be_held_and_failed() {
     let _fault = health.hold(Hold::after(Call::Forget).fail());
     assert!(health.forget(&scope, &slug).await.is_err());
 }
+
+#[test]
+#[should_panic(expected = "no interleave point")]
+fn interleave_a_hold_on_a_call_the_store_never_makes_is_refused_not_hung() {
+    let health = crate::ports::memory::MemoryHealth::new();
+    let _ = health.hold(Hold::before(Call::Get));
+}

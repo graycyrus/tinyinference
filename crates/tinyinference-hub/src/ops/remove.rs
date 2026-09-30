@@ -142,7 +142,8 @@ impl Hub {
     ///
     /// [`HubError::NotFound`]; [`HubError::Unsupported`] for the read-only
     /// entry-zero record; [`HubError::InUse`] when disabling a referenced
-    /// provider without confirmation; and the stores' errors.
+    /// provider without confirmation; [`HubError::Conflict`] when the provider was
+    /// removed and added again while this ran; and the stores' errors.
     pub async fn set_enabled(
         &self,
         scope: &ScopeKey,
@@ -191,10 +192,15 @@ impl Hub {
                         return Err(HubError::InUse(used));
                     }
                 }
-                let record = config
+                let current = config
                     .provider_mut(slug)
                     .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?;
-                record.enabled = on;
+                // The guards above were checked against `record`; a provider
+                // that took its slug since is not what they were about.
+                if current.id != record.id {
+                    return Err(HubError::Conflict);
+                }
+                current.enabled = on;
                 Ok(())
             })
             .await?;
@@ -237,8 +243,9 @@ impl Hub {
     ///
     /// # Errors
     ///
-    /// [`HubError::NotFound`]; [`HubError::Invalid`] for an empty key; and
-    /// [`HubError::StoreUnreadable`].
+    /// [`HubError::NotFound`]; [`HubError::Invalid`] for an empty key;
+    /// [`HubError::Conflict`] when the provider was removed and added again while
+    /// this waited; and [`HubError::StoreUnreadable`].
     pub async fn set_key(
         &self,
         scope: &ScopeKey,
@@ -264,15 +271,20 @@ impl Hub {
         // between the check and the write: the check is repeated once the lock is
         // held, and the write happens inside it.
         let _guard = self.slot_lock(scope, slug).await;
-        if self.read_config(scope).await?.provider(slug).is_none() {
-            return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
+        let now = self.read_config(scope).await?;
+        match now.provider(slug) {
+            None => return Err(HubError::NotFound(NotFound::Provider(slug.clone()))),
+            // The group was checked against another provider: not this key's to
+            // store.
+            Some(current) if current.id != record.id => return Err(HubError::Conflict),
+            Some(_) => {}
         }
         self.write_slot(scope, slug, key).await?;
         // Kept for a store shared with another hub, whose removal the lock does
         // not order: the key just written would be owned by nothing.
         let after = self.read_config(scope).await?;
         if after.provider(slug).is_none() {
-            self.delete_slot(scope, slug).await.ok();
+            self.delete_orphan_slot(scope, slug).await;
             return Err(HubError::NotFound(NotFound::Provider(slug.clone())));
         }
         self.after_key_change(scope, slug, true).await;
