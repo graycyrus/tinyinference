@@ -8,6 +8,13 @@
 //! [`ModelFactory`], reports each outcome to the provider's health, and on a
 //! rejected credential tells the source that supplied it.
 //!
+//! A model the host keeps reflects **credential** changes on its next call
+//! (a rotated key is used, a cleared key fails closed as `no_key`, a rejected
+//! token is refreshed). It does not re-check that the provider is still enabled
+//! or present: that is [`Hub::resolve_for_turn`](crate::Hub::resolve_for_turn)'s
+//! job, so a host that caches a model per agent should resolve again after it
+//! disables or removes a provider.
+//!
 //! The underlying transport is `tinyinference-llm`'s own, so the hub's
 //! per-redirect policy and address pinning cover probes and catalogs but not
 //! turn traffic (open question Q2); the resolved endpoint **is** checked

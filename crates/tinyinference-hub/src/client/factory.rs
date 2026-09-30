@@ -52,6 +52,17 @@ pub trait ModelFactory: Send + Sync + Debug {
 
 /// The default factory, over `tinyinference-llm`'s builders.
 ///
+/// The builder signatures it targets (read from `tinyinference-llm` on
+/// 2026-09-30):
+///
+/// * `providers::openai::build_openai_model(OpenAiConfig<'_>) -> Arc<dyn ChatModel<()>>`
+///   (every field of the config is set explicitly, so a field added upstream
+///   fails this crate's build instead of silently defaulting);
+/// * `providers::openai::build_local_runtime_chat_model(provider_name, endpoint,
+///   api_key, AuthStyle, model, &[String], Option<f64>, Option<u32>)`;
+/// * `providers::anthropic::build_anthropic_model(AnthropicConfig<'_>)` and
+///   `endpoint_is_anthropic_messages(&str)`.
+///
 /// * OpenAI-compatible endpoints use `build_openai_model` (the Responses API
 ///   only on OpenAI's own host), local runtimes `build_local_runtime_chat_model`
 ///   (conservative capabilities);

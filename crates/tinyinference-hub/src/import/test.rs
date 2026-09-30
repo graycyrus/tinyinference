@@ -776,6 +776,27 @@ fn import_oh_odd_rows_are_reported_not_guessed() {
 }
 
 #[test]
+fn import_oh_inputs_never_print_a_key() {
+    let snapshot = realistic_oh();
+    let shown = format!("{snapshot:?}");
+    assert!(
+        !shown.contains("sk-not-a-real-key") && !shown.contains("sk-byok-fake"),
+        "{shown}"
+    );
+    assert!(shown.contains("StoredKey"));
+    let key = super::oh::StoredKey::new("  sk-x  ");
+    assert!(!format!("{key:?}").contains("sk-x"));
+    let from_string: super::oh::StoredKey = String::from("k").into();
+    assert!(
+        !format!("{from_string:?}").contains('k')
+            || format!("{from_string:?}").contains("redacted")
+    );
+    // Blank keys are not credentials to move.
+    let blank = oh(json!({"byok": {"url": "https://b.test/v1", "api_key": "   "}}));
+    assert!(import_oh(&blank).unwrap().credentials.is_empty());
+}
+
+#[test]
 fn import_inputs_deserialize_from_partial_stored_json() {
     let empty: OhSnapshot = serde_json::from_str("{}").unwrap();
     assert!(import_oh(&empty).unwrap().config.providers.is_empty());

@@ -99,6 +99,15 @@ impl HealthTracker {
 
     /// How many provider locks are currently kept (tests only).
     #[cfg(test)]
+    pub(super) fn epochs_len(&self) -> usize {
+        self.epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forgotten
+            .len()
+    }
+
+    #[cfg(test)]
     pub(super) fn kept_locks(&self) -> usize {
         self.locks
             .lock()

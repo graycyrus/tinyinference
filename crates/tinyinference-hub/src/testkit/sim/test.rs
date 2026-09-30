@@ -117,6 +117,31 @@ async fn sim_invariant_10_the_default_moves_only_where_it_may() {
     )
     .await;
     assert_eq!(v.number, 10);
+    // A failed add that changed the default (the bug a rollback once had).
+    let hub = r.hub().clone();
+    let scope = r.scopes[1].clone();
+    hub.add(
+        &scope,
+        ProviderDraft::new("openai").with_model(crate::hub::fixtures::model("m")),
+    )
+    .await
+    .unwrap();
+    let failed_connect = Action::Connect {
+        scope: 1,
+        prov: 2,
+        keyed: true,
+        add_anyway: false,
+        make_default: true,
+        completion: false,
+    };
+    let v = broken(
+        &mut r,
+        failed_connect,
+        result(false, Some(ReasonCode::Auth), "x"),
+        &unset(),
+    )
+    .await;
+    assert_eq!(v.number, 10);
     // set_default that succeeded but left another default.
     let v = broken(
         &mut r,

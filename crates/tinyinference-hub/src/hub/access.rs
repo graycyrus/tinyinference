@@ -1,7 +1,7 @@
 //! Shared plumbing for the operations: drivers, credentials, views, hooks.
 
-use std::sync::{Arc, PoisonError};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, PoisonError};
 
 use crate::catalogue;
 use crate::config::HubConfig;

@@ -1138,3 +1138,101 @@ async fn health_a_cancelled_waiter_does_not_leak_the_providers_lock() {
         "the cancelled waiter's lease still gave the lock back"
     );
 }
+
+#[tokio::test]
+async fn health_a_result_measured_before_a_forget_is_dropped_and_one_measured_after_is_kept() {
+    use crate::probe::ProbeReport;
+    let bed = bed();
+    let (s, p) = (scope(), slug());
+    let report = |failure: Option<ProviderFailure>| ProbeReport {
+        depth: TestDepth::Catalog,
+        failure,
+        refusal: None,
+        latency: Duration::from_millis(5),
+        started_ms: 0,
+        models: Vec::new(),
+        proves_key: true,
+        notes: Vec::new(),
+    };
+    let stale = bed.tracker.epoch(&s, &p);
+    bed.tracker.forget(&s, &p).await.unwrap();
+    assert_ne!(
+        bed.tracker.epoch(&s, &p),
+        stale,
+        "a forget changes the epoch"
+    );
+    let bad = report(Some(ProviderFailure::new(ReasonCode::Auth, Retry::Never)));
+    assert_eq!(
+        bed.tracker
+            .record_probe_at(&s, &p, &bad, Some(stale))
+            .await
+            .unwrap(),
+        None
+    );
+    let dropped = bed
+        .tracker
+        .record_outcome_at(&s, &p, &failure(ReasonCode::Auth), Some(stale))
+        .await
+        .unwrap();
+    assert_eq!(dropped, None);
+    assert_eq!(
+        bed.tracker
+            .mark_signed_out_at(&s, &p, Some(stale))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        bed.tracker.health(&s, &p).await.unwrap(),
+        ProviderHealth::Unknown,
+        "nothing was recorded"
+    );
+    // Measured after: recorded. And no epoch at all means "unconditional".
+    let fresh = bed.tracker.epoch(&s, &p);
+    assert_eq!(
+        bed.tracker
+            .record_probe_at(&s, &p, &bad, Some(fresh))
+            .await
+            .unwrap(),
+        Some(ProviderHealth::Down(ReasonCode::Auth))
+    );
+    assert!(
+        bed.tracker
+            .record_outcome_at(
+                &s,
+                &p,
+                &Outcome::Ok {
+                    latency: Duration::ZERO
+                },
+                None
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Another provider's epoch is its own.
+    let other = Slug::parse("groq").unwrap();
+    assert_eq!(bed.tracker.epoch(&s, &other), 0);
+}
+
+#[tokio::test]
+async fn health_the_forget_marks_are_bounded_and_a_reset_errs_on_dropping() {
+    let bed = bed();
+    let s = scope();
+    let early = bed.tracker.epoch(&s, &Slug::parse("p0").unwrap());
+    for n in 0..4200 {
+        bed.tracker
+            .forget(&s, &Slug::parse(&format!("p{n}")).unwrap())
+            .await
+            .unwrap();
+    }
+    let epochs = bed.tracker.epochs_len();
+    assert!(epochs <= 4096, "{epochs}");
+    // Something captured before the reset is now older than the floor: stale.
+    assert!(bed.tracker.epoch(&s, &Slug::parse("p0").unwrap()) > early);
+    let untouched = Slug::parse("never-forgotten").unwrap();
+    assert!(
+        bed.tracker.epoch(&s, &untouched) > 0,
+        "the floor applies to every provider after a reset"
+    );
+}

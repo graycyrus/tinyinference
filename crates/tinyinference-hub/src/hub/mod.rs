@@ -12,18 +12,36 @@
 //!
 //! **Credentials** live in the [`CredentialStore`]
 //! under [`Slug::key_slot`](crate::Slug::key_slot), never on a record, and are
-//! resolved through a per-kind [`CredentialChain`]
-//! on every request. An operation that writes a key and the record does it in
-//! this order: read the previous slot value, write the new key, save the record;
-//! if the record cannot be saved the previous slot value is put back. Removal
-//! goes the other way: delete the key, remove the record, and put the key back
-//! if the record cannot be removed.
+//! resolved through a per-kind [`CredentialChain`] on every request. An
+//! operation that changes a key and a record orders the two so that a writer
+//! that *loses* has touched nothing it does not own:
+//!
+//! * **add**: read the previous slot value, save the record, *then* write the
+//!   key; a lost race (the slug is taken, the compare-and-swap keeps failing)
+//!   never reaches the slot, and if the key cannot be written the record is
+//!   taken out again. Undoing a connect puts back exactly what it changed: the
+//!   record, the default it may have replaced, the previous key;
+//! * **edit** and **set_key**: write the key, then the record (or, for
+//!   `set_key`, re-check the record); a provider that was removed meanwhile is a
+//!   `NotFound`, the key just written is deleted again and the old one is not
+//!   restored;
+//! * **remove**: delete the key, remove the record, and put the key back if the
+//!   record cannot be removed (unless it was already gone).
+//!
+//! What no ordering can fix is a `set_key` racing a `remove` in the instant
+//! between two stores; the re-check narrows that window to two adjacent calls.
 //!
 //! **A key change** (set, clear, rotate, edit with a key, remove) drops the
 //! provider's health snapshot and every catalog cached for the scope, because a
 //! new credential can change what the endpoint answers without changing
 //! anything the hub can see. A rejected credential (`401`, or reason `auth`)
 //! seen on any request invalidates the source that supplied it.
+//!
+//! **A result measured against an old credential is dropped.** Every probe and
+//! every turn through [`Hub::chat_model`] reads the provider's health *epoch*
+//! before it starts; forgetting health (a key change, a removal) bumps it, and a
+//! result that arrives carrying an older epoch is not recorded. A failing check
+//! made with the previous key therefore cannot mark a working new key `Down`.
 //!
 //! **Health** is folded from probes and from real turns
 //! ([`Hub::record_outcome`], which the client also calls). A provider that is

@@ -657,7 +657,12 @@ async fn ops_a_store_outage_during_the_key_write_changes_nothing() {
         .unwrap_err();
     assert!(matches!(error, HubError::StoreUnreadable { .. }));
     assert!(
-        bed.hub.status(&bed.scope).await.unwrap().providers.is_empty(),
+        bed.hub
+            .status(&bed.scope)
+            .await
+            .unwrap()
+            .providers
+            .is_empty(),
         "the record is taken back out when its key cannot be written"
     );
     bed.ports.credentials.heal();

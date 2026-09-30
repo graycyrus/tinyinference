@@ -756,10 +756,32 @@ async fn ops_retest_uses_a_catalog_read_when_the_record_has_no_model() {
         "https://api.openai.com/v1/models"
     );
     // A catalog pass cannot lift a quota failure recorded by a real turn: only
-    // a completion can, so the provider is still down and will be re-tested.
+    // a completion can, so the provider is still down...
     assert!(
         matches!(done[0].health, ProviderHealth::Down(ReasonCode::Quota)),
         "{:?}",
         done[0].health
     );
+    // ...but it is not probed again on every tick: the re-test stamped its time.
+    let asked = bed.ports.http.request_count();
+    assert!(bed.hub.retest_down(&bed.scope).await.unwrap().is_empty());
+    bed.ports.clock.advance(Duration::from_secs(200));
+    assert!(bed.hub.retest_down(&bed.scope).await.unwrap().is_empty());
+    assert_eq!(
+        bed.ports.http.request_count(),
+        asked,
+        "still inside retest_after"
+    );
+    bed.ports.clock.advance(Duration::from_secs(200));
+    assert_eq!(
+        bed.hub.retest_down(&bed.scope).await.unwrap().len(),
+        1,
+        "and again once it has elapsed"
+    );
+    // A key change forgets the stamp along with the health.
+    bed.hub
+        .set_key(&bed.scope, &slug("openai"), Secret::new("sk-new"))
+        .await
+        .unwrap();
+    assert!(bed.inner_retests_empty());
 }

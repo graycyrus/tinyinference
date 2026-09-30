@@ -248,7 +248,12 @@ impl Hub {
     /// never overwrite, or delete, the key of the provider that won. The window
     /// where the row exists without its key fails closed: a turn to it is
     /// `NoKey`. If the key cannot be written the record is taken out again.
-    async fn save_new(&self, scope: &ScopeKey, plan: &AddPlan, make_default: bool) -> Result<Added, HubError> {
+    async fn save_new(
+        &self,
+        scope: &ScopeKey,
+        plan: &AddPlan,
+        make_default: bool,
+    ) -> Result<Added, HubError> {
         // Read the slot before anything changes: an unreadable store stops the
         // add here, and a rollback needs to know what to put back.
         let key_was = match &plan.key {

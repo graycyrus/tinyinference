@@ -138,6 +138,18 @@ impl ScenarioRunner {
                         format!("{action:?} changed the default from {was:?} to {now:?}"),
                     ));
                 }
+                // A failed add is undone exactly: including the default it may
+                // have replaced.
+                if was != now
+                    && matches!(action, Action::Connect { .. } | Action::Add { .. })
+                    && !result.ok
+                    && !self.infra_faults_this_step
+                {
+                    return Err(broken(
+                        10,
+                        format!("a failed add changed the default from {was:?} to {now:?}"),
+                    ));
+                }
                 if was != now && matches!(action, Action::Connect { .. } | Action::Add { .. }) {
                     let first_only =
                         *was == DefaultChoice::Unset && matches!(now, DefaultChoice::Full { .. });

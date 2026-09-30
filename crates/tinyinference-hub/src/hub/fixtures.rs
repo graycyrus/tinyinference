@@ -97,6 +97,16 @@ impl Bed {
             .unwrap();
     }
 
+    /// Whether the hub is holding no re-test stamps.
+    pub(crate) fn inner_retests_empty(&self) -> bool {
+        self.hub
+            .inner
+            .retests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     /// The stored document, as JSON.
     pub(crate) fn stored(&self) -> Value {
         serde_json::from_str(

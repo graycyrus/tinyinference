@@ -479,6 +479,48 @@ async fn client_an_unreadable_credential_store_is_a_retryable_error_never_a_keyl
 }
 
 #[tokio::test]
+async fn client_a_model_kept_after_its_key_was_cleared_fails_closed() {
+    let (factory, _fake) = recording(vec![]);
+    let (bed, turn) = openai_bed(factory.clone()).await;
+    let chat = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+    chat.invoke(&(), ModelRequest::default()).await.unwrap();
+    bed.hub
+        .clear_key(&bed.scope, &slug("openai"), crate::hub::Confirm::in_use())
+        .await
+        .unwrap();
+    let built = factory.keys.lock().unwrap().len();
+    let error = chat.invoke(&(), ModelRequest::default()).await.unwrap_err();
+    let Error::Provider(provider) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(
+        (provider.code.as_deref(), provider.retryable),
+        (Some("no_key"), false)
+    );
+    assert_eq!(
+        factory.keys.lock().unwrap().len(),
+        built,
+        "nothing was built, so nothing could be sent"
+    );
+    // A kind that takes no key is unaffected.
+    let bed = Bed::with(|b| b.model_factory(recording(vec![]).0));
+    bed.hub
+        .add(
+            &bed.scope,
+            ProviderDraft::new("ollama").with_model(model("llama3")),
+        )
+        .await
+        .unwrap();
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &TurnQuery::new())
+        .await
+        .unwrap();
+    let chat = bed.hub.chat_model(&bed.scope, &turn).await.unwrap();
+    chat.invoke(&(), ModelRequest::default()).await.unwrap();
+}
+
+#[tokio::test]
 async fn client_the_usage_meta_key_is_mirrored_both_ways() {
     let legacy: Answer = Box::new(|| {
         let mut response = MockModel::text_response("x");

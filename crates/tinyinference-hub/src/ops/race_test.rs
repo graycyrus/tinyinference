@@ -241,17 +241,31 @@ async fn ops_an_add_of_a_taken_slug_never_touches_the_existing_key() {
     let ports = MemoryPorts::new();
     let hub = ports.hub();
     let me = scope("company:acme");
-    hub.add(&me, ProviderDraft::new("groq").with_key(Secret::new("gsk-first"))).await.unwrap();
+    hub.add(
+        &me,
+        ProviderDraft::new("groq").with_key(Secret::new("gsk-first")),
+    )
+    .await
+    .unwrap();
     // With every write to the credential store failing, a second add of the same
     // slug still reports AlreadyExists: it never got as far as the slot.
-    ports.credentials.inject(crate::ports::memory::CredentialFault::Write);
+    ports
+        .credentials
+        .inject(crate::ports::memory::CredentialFault::Write);
     let error = hub
-        .add(&me, ProviderDraft::new("groq").with_key(Secret::new("gsk-second")))
+        .add(
+            &me,
+            ProviderDraft::new("groq").with_key(Secret::new("gsk-second")),
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, HubError::AlreadyExists { .. }), "{error:?}");
     ports.credentials.heal();
-    let key = ports.credentials.get(&me, &slug("groq").key_slot()).await.unwrap();
+    let key = ports
+        .credentials
+        .get(&me, &slug("groq").key_slot())
+        .await
+        .unwrap();
     assert_eq!(key.unwrap().expose(), "gsk-first");
 }
 
@@ -260,25 +274,41 @@ async fn ops_a_rolled_back_connect_restores_the_previous_default() {
     let ports = MemoryPorts::new();
     let hub = ports.hub();
     let me = scope("company:acme");
-    hub.add(&me, ProviderDraft::new("openai").with_key(Secret::new(KEY)).with_model(model("gpt-x")))
-        .await
-        .unwrap();
+    hub.add(
+        &me,
+        ProviderDraft::new("openai")
+            .with_key(Secret::new(KEY))
+            .with_model(model("gpt-x")),
+    )
+    .await
+    .unwrap();
     let before = hub.status(&me).await.unwrap().default;
-    assert!(matches!(&before, crate::config::DefaultChoice::Full { provider, .. } if *provider == slug("openai")));
+    assert!(
+        matches!(&before, crate::config::DefaultChoice::Full { provider, .. } if *provider == slug("openai"))
+    );
     ports.http.route(
         crate::testkit::Match::prefix("https://api.groq.com/"),
-        crate::testkit::Scripted::json(401, &json!({"error": {"message": "Invalid API Key", "code": "invalid_api_key"}})),
+        crate::testkit::Scripted::json(
+            401,
+            &json!({"error": {"message": "Invalid API Key", "code": "invalid_api_key"}}),
+        ),
     );
     let error = hub
         .connect(
             &me,
-            ProviderDraft::new("groq").with_key(Secret::new("gsk-bad")).with_model(model("l")),
+            ProviderDraft::new("groq")
+                .with_key(Secret::new("gsk-bad"))
+                .with_model(model("l")),
             ConnectOptions::default().make_default(true),
         )
         .await
         .unwrap_err();
     assert_eq!(error.reason(), crate::error::ReasonCode::Auth);
-    assert_eq!(hub.status(&me).await.unwrap().default, before, "the operator's default survives a failed connect");
+    assert_eq!(
+        hub.status(&me).await.unwrap().default,
+        before,
+        "the operator's default survives a failed connect"
+    );
     // And when nothing had been chosen, a failed connect leaves nothing chosen.
     let empty = MemoryPorts::new();
     let hub = empty.hub();
@@ -288,12 +318,17 @@ async fn ops_a_rolled_back_connect_restores_the_previous_default() {
     );
     hub.connect(
         &me,
-        ProviderDraft::new("groq").with_key(Secret::new("gsk-bad")).with_model(model("l")),
+        ProviderDraft::new("groq")
+            .with_key(Secret::new("gsk-bad"))
+            .with_model(model("l")),
         ConnectOptions::default().make_default(true),
     )
     .await
     .unwrap_err();
-    assert_eq!(hub.status(&me).await.unwrap().default, crate::config::DefaultChoice::Unset);
+    assert_eq!(
+        hub.status(&me).await.unwrap().default,
+        crate::config::DefaultChoice::Unset
+    );
 }
 
 /// A credential store whose `set` first lets another writer remove the record.
@@ -319,7 +354,10 @@ impl CredentialStore for RemovesOnSet {
     async fn set(&self, scope: &ScopeKey, slot: &str, value: Secret) -> Result<(), PortError> {
         if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
             edit_doc(&self.config, &self.scope, |doc| {
-                doc["providers"].as_array_mut().unwrap().retain(|row| row["slug"] != "groq");
+                doc["providers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|row| row["slug"] != "groq");
             });
         }
         self.inner.set(scope, slot, value).await
@@ -330,7 +368,10 @@ impl CredentialStore for RemovesOnSet {
     }
 }
 
-fn removing_hub(ports: &MemoryPorts, me: &ScopeKey) -> (crate::hub::Hub, Arc<std::sync::atomic::AtomicBool>) {
+fn removing_hub(
+    ports: &MemoryPorts,
+    me: &ScopeKey,
+) -> (crate::hub::Hub, Arc<std::sync::atomic::AtomicBool>) {
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hub = ports
         .builder()
@@ -352,9 +393,15 @@ async fn ops_a_key_set_for_a_provider_removed_meanwhile_is_deleted_again() {
     let (hub, armed) = removing_hub(&ports, &me);
     hub.add(&me, ProviderDraft::new("groq")).await.unwrap();
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
-    let error = hub.set_key(&me, &slug("groq"), Secret::new("gsk-late")).await.unwrap_err();
+    let error = hub
+        .set_key(&me, &slug("groq"), Secret::new("gsk-late"))
+        .await
+        .unwrap_err();
     assert!(matches!(error, HubError::NotFound(_)), "{error:?}");
-    assert!(ports.credentials.is_empty(), "the slot was cleaned up: no orphan to answer for a later provider");
+    assert!(
+        ports.credentials.is_empty(),
+        "the slot was cleaned up: no orphan to answer for a later provider"
+    );
 }
 
 #[tokio::test]
@@ -362,17 +409,36 @@ async fn ops_an_edit_that_loses_to_a_removal_leaves_no_key_behind() {
     let ports = MemoryPorts::new();
     let me = scope("company:acme");
     let (hub, armed) = removing_hub(&ports, &me);
-    hub.add(&me, ProviderDraft::new("groq").with_key(Secret::new("gsk-first"))).await.unwrap();
+    hub.add(
+        &me,
+        ProviderDraft::new("groq").with_key(Secret::new("gsk-first")),
+    )
+    .await
+    .unwrap();
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
     let error = hub
-        .edit(&me, &slug("groq"), crate::hub::ProviderPatch::new().key(Secret::new("gsk-rotated")))
+        .edit(
+            &me,
+            &slug("groq"),
+            crate::hub::ProviderPatch::new().key(Secret::new("gsk-rotated")),
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, HubError::NotFound(_)), "{error:?}");
     // The record went, and neither the old key nor the new one was left owned by nothing.
-    let key = ports.credentials.get(&me, &slug("groq").key_slot()).await.unwrap();
-    assert!(key.as_ref().is_none_or(|k| k.expose() != "gsk-rotated"), "the new key is not left behind");
-    assert!(key.is_none(), "and the removed provider's old key is not resurrected");
+    let key = ports
+        .credentials
+        .get(&me, &slug("groq").key_slot())
+        .await
+        .unwrap();
+    assert!(
+        key.as_ref().is_none_or(|k| k.expose() != "gsk-rotated"),
+        "the new key is not left behind"
+    );
+    assert!(
+        key.is_none(),
+        "and the removed provider's old key is not resurrected"
+    );
 }
 
 // ---- a result measured against a credential that changed is dropped ------------------------
@@ -381,11 +447,14 @@ use std::sync::OnceLock;
 
 use crate::ports::{Http, HttpError, HubRequest, HubResponse};
 
+/// What runs against the hub while a request is in flight.
+type HubHook = Box<dyn FnOnce(&crate::hub::Hub) + Send>;
+
 /// An `Http` that lets something happen to the hub while a request is in flight.
 struct HookHttp {
     inner: Arc<crate::testkit::ScriptedHttp>,
     hub: Arc<OnceLock<crate::hub::Hub>>,
-    hook: Mutex<Option<Box<dyn FnOnce(&crate::hub::Hub) + Send>>>,
+    hook: Mutex<Option<HubHook>>,
 }
 
 impl std::fmt::Debug for HookHttp {
@@ -410,10 +479,7 @@ impl Http for HookHttp {
     }
 }
 
-fn hooked(
-    ports: &MemoryPorts,
-    hook: Box<dyn FnOnce(&crate::hub::Hub) + Send>,
-) -> crate::hub::Hub {
+fn hooked(ports: &MemoryPorts, hook: Box<dyn FnOnce(&crate::hub::Hub) + Send>) -> crate::hub::Hub {
     let cell = Arc::new(OnceLock::new());
     let http = HookHttp {
         inner: ports.http.clone(),
@@ -434,21 +500,43 @@ async fn health_a_probe_in_flight_when_the_key_changes_is_not_recorded_against_t
         &ports,
         Box::new(move |hub| {
             // The operator rotates the key while the check with the old one runs.
-            futures::executor::block_on(hub.set_key(&target, &slug("openai"), Secret::new("sk-new"))).unwrap();
+            futures::executor::block_on(hub.set_key(
+                &target,
+                &slug("openai"),
+                Secret::new("sk-new"),
+            ))
+            .unwrap();
         }),
     );
-    hub.add(&me, ProviderDraft::new("openai").with_key(Secret::new(KEY)).with_model(model("m")))
-        .await
-        .unwrap();
+    hub.add(
+        &me,
+        ProviderDraft::new("openai")
+            .with_key(Secret::new(KEY))
+            .with_model(model("m")),
+    )
+    .await
+    .unwrap();
     ports.http.route(
         crate::testkit::Match::post("https://api.openai.com/v1/chat/completions"),
-        crate::testkit::Scripted::json(401, &json!({"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}})),
+        crate::testkit::Scripted::json(
+            401,
+            &json!({"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}}),
+        ),
     );
     let report = hub
-        .test(&me, &slug("openai"), crate::taxonomy::TestDepth::Completion, None)
+        .test(
+            &me,
+            &slug("openai"),
+            crate::taxonomy::TestDepth::Completion,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(report.failure.unwrap().reason, crate::error::ReasonCode::Auth, "the caller still hears what the old key got");
+    assert_eq!(
+        report.failure.unwrap().reason,
+        crate::error::ReasonCode::Auth,
+        "the caller still hears what the old key got"
+    );
     assert_eq!(
         hub.health(&me, &slug("openai")).await.unwrap().health,
         crate::health::ProviderHealth::Unknown,
@@ -462,25 +550,43 @@ async fn health_a_turn_in_flight_when_the_provider_is_removed_and_readded_is_not
     let ports = MemoryPorts::new();
     let hub = ports.hub();
     let me = scope("company:acme");
-    hub.add(&me, ProviderDraft::new("groq").with_key(Secret::new("gsk-old"))).await.unwrap();
+    hub.add(
+        &me,
+        ProviderDraft::new("groq").with_key(Secret::new("gsk-old")),
+    )
+    .await
+    .unwrap();
     let epoch = hub.inner.health.epoch(&me, &slug("groq"));
-    hub.set_key(&me, &slug("groq"), Secret::new("gsk-new")).await.unwrap();
-    let failure = crate::error::ProviderFailure::new(crate::error::ReasonCode::Auth, crate::error::Retry::Never);
+    hub.set_key(&me, &slug("groq"), Secret::new("gsk-new"))
+        .await
+        .unwrap();
+    let failure = crate::error::ProviderFailure::new(
+        crate::error::ReasonCode::Auth,
+        crate::error::Retry::Never,
+    );
     let dropped = hub
-        .record_outcome_lenient(&me, &crate::route::ResolvedTurn {
-            slug: slug("groq"),
-            kind: "groq".into(),
-            group: crate::taxonomy::ProviderGroup::Cloud,
-            base_url: String::new(),
-            model: None,
-            protocol: crate::taxonomy::Protocol::OpenAiChat,
-            auth: crate::taxonomy::AuthStyle::Bearer,
-            via: crate::route::ResolvedVia::Default,
-            origin: None,
-            temperature: None,
-            cli: None,
-        }, Outcome::Failed(failure), epoch)
+        .record_outcome_lenient(
+            &me,
+            &crate::route::ResolvedTurn {
+                slug: slug("groq"),
+                kind: "groq".into(),
+                group: crate::taxonomy::ProviderGroup::Cloud,
+                base_url: String::new(),
+                model: None,
+                protocol: crate::taxonomy::Protocol::OpenAiChat,
+                auth: crate::taxonomy::AuthStyle::Bearer,
+                via: crate::route::ResolvedVia::Default,
+                origin: None,
+                temperature: None,
+                cli: None,
+            },
+            Outcome::Failed(failure),
+            epoch,
+        )
         .await;
     assert!(dropped.is_ok());
-    assert_eq!(hub.health(&me, &slug("groq")).await.unwrap().health, crate::health::ProviderHealth::Unknown);
+    assert_eq!(
+        hub.health(&me, &slug("groq")).await.unwrap().health,
+        crate::health::ProviderHealth::Unknown
+    );
 }

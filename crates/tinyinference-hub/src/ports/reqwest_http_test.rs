@@ -54,10 +54,26 @@ impl Resolver for FakeResolver {
 
 type Seen = (Pin, String, String, Vec<(String, String)>, Option<Vec<u8>>);
 
+/// A resolver that takes fake time to answer.
+#[derive(Debug)]
+struct SlowResolver {
+    clock: crate::testkit::FakeClock,
+    cost: Duration,
+}
+
+#[async_trait]
+impl Resolver for SlowResolver {
+    async fn resolve(&self, _: &str, _: u16, _: Duration) -> Result<Vec<IpAddr>, HttpError> {
+        self.clock.advance(self.cost);
+        Ok(vec!["93.184.216.34".parse().unwrap()])
+    }
+}
+
 #[derive(Default)]
 struct FakeExecutor {
     script: Mutex<VecDeque<Result<reqwest::Response, HttpError>>>,
     seen: Mutex<Vec<Seen>>,
+    timeouts: Mutex<Vec<Duration>>,
 }
 
 impl Debug for FakeExecutor {
@@ -78,8 +94,9 @@ impl Executor for FakeExecutor {
         &self,
         pin: &Pin,
         request: reqwest::Request,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<reqwest::Response, HttpError> {
+        self.timeouts.lock().unwrap().push(timeout);
         self.seen.lock().unwrap().push((
             pin.clone(),
             request.method().to_string(),
@@ -569,4 +586,50 @@ async fn reqwest_transport_failures_pass_through_typed() {
     );
     assert!(format!("{http:?}").contains("ReqwestHttp"));
     let _ = ReqwestHttp::default().with_clock(Arc::new(SystemClock));
+}
+
+#[tokio::test]
+async fn reqwest_resolving_a_name_spends_the_hops_timeout_budget() {
+    let clock = crate::testkit::FakeClock::new();
+    let executor = Arc::new(FakeExecutor::default());
+    let http = ReqwestHttp::with_parts(
+        Arc::new(SlowResolver {
+            clock: clock.clone(),
+            cost: Duration::from_secs(4),
+        }),
+        executor.clone(),
+    )
+    .with_clock(Arc::new(clock.clone()));
+    executor.push(Ok(canned(200, &[], b"ok")));
+    http.send(
+        HubRequest::get("https://a.example.test/").with_timeout(Duration::from_secs(10)),
+        &EndpointPolicy::hosted(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        executor.timeouts.lock().unwrap().as_slice(),
+        [Duration::from_secs(6)],
+        "the connection gets what the lookup left, not a fresh budget"
+    );
+    // A lookup that used it all leaves nothing to connect with.
+    let clock = crate::testkit::FakeClock::new();
+    let executor = Arc::new(FakeExecutor::default());
+    let http = ReqwestHttp::with_parts(
+        Arc::new(SlowResolver {
+            clock: clock.clone(),
+            cost: Duration::from_secs(10),
+        }),
+        executor.clone(),
+    )
+    .with_clock(Arc::new(clock));
+    let error = http
+        .send(
+            HubRequest::get("https://a.example.test/").with_timeout(Duration::from_secs(10)),
+            &EndpointPolicy::hosted(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, HttpError::Timeout);
+    assert!(executor.seen.lock().unwrap().is_empty(), "nothing was sent");
 }
