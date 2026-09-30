@@ -166,15 +166,31 @@ impl Hub {
                 .finish_edit(scope, slug, &record, base_url.as_deref(), true, changed)
                 .await;
         }
-        if let Some(key) = &key {
-            self.write_slot(scope, slug, key.clone()).await?;
+        if let Some(key) = &key
+            && let Err(error) = self.write_slot(scope, slug, key.clone()).await
+        {
+            // A store can commit the write and then report a failure: what the
+            // caller is told did not happen must not have happened.
+            if let Some(previous) = previous
+                && let Err(restore) = self.restore_slot(scope, slug, previous).await
+            {
+                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                self.announce_key_state(scope, slug).await;
+            }
+            return Err(error);
         }
         let validated_base = record.base_url.clone();
+        let validated_id = record.id.clone();
         let committed = self
             .transact(scope, |config| {
                 let record = config
                     .provider_mut(slug)
                     .ok_or_else(|| HubError::NotFound(NotFound::Provider(slug.clone())))?;
+                // The patch was validated against one provider; a label or model
+                // edit takes no lock, so the slug may have been re-added since.
+                if record.id != validated_id {
+                    return Err(HubError::Conflict);
+                }
                 if let Some(label) = &label {
                     record.label.clone_from(label);
                 }

@@ -191,6 +191,11 @@ impl MemoryConfig {
 
     /// Parks the matching `load` or `save` until the returned [`Held`] is
     /// released, so a test can run another operation in the middle of one.
+    ///
+    /// # Panics
+    ///
+    /// When `hold` names a call this store never makes (only load and save have
+    /// points), rather than letting the test hang.
     pub fn hold(&self, hold: Hold) -> Held {
         self.interleave.hold(hold, &[Call::Load, Call::Save])
     }
@@ -302,8 +307,17 @@ impl MemoryHealth {
     }
 
     /// Parks (or fails) the matching `forget` call, the one every credential or
-    /// endpoint change ends with: it runs after the change is committed and after
-    /// the provider's lock is released, so a test can act in that gap.
+    /// endpoint change ends with. It runs after the change is committed; for
+    /// `edit` and `add` that is after the provider's lock is released, so a test
+    /// can act on the same provider in the gap, but `set_key`, `clear_key`,
+    /// `remove` and an undone add still hold it (another operation on that
+    /// provider would wait for the parked call). While it is parked the health
+    /// tracker's own lock for the provider is held.
+    ///
+    /// # Panics
+    ///
+    /// When `hold` names a call this store never makes (only [`Call::Forget`]
+    /// has a point), rather than letting the test hang.
     pub fn hold(&self, hold: Hold) -> Held {
         self.interleave.hold(hold, &[Call::Forget])
     }

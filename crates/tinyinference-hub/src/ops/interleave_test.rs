@@ -1176,3 +1176,74 @@ async fn ops_an_undone_origin_move_leaves_a_label_another_writer_set_meanwhile()
     assert_eq!(record.base_url, OLD);
     assert_eq!(bed.key_of("acme").await.as_deref(), Some(K_OLD));
 }
+
+#[tokio::test]
+async fn ops_a_rejected_connect_never_undoes_an_edit_another_writer_made_meanwhile() {
+    // Round 5: while a probe is in flight the provider lock is free, so another
+    // writer can move the provider; the connect's undo then removed it and its
+    // key. Park the connect at each of its config reads in turn, run the edit
+    // there, and require that whatever the edit made survives.
+    for n in 0..16usize {
+        let bed = Bed::new();
+        for base in [OLD, NEW] {
+            bed.ports.http.route(
+                crate::testkit::Match::prefix(base),
+                crate::testkit::Scripted::json(
+                    401,
+                    &serde_json::json!({"error": {"message": "Incorrect API key provided", "code": "invalid_api_key"}}),
+                ),
+            );
+        }
+        let draft = ProviderDraft::new("custom")
+            .with_label("Acme")
+            .with_base_url(OLD)
+            .with_key(Secret::new(K_OLD))
+            .with_model(model("m"));
+        let acme = slug("acme");
+        let mut held = bed.ports.config.hold(Hold::before(Call::Load).skip(n));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let connect = async {
+            let result = bed
+                .hub
+                .connect(&bed.scope, draft, ConnectOptions::default())
+                .await;
+            let _ = done_tx.send(());
+            result
+        };
+        // The edit starts once the connect is parked and then runs alongside it:
+        // if the connect holds the provider's lock it queues behind it, and the
+        // lock is handed over when the connect lets go.
+        let edit = async {
+            if go_rx.await.is_ok() {
+                Some(bed.hub.edit(&bed.scope, &acme, move_patch()).await)
+            } else {
+                None
+            }
+        };
+        let mover = async {
+            tokio::select! {
+                () = held.reached() => {
+                    let _ = go_tx.send(());
+                    tokio::task::yield_now().await;
+                    held.release();
+                }
+                _ = done_rx => {
+                    drop(go_tx);
+                }
+            }
+        };
+        let (connected, edited, ()) = tokio::join!(connect, edit, mover);
+        drop(held);
+        let _ = connected;
+        let edited = edited.unwrap_or_else(|| Err(HubError::Conflict));
+        if edited.is_ok() {
+            // The edit went through: what it made is still there, with its key.
+            assert_eq!(
+                state_of(&bed).await,
+                (NEW.to_string(), Some(K_NEW.into())),
+                "park point {n}"
+            );
+        }
+    }
+}

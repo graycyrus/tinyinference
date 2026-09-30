@@ -90,8 +90,16 @@ impl Hub {
             Some(_) => {}
         }
         let previous = self.read_slot(scope, slug).await?;
-        if previous.is_some() {
-            self.delete_slot(scope, slug).await?;
+        if previous.is_some()
+            && let Err(error) = self.delete_slot(scope, slug).await
+        {
+            // A store can delete and then report a failure: the key goes back,
+            // so "nothing happened" is true.
+            if let Err(restore) = self.restore_slot(scope, slug, previous.clone()).await {
+                tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                self.announce_key_state(scope, slug).await;
+            }
+            return Err(error);
         }
         let committed = self
             .transact(scope, |config| {
@@ -333,9 +341,16 @@ impl Hub {
         if !used.is_empty() && !confirm.in_use {
             return Err(HubError::InUse(used));
         }
-        let had_key = self.read_slot(scope, slug).await?.is_some();
+        let previous = self.read_slot(scope, slug).await?;
+        let had_key = previous.is_some();
         if had_key {
-            self.delete_slot(scope, slug).await?;
+            if let Err(error) = self.delete_slot(scope, slug).await {
+                if let Err(restore) = self.restore_slot(scope, slug, previous).await {
+                    tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
+                    self.announce_key_state(scope, slug).await;
+                }
+                return Err(error);
+            }
             self.after_key_change(scope, slug, false).await;
         }
         let view = self.view(scope, &record, &config).await;

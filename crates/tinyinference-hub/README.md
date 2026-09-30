@@ -152,7 +152,9 @@ back to either host by the hub.
   reads as disabled (a route to it fails closed; a `HubModel` kept from before
   the move refuses with `stale_route`). A failure rolls back in the order
   empty-slot, record back, old key back; if the record cannot be moved back it is
-  left disabled at the new origin with no key and the error says so.
+  left disabled at the new origin with no key; the caller gets the reason the move
+  failed, and the stuck state is logged and announced (`ProviderEdited`,
+  `KeyChanged`), `set_enabled` finishing a half-applied move.
 - Failover, budgets, cooldowns and streaming health are a later crate; the hub
   exposes the signals (`record_outcome`, health, `Retry`).
 

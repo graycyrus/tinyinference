@@ -29,8 +29,10 @@
 //! An undo runs in the order that keeps that true at every instant: empty the
 //! slot, move the record back and re-enable it, then restore the old key. A step
 //! that cannot run stops the undo there; the record stays **disabled at the new
-//! origin** (unusable) and the error says so. The old key is lost only when the
-//! stores fail twice in a row.
+//! origin** (unusable). The caller's error is the reason the move failed; the
+//! stuck state is logged and announced (`ProviderEdited`, and `KeyChanged` with
+//! what the slot holds), and `Hub::set_enabled` finishes a half-applied move. The
+//! old key is lost only when the stores fail twice in a row.
 
 use crate::error::{HubError, NotFound};
 use crate::hub::Hub;
@@ -82,7 +84,7 @@ impl Hub {
             if let Err(restore) = self.restore_slot(scope, slug, plan.previous.clone()).await {
                 tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
                 // The key is gone though the record never moved: say so.
-                self.after_key_change(scope, slug, false).await;
+                self.announce_key_state(scope, slug).await;
             }
             return Err(error);
         }
@@ -132,7 +134,7 @@ impl Hub {
                                 self.restore_slot(scope, slug, plan.previous.clone()).await
                         {
                             tracing::warn!(%slug, reason = %restore.reason(), "could not restore the previous key");
-                            self.after_key_change(scope, slug, false).await;
+                            self.announce_key_state(scope, slug).await;
                         }
                         return Err(error);
                     }
@@ -141,9 +143,9 @@ impl Hub {
                     // origin is the one pairing this must never produce.
                     None => {
                         tracing::warn!(%slug, reason = %error.reason(), "could not tell whether the endpoint moved; the key slot is left empty");
-                        if plan.previous.is_some() {
-                            self.after_key_change(scope, slug, false).await;
-                        }
+                        // The record may be at the new origin: announce it as a
+                        // change, whatever the slot held.
+                        self.announce_move(scope, slug).await;
                         return Err(error);
                     }
                 }
@@ -184,7 +186,7 @@ impl Hub {
     /// cached or announced about the old ones is stale (health, catalogs, and the
     /// `KeyChanged` and `ProviderEdited` events a host mirrors state from).
     async fn announce_move(&self, scope: &ScopeKey, slug: &Slug) {
-        self.after_key_change(scope, slug, true).await;
+        self.announce_key_state(scope, slug).await;
         self.inner
             .events
             .emit(crate::ports::HubEvent::ProviderEdited {
@@ -239,7 +241,7 @@ impl Hub {
         if let Err(error) = self.restore_slot(scope, slug, plan.previous.clone()).await {
             tracing::warn!(%slug, reason = %error.reason(), "could not restore the previous key");
             // The endpoint is back but the key it had is not: say the key changed.
-            self.after_key_change(scope, slug, false).await;
+            self.announce_key_state(scope, slug).await;
         }
     }
 }

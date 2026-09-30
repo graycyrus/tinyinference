@@ -150,11 +150,12 @@ impl Hub {
         scope: &ScopeKey,
         record: &ProviderRecord,
     ) -> Result<Credential, HubError> {
-        let movable = self
-            .inner
-            .registry
-            .get(&record.kind)
-            .is_some_and(|driver| driver.descriptor().endpoint_editable);
+        // Only a provider that can move **and** sends a credential has anything
+        // to pair: a local runtime with no auth style never presents one.
+        let movable = self.inner.registry.get(&record.kind).is_some_and(|driver| {
+            let descriptor = driver.descriptor();
+            descriptor.endpoint_editable && Self::auth_of(record, descriptor).needs_credential()
+        });
         if !movable || self.group_of(record) == ProviderGroup::Managed {
             return self.credential(scope, record).await;
         }
@@ -446,6 +447,14 @@ impl Hub {
             .delete(scope, &slug.key_slot())
             .await
             .map_err(|e| e.into_hub(crate::error::PortName::Credentials))
+    }
+
+    /// Announces that a provider's key **may have changed** where the operation
+    /// cannot say how it ended (a store that failed part-way): reads the slot as
+    /// it is now, so the event says what is there rather than what was hoped.
+    pub(crate) async fn announce_key_state(&self, scope: &ScopeKey, slug: &Slug) {
+        let present = matches!(self.read_slot(scope, slug).await, Ok(Some(_)));
+        self.after_key_change(scope, slug, present).await;
     }
 
     /// Deletes a slot that belongs to nothing (its provider went, or moved, while

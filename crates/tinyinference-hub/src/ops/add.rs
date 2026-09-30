@@ -349,7 +349,17 @@ impl Hub {
             if still != Ownership::Ours {
                 self.delete_orphan_slot(scope, &plan.slug).await;
                 return Err(match still {
-                    Ownership::Moved => HubError::Conflict,
+                    Ownership::Moved => {
+                        // The record this call created exists (the other
+                        // writer's now): announce it, and that a key came and
+                        // went.
+                        self.inner.events.emit(HubEvent::ProviderAdded {
+                            scope: scope.clone(),
+                            slug: plan.slug.clone(),
+                        });
+                        self.announce_key_state(scope, &plan.slug).await;
+                        HubError::Conflict
+                    }
                     _ => HubError::NotFound(crate::error::NotFound::Provider(plan.slug.clone())),
                 });
             }
@@ -503,8 +513,13 @@ impl Hub {
             Ok(config) => Ok(config),
             Err(_) => self.read_config(scope).await,
         };
+        // "Ours" is the record this add committed, at the endpoint it was added
+        // at. One somebody edited while the check was in flight (it takes no lock
+        // while the network is being asked) is theirs now: neither it nor its key
+        // is undone.
+        let ours = |p: &ProviderRecord| p.id == id && p.base_url == added.record.base_url;
         let (existed, pre_read_failed) = match first {
-            Ok(config) => (config.providers.iter().any(|p| p.id == id), false),
+            Ok(config) => (config.providers.iter().any(ours), false),
             Err(_) => (false, true),
         };
         if existed && let Some(previous) = added.key_was.clone() {
@@ -524,11 +539,11 @@ impl Hub {
         let restore_after = pre_read_failed;
         let removed = self
             .transact(scope, |config| {
-                existed = config.providers.iter().any(|p| p.id == id);
+                existed = config.providers.iter().any(ours);
                 if !existed {
                     return Ok(());
                 }
-                config.providers.retain(|p| p.id != id);
+                config.providers.retain(|p| !ours(p));
                 if let Some(was) = &added.default_was
                     && matches!(&config.default, DefaultChoice::Full { provider, .. } if *provider == slug)
                 {
