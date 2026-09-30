@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::error::{HubError, PortName};
 use crate::ids::{ScopeKey, Slug};
 use crate::ports::PortError;
-use crate::secret::Secret;
+use crate::secret::{Secret, SecretId};
 
 use super::CredentialOrigin;
 
@@ -37,6 +37,14 @@ pub trait CredentialSource: Send + Sync + Debug {
     /// the next call gets a fresh one. The default does nothing.
     fn invalidate(&self, scope: &ScopeKey) {
         let _ = scope;
+    }
+
+    /// The credential identified by `rejected` was rejected. Defaults to
+    /// [`CredentialSource::invalidate`]; a source that rotates overrides it to
+    /// ignore a rejection of a credential it no longer hands out.
+    fn invalidate_rejected(&self, scope: &ScopeKey, rejected: SecretId) {
+        let _ = rejected;
+        self.invalidate(scope);
     }
 }
 
@@ -117,6 +125,20 @@ impl CredentialChain {
     pub fn invalidate_origin(&self, scope: &ScopeKey, origin: &CredentialOrigin) {
         for source in self.sources.iter().filter(|s| &s.origin() == origin) {
             source.invalidate(scope);
+        }
+    }
+
+    /// Like [`CredentialChain::invalidate_origin`], naming the credential that
+    /// was rejected so a source that has already rotated ignores the stale
+    /// rejection.
+    pub fn invalidate_origin_rejected(
+        &self,
+        scope: &ScopeKey,
+        origin: &CredentialOrigin,
+        rejected: SecretId,
+    ) {
+        for source in self.sources.iter().filter(|s| &s.origin() == origin) {
+            source.invalidate_rejected(scope, rejected);
         }
     }
 }

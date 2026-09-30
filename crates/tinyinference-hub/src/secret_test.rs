@@ -291,3 +291,15 @@ fn a_plural_or_numbered_compound_is_still_a_credential() {
         assert!(!is_credential_name(name), "{name}");
     }
 }
+
+#[test]
+fn a_secret_id_compares_credentials_without_revealing_them() {
+    let a = Secret::new("sk-not-a-real-key-a");
+    let same = Secret::new("sk-not-a-real-key-a");
+    let other = Secret::new("sk-not-a-real-key-b");
+    assert_eq!(a.id(), same.id());
+    assert_ne!(a.id(), other.id());
+    let shown = format!("{:?}", a.id());
+    assert_eq!(shown, "SecretId(..)");
+    assert!(!shown.contains("sk-"));
+}

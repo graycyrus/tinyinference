@@ -176,7 +176,7 @@ pub use ids::{AgentKey, KindId, ModelId, ScopeKey, Slug, WorkloadKey};
 pub use import::{Imported, LossEntry, LossKind, LossReport};
 pub use policy::{EndpointPolicy, EndpointRefusal, HeaderPolicy};
 pub use route::{ProviderRoute, ResolvedTurn, ResolvedVia, RouteTarget, TurnQuery};
-pub use secret::{LogOnly, Secret};
+pub use secret::{LogOnly, Secret, SecretId};
 pub use taxonomy::{
     AuthStyle, CatalogShape, CliKind, LocalRuntime, Protocol, ProviderGroup, TestDepth, Transport,
 };

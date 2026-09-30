@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use async_trait::async_trait;
 
 use crate::ids::ScopeKey;
-use crate::secret::Secret;
+use crate::secret::{Secret, SecretId};
 
 use super::PortError;
 
@@ -29,5 +29,19 @@ pub trait TokenSource: Send + Sync + Debug {
     /// The token was rejected; drop whatever the host cached.
     fn invalidate(&self, scope: &ScopeKey) {
         let _ = scope;
+    }
+
+    /// The token identified by `rejected` (see [`Secret::id`]) was rejected.
+    ///
+    /// Unlike [`TokenSource::invalidate`] this says **which** token failed, so a
+    /// source that has already rotated can ignore a stale rejection instead of
+    /// discarding its fresh token: two requests that both used token A and both
+    /// got a `401` must cause one refresh, not two. The default forwards to
+    /// [`TokenSource::invalidate`], which is the old behaviour, so an existing
+    /// implementation is unchanged; override this to compare `rejected` with
+    /// `current.id()` of the token you would hand out now.
+    fn invalidate_rejected(&self, scope: &ScopeKey, rejected: SecretId) {
+        let _ = rejected;
+        self.invalidate(scope);
     }
 }

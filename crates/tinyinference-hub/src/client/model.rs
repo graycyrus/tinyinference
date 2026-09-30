@@ -16,7 +16,7 @@ use crate::health::Outcome;
 use crate::hub::Hub;
 use crate::ids::ScopeKey;
 use crate::route::ResolvedTurn;
-use crate::secret::Secret;
+use crate::secret::{Secret, SecretId};
 
 use super::factory::ModelSpec;
 
@@ -25,8 +25,19 @@ const LEGACY_USAGE_META: &str = "openhuman_usage_meta";
 /// The neutral spelling.
 const USAGE_META: &str = "usage_meta";
 
-/// The model for one call and the credential source that answered for it.
-type Current = (std::sync::Arc<dyn ChatModel<()>>, Option<CredentialOrigin>);
+/// The credential one call used: which source answered and which credential it
+/// was, so a rejection is attributed to that credential and no other.
+#[derive(Clone, Copy)]
+struct Used<'a> {
+    origin: &'a CredentialOrigin,
+    id: SecretId,
+}
+
+/// The model for one call and the credential that answered for it.
+type Current = (
+    std::sync::Arc<dyn ChatModel<()>>,
+    Option<(CredentialOrigin, SecretId)>,
+);
 
 type Built = (Option<Secret>, std::sync::Arc<dyn ChatModel<()>>);
 
@@ -116,7 +127,10 @@ impl HubModel {
             }
         };
         let (key, origin) = match key {
-            Some((secret, origin)) => (Some(secret), Some(origin)),
+            Some((secret, origin)) => {
+                let id = secret.id();
+                (Some(secret), Some((origin, id)))
+            }
             None => (None, None),
         };
         let managed = self.turn.group == crate::taxonomy::ProviderGroup::Managed;
@@ -180,7 +194,7 @@ impl HubModel {
             .await;
     }
 
-    async fn observe_err(&self, error: &Error, epoch: u64, origin: Option<&CredentialOrigin>) {
+    async fn observe_err(&self, error: &Error, epoch: u64, used: Option<Used<'_>>) {
         let Some(failure) = failure_of(error) else {
             return;
         };
@@ -189,10 +203,10 @@ impl HubModel {
             // The source that supplied the credential this request used, not
             // whatever answers now: a stale rejection must not refresh a token
             // that has since been rotated.
-            if let Some(origin) = origin {
+            if let Some(used) = used {
                 self.hub
                     .chain_for(&self.turn.kind)
-                    .invalidate_origin(&self.scope, origin);
+                    .invalidate_origin_rejected(&self.scope, used.origin, used.id);
             }
             // The cached client holds the rejected key: drop it.
             *self
@@ -271,7 +285,7 @@ impl ChatModel<()> for HubModel {
                 Ok(response)
             }
             Err(error) => {
-                self.observe_err(&error, epoch, origin.as_ref()).await;
+                self.observe_err(&error, epoch, used(&origin)).await;
                 Err(error)
             }
         }
@@ -290,11 +304,15 @@ impl ChatModel<()> for HubModel {
                 Ok(stream)
             }
             Err(error) => {
-                self.observe_err(&error, epoch, origin.as_ref()).await;
+                self.observe_err(&error, epoch, used(&origin)).await;
                 Err(error)
             }
         }
     }
+}
+
+fn used(origin: &Option<(CredentialOrigin, SecretId)>) -> Option<Used<'_>> {
+    origin.as_ref().map(|(origin, id)| Used { origin, id: *id })
 }
 
 #[cfg(test)]
@@ -304,9 +322,10 @@ impl HubModel {
         &self,
         error: &Error,
         epoch: u64,
-        origin: Option<&CredentialOrigin>,
+        origin: Option<(&CredentialOrigin, SecretId)>,
     ) {
-        self.observe_err(error, epoch, origin).await;
+        let used = origin.map(|(origin, id)| Used { origin, id });
+        self.observe_err(error, epoch, used).await;
     }
 }
 

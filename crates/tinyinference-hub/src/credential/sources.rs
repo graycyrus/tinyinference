@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::error::PortName;
 use crate::ids::{ScopeKey, Slug};
 use crate::ports::{CredentialStore, EnvSource, PortError, TokenSource};
-use crate::secret::Secret;
+use crate::secret::{Secret, SecretId};
 
 use super::{CredentialOrigin, CredentialSource};
 
@@ -193,6 +193,10 @@ impl CredentialSource for TokenSourceAdapter {
 
     fn invalidate(&self, scope: &ScopeKey) {
         self.source.invalidate(scope);
+    }
+
+    fn invalidate_rejected(&self, scope: &ScopeKey, rejected: SecretId) {
+        self.source.invalidate_rejected(scope, rejected);
     }
 }
 

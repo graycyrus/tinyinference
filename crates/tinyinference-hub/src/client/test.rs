@@ -495,7 +495,8 @@ async fn client_a_stale_rejection_does_not_refresh_a_token_rotated_meanwhile() {
     // The credential changes (which bumps the epoch) while the request is out.
     bed.hub.forget_health(&bed.scope, &slug("tinyhumans")).await;
     let origin = CredentialOrigin::SessionJwt;
-    chat.observe_err_for_test(&rejected, stale, Some(&origin))
+    let jwt = Secret::new("jwt").id();
+    chat.observe_err_for_test(&rejected, stale, Some((&origin, jwt)))
         .await;
     assert_eq!(
         tokens.invalidated.load(Ordering::SeqCst),
@@ -503,8 +504,107 @@ async fn client_a_stale_rejection_does_not_refresh_a_token_rotated_meanwhile() {
         "a stale 401 refreshes nothing"
     );
     let now = bed.hub.inner.health.epoch(&bed.scope, &slug("tinyhumans"));
-    chat.observe_err_for_test(&rejected, now, Some(&origin))
+    chat.observe_err_for_test(&rejected, now, Some((&origin, jwt)))
         .await;
+    assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 1);
+}
+
+/// A host token source that honours token identity: it refreshes only when the
+/// rejected token is the one it would hand out now.
+#[derive(Debug)]
+struct Identifying {
+    generation: AtomicUsize,
+    refreshes: AtomicUsize,
+}
+
+impl Identifying {
+    fn current(&self) -> String {
+        format!("jwt-{}", self.generation.load(Ordering::SeqCst))
+    }
+}
+
+#[async_trait]
+impl TokenSource for Identifying {
+    async fn token(&self, _: &crate::ids::ScopeKey) -> Result<Option<Secret>, PortError> {
+        Ok(Some(Secret::new(self.current())))
+    }
+
+    fn invalidate_rejected(&self, _: &crate::ids::ScopeKey, rejected: crate::secret::SecretId) {
+        if Secret::new(self.current()).id() == rejected {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_two_rejections_of_one_token_refresh_a_rotating_source_once() {
+    // Finding 3.3: `invalidate` had no token identity, so the second of two
+    // requests that used token A and both got a 401 discarded the fresh token B.
+    let tokens = Arc::new(Identifying {
+        generation: AtomicUsize::new(0),
+        refreshes: AtomicUsize::new(0),
+    });
+    let (factory, _fake) = recording(vec![]);
+    let bed = Bed::with(|b| {
+        b.model_factory(factory).managed(
+            ManagedConfig::new("https://api.tinyhumans.test/x").source(TokenSourceAdapter::new(
+                tokens.clone(),
+                CredentialOrigin::SessionJwt,
+            )),
+        )
+    });
+    let turn = crate::route::ResolvedTurn {
+        slug: slug("tinyhumans"),
+        kind: "tinyhumans".into(),
+        group: ProviderGroup::Managed,
+        base_url: "https://api.tinyhumans.test/x".into(),
+        model: Some(model("m")),
+        protocol: Protocol::OpenAiChat,
+        auth: AuthStyle::Bearer,
+        via: crate::route::ResolvedVia::Default,
+        origin: None,
+        temperature: None,
+        cli: None,
+    };
+    let chat = super::model::HubModel::new(bed.hub.clone(), bed.scope.clone(), turn);
+    let rejected = Error::Provider(Box::new(ProviderError {
+        provider: "tinyhumans".into(),
+        status: Some(401),
+        message: "invalid token".into(),
+        ..ProviderError::default()
+    }));
+    let origin = CredentialOrigin::SessionJwt;
+    let token_a = Secret::new("jwt-0").id();
+    let epoch = bed.hub.inner.health.epoch(&bed.scope, &slug("tinyhumans"));
+    chat.observe_err_for_test(&rejected, epoch, Some((&origin, token_a)))
+        .await;
+    chat.observe_err_for_test(&rejected, epoch, Some((&origin, token_a)))
+        .await;
+    assert_eq!(
+        tokens.refreshes.load(Ordering::SeqCst),
+        1,
+        "the second rejection of the same stale token is ignored"
+    );
+    assert_eq!(tokens.current(), "jwt-1");
+    // A rejection of the fresh token does refresh it.
+    chat.observe_err_for_test(&rejected, epoch, Some((&origin, Secret::new("jwt-1").id())))
+        .await;
+    assert_eq!(tokens.refreshes.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn client_a_source_that_ignores_identity_still_gets_the_old_invalidate() {
+    let tokens = Arc::new(Rotating {
+        token: Mutex::new(Some("jwt".into())),
+        invalidated: AtomicUsize::new(0),
+    });
+    let adapter = TokenSourceAdapter::new(tokens.clone(), CredentialOrigin::SessionJwt);
+    crate::credential::CredentialSource::invalidate_rejected(
+        &adapter,
+        &crate::ids::ScopeKey::new("s"),
+        Secret::new("anything").id(),
+    );
     assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 1);
 }
 

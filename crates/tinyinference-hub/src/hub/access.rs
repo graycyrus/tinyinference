@@ -27,6 +27,24 @@ pub(crate) struct Credential {
     pub(crate) epoch: u64,
 }
 
+impl Credential {
+    /// The identity a catalog cache entry is tied to: the credential, so a list
+    /// read with a replaced key is never served to its successor. A source that
+    /// rotates its own token (the platform token, a browser login) has none: the
+    /// account owns the list, and a fresh token every minute must not refetch it
+    /// every minute.
+    pub(crate) fn cache_identity(&self) -> Option<crate::secret::SecretId> {
+        match self.origin {
+            Some(
+                CredentialOrigin::InstanceIdentity
+                | CredentialOrigin::SessionJwt
+                | CredentialOrigin::OAuth,
+            ) => None,
+            _ => self.key.as_ref().map(Secret::id),
+        }
+    }
+}
+
 impl Hub {
     pub(crate) fn driver(&self, kind: &KindId) -> Result<Arc<dyn KindDriver>, HubError> {
         self.inner
@@ -207,13 +225,21 @@ impl Hub {
         &self,
         scope: &ScopeKey,
         kind: &KindId,
-        origin: Option<&CredentialOrigin>,
+        credential: &Credential,
         failure: &ProviderFailure,
     ) {
-        if let Some(origin) = origin
+        if let Some(origin) = credential.origin.as_ref()
             && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
         {
-            self.chain_for(kind).invalidate_origin(scope, origin);
+            match credential.key.as_ref() {
+                // Name the token that was rejected: a source that rotated since
+                // keeps its fresh one.
+                Some(key) => {
+                    self.chain_for(kind)
+                        .invalidate_origin_rejected(scope, origin, key.id())
+                }
+                None => self.chain_for(kind).invalidate_origin(scope, origin),
+            }
         }
     }
 

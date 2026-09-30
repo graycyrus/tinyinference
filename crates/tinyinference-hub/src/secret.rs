@@ -46,6 +46,38 @@ impl Secret {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// An opaque identity for this credential: equal for equal values within one
+    /// process, never derived from anything a second process could reproduce.
+    /// Lets a caller say "the credential I used" (a rejection of one token must
+    /// not refresh its successor) without holding, printing or persisting the
+    /// value. See [`SecretId`].
+    pub fn id(&self) -> SecretId {
+        static STATE: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
+        SecretId(std::hash::BuildHasher::hash_one(
+            STATE.get_or_init(std::hash::RandomState::new),
+            &self.0,
+        ))
+    }
+}
+
+/// An opaque, per-process identity of a [`Secret`] (token identity for
+/// invalidation, credential identity for catalog cache entries).
+///
+/// It is a 64-bit hash under a random key drawn once per process, so it is
+/// stable while the process lives, differs between processes, cannot be
+/// recomputed by anyone without that key, is never serialised, and its `Debug`
+/// prints nothing of it. Two secrets collide with probability 2^-64; a
+/// collision only means one credential is treated as its lookalike. It exists so
+/// identity can be compared without keeping the credential, and it must never be
+/// used as a persistent or cross-process key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SecretId(u64);
+
+impl fmt::Debug for SecretId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretId(..)")
+    }
 }
 
 impl From<String> for Secret {

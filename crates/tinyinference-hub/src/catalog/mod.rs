@@ -36,6 +36,9 @@ pub use registry::{ModelMeta, ModelMetadataSource};
 pub use types::{EntrySource, Freshness, Lifecycle, LifecycleStatus, ModelEntry, ModelList};
 
 #[cfg(test)]
+#[path = "cache_identity_test.rs"]
+mod cache_identity_tests;
+#[cfg(test)]
 #[path = "cache_test.rs"]
 mod cache_tests;
 #[cfg(test)]

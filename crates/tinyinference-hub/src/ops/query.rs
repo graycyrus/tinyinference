@@ -64,7 +64,7 @@ impl Hub {
                     tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record a probe");
                 }
                 if let Some(failure) = &report.failure {
-                    self.note_rejection(scope, &record.kind, credential.origin.as_ref(), failure);
+                    self.note_rejection(scope, &record.kind, &credential, failure);
                 }
                 Ok(report)
             }
@@ -227,7 +227,7 @@ impl Hub {
         let read = self
             .inner
             .cache
-            .read(key, refresh, || async {
+            .read_as(key, refresh, credential.cache_identity(), || async {
                 driver.list_models(&cx, &target).await
             })
             .await;
@@ -241,7 +241,7 @@ impl Hub {
             Ok(list) => list,
             Err(error) => {
                 if let HubError::Provider(failure) = &error {
-                    self.note_rejection(scope, &record.kind, credential.origin.as_ref(), failure);
+                    self.note_rejection(scope, &record.kind, &credential, failure);
                 }
                 return Err(error);
             }
@@ -361,7 +361,7 @@ impl Hub {
             && (failure.reason == ReasonCode::Auth || failure.status == Some(401))
             && let Ok(credential) = self.credential(scope, record).await
         {
-            self.note_rejection(scope, &record.kind, credential.origin.as_ref(), failure);
+            self.note_rejection(scope, &record.kind, &credential, failure);
         }
         Ok(())
     }
