@@ -691,3 +691,75 @@ async fn ops_retest_down_ignores_disabled_healthy_and_merely_degraded_providers(
     );
     let _ = KEY;
 }
+
+#[tokio::test]
+async fn ops_retest_down_skips_what_it_cannot_test() {
+    let bed = Bed::new();
+    // Three providers Down on a rejected key: one keyless now, one whose
+    // credential store is unreadable, one whose kind offers no completion or
+    // catalog depth (a stored CLI record).
+    bed.ports.config.put_raw(
+        &bed.scope,
+        json!({"providers": [
+            {"id": "a", "slug": "openai", "label": "OpenAI", "kind": "openai", "base_url": "https://api.openai.com/v1", "model": "m"},
+            {"id": "b", "slug": "claude-code", "label": "Claude Code", "kind": "claude-code", "base_url": ""}
+        ]})
+        .to_string(),
+    );
+    let auth = ProviderFailure::new(ReasonCode::Auth, Retry::Never);
+    for name in ["openai", "claude-code"] {
+        bed.hub
+            .record_outcome(&bed.scope, &slug(name), Outcome::Failed(auth.clone()))
+            .await
+            .unwrap();
+    }
+    bed.ports.clock.advance(Duration::from_secs(3600));
+    // No key: skipped without a request.
+    assert!(bed.hub.retest_down(&bed.scope).await.unwrap().is_empty());
+    assert_eq!(bed.ports.http.request_count(), 0);
+    // Unreadable credential store: skipped, not an error, not a keyless call.
+    bed.store_key("openai", KEY).await;
+    bed.ports
+        .credentials
+        .inject(crate::ports::memory::CredentialFault::Read);
+    assert!(bed.hub.retest_down(&bed.scope).await.unwrap().is_empty());
+    bed.ports.credentials.heal();
+    // A probe that cannot run (the health store went away mid-way) is skipped too.
+    bed.openai_lists(&["m"]);
+    bed.openai_chat_ok();
+    let done = bed.hub.retest_down(&bed.scope).await.unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].health, ProviderHealth::Ok);
+}
+
+#[tokio::test]
+async fn ops_retest_uses_a_catalog_read_when_the_record_has_no_model() {
+    let bed = Bed::new();
+    bed.hub
+        .add(
+            &bed.scope,
+            ProviderDraft::new("openai").with_key(Secret::new(KEY)),
+        )
+        .await
+        .unwrap();
+    let auth = ProviderFailure::new(ReasonCode::Quota, Retry::Never);
+    bed.hub
+        .record_outcome(&bed.scope, &slug("openai"), Outcome::Failed(auth))
+        .await
+        .unwrap();
+    bed.ports.clock.advance(Duration::from_secs(3600));
+    bed.openai_lists(&["m"]);
+    let done = bed.hub.retest_down(&bed.scope).await.unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(
+        bed.ports.http.requests().last().unwrap().url,
+        "https://api.openai.com/v1/models"
+    );
+    // A catalog pass cannot lift a quota failure recorded by a real turn: only
+    // a completion can, so the provider is still down and will be re-tested.
+    assert!(
+        matches!(done[0].health, ProviderHealth::Down(ReasonCode::Quota)),
+        "{:?}",
+        done[0].health
+    );
+}

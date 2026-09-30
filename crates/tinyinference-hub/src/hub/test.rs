@@ -341,3 +341,94 @@ async fn hub_a_removed_provider_cannot_be_probed_or_listed() {
     assert_eq!(bed.ports.http.request_count(), 0);
     let _ = ProviderGroup::Cloud;
 }
+
+// ---- value types and builder corners -----------------------------------------------------
+
+#[test]
+fn hub_value_types_build_debug_and_report() {
+    let patch = ProviderPatch::new()
+        .label("Work")
+        .base_url("https://user:hunter2@llm.acme.test/v1?api_key=abc")
+        .model(model("m"))
+        .key(Secret::new(KEY));
+    let text = format!("{patch:?}");
+    assert!(
+        !text.contains("hunter2") && !text.contains(KEY) && !text.contains("abc"),
+        "{text}"
+    );
+    assert!(text.contains("Work"));
+    let options = ConnectOptions::default()
+        .make_default(true)
+        .add_anyway(true)
+        .depth(crate::taxonomy::TestDepth::Completion);
+    assert!(options.make_default && options.add_anyway);
+    assert_eq!(options.depth, crate::taxonomy::TestDepth::Completion);
+    let policy = HubPolicy::new()
+        .one_row_per_kind(true)
+        .reserved_model_words(["a", "b"])
+        .retest_after(std::time::Duration::from_secs(9));
+    assert!(policy.one_row_per_kind);
+    assert_eq!(policy.reserved_model_words, ["a", "b"]);
+    assert_eq!(policy.retest_after, std::time::Duration::from_secs(9));
+    assert_eq!(
+        HubPolicy::default().retest_after,
+        std::time::Duration::from_secs(300)
+    );
+    assert_eq!(Confirm::no(), Confirm::default());
+    assert!(Confirm::in_use().in_use);
+    let configured = KeyState::Configured(crate::credential::CredentialOrigin::AccountKey);
+    assert!(configured.is_configured() && configured.origin().is_some());
+    for state in [KeyState::Missing, KeyState::Unreadable] {
+        assert!(!state.is_configured() && state.origin().is_none());
+    }
+}
+
+#[tokio::test]
+async fn builder_an_extra_credential_source_answers_after_the_stored_key() {
+    let bed = Bed::with(|b| {
+        b.credential_source(
+            "groq",
+            crate::credential::StaticSource::new(Secret::new("gsk-static")),
+        )
+    });
+    bed.hub
+        .add(
+            &bed.scope,
+            ProviderDraft::new("groq").with_model(model("m")),
+        )
+        .await
+        .unwrap();
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &crate::route::TurnQuery::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.origin,
+        Some(crate::credential::CredentialOrigin::Static)
+    );
+    bed.hub
+        .set_key(&bed.scope, &slug("groq"), Secret::new("gsk-stored"))
+        .await
+        .unwrap();
+    let turn = bed
+        .hub
+        .resolve_for_turn(&bed.scope, &crate::route::TurnQuery::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.origin,
+        Some(crate::credential::CredentialOrigin::ProviderKey)
+    );
+    // A source for a kind nothing registered still gets a chain (the store first).
+    let bed = Bed::with(|b| {
+        b.credential_source(
+            "brand-new",
+            crate::credential::StaticSource::new(Secret::new("k")),
+        )
+        .http(crate::testkit::ScriptedHttp::new(
+            crate::testkit::FakeClock::new(),
+        ))
+    });
+    assert!(bed.hub.kinds().get(&"brand-new".into()).is_none());
+}

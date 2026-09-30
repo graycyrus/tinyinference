@@ -128,14 +128,14 @@ impl Hub {
         };
 
         if key.is_some() {
-            self.after_key_change(scope, slug, true).await?;
+            self.after_key_change(scope, slug, true).await;
         }
         if let Some(new) = &base_url
             && *new != record.base_url
         {
             // A different endpoint says nothing about what the old one said.
             self.inner.cache.evict_endpoint(&record.base_url);
-            self.inner.health.forget(scope, slug).await?;
+            self.forget_health(scope, slug).await;
         }
         let changed = committed.changed || key.is_some();
         if changed {

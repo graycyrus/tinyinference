@@ -4,7 +4,7 @@ use crate::config::{DefaultChoice, ModelChoice, ProviderDraft};
 use crate::error::{HubError, Operation, ReasonCode, Unresolved, UsedBy};
 use crate::health::ProviderHealth;
 use crate::hub::fixtures::{Bed, KEY, model, slug};
-use crate::hub::{Confirm, ConnectOptions, KeyState, MutationStatus};
+use crate::hub::{Confirm, ConnectOptions, KeyState, MutationStatus, ProviderPatch};
 use crate::ids::{AgentKey, WorkloadKey};
 use crate::ports::HubEvent;
 use crate::ports::memory::CredentialFault;
@@ -636,4 +636,86 @@ async fn ops_workload_keys_are_opaque_and_routes_are_stored_only_when_meaningful
         MutationStatus::Unchanged
     );
     let _ = ReasonCode::Auth;
+}
+
+#[tokio::test]
+async fn ops_the_hosts_agents_and_workloads_are_merged_without_duplicates() {
+    let mut host = UsedBy::default();
+    host.agents.push(AgentKey::new("agent:writer")); // also pinned in the hub
+    host.agents.push(AgentKey::new("agent:host-only"));
+    host.workloads.push(WorkloadKey::new("tier:chat")); // also routed in the hub
+    host.workloads.push(WorkloadKey::new("tier:host-only"));
+    host.default_choice = false;
+    let bed = Bed::with(|b| b.usage_query(std::sync::Arc::new(HostPins(host))));
+    with_openai(&bed).await;
+    bed.hub.clear_default(&bed.scope).await.unwrap();
+    bed.hub
+        .pin_agent(
+            &bed.scope,
+            &AgentKey::new("agent:writer"),
+            Some(ModelChoice::new(slug("openai"), model("gpt-x"))),
+        )
+        .await
+        .unwrap();
+    bed.hub
+        .set_workload_route(
+            &bed.scope,
+            &WorkloadKey::new("tier:chat"),
+            Some(ProviderRoute::provider(slug("openai"))),
+        )
+        .await
+        .unwrap();
+    let error = bed
+        .hub
+        .remove(&bed.scope, &slug("openai"), Confirm::no())
+        .await
+        .unwrap_err();
+    let HubError::InUse(used) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(
+        (used.agents.len(), used.workloads.len()),
+        (2, 2),
+        "{used:?}"
+    );
+}
+
+#[tokio::test]
+async fn ops_a_cli_kind_in_a_stored_document_cannot_take_a_key() {
+    let bed = Bed::new();
+    bed.ports.config.put_raw(
+        &bed.scope,
+        serde_json::json!({"providers": [{"id": "p", "slug": "claude-code", "label": "Claude Code",
+            "kind": "claude-code", "base_url": ""}]})
+        .to_string(),
+    );
+    assert!(matches!(
+        bed.hub
+            .set_key(&bed.scope, &slug("claude-code"), Secret::new("k"))
+            .await,
+        Err(HubError::Unsupported {
+            op: Operation::SetKey,
+            ..
+        })
+    ));
+    assert!(matches!(
+        bed.hub
+            .list_models(&bed.scope, &slug("claude-code"), false)
+            .await,
+        Err(HubError::Unsupported {
+            op: Operation::ListModels,
+            ..
+        })
+    ));
+    assert!(matches!(
+        bed.hub
+            .edit(
+                &bed.scope,
+                &slug("claude-code"),
+                ProviderPatch::new().key(Secret::new(" "))
+            )
+            .await,
+        Err(HubError::Invalid(_))
+    ));
+    assert!(bed.ports.credentials.is_empty());
 }

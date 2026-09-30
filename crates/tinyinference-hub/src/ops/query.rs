@@ -48,20 +48,26 @@ impl Hub {
         let cx = self.cx(&headers);
         match run_probe(&cx, &*driver, &target, depth).await {
             Ok(report) => {
-                self.inner
+                // Recording is best effort: the check ran, and its report is what
+                // the caller asked for. A health store that is down says so on the
+                // next read of health.
+                if let Err(error) = self
+                    .inner
                     .health
                     .record_probe(scope, &record.slug, &report)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record a probe");
+                }
                 if let Some(failure) = &report.failure {
                     self.note_rejection(scope, &record.kind, credential.origin.as_ref(), failure);
                 }
                 Ok(report)
             }
             Err(HubError::SignedOut { provider }) => {
-                self.inner
-                    .health
-                    .mark_signed_out(scope, &record.slug)
-                    .await?;
+                if let Err(error) = self.inner.health.mark_signed_out(scope, &record.slug).await {
+                    tracing::warn!(slug = %record.slug, reason = %error.reason(), "could not record signed out");
+                }
                 Err(HubError::SignedOut { provider })
             }
             Err(other) => Err(other),
@@ -171,7 +177,9 @@ impl Hub {
         let auth = Self::auth_of(&record, descriptor);
         if credential.key.is_none() && auth.needs_credential() {
             if descriptor.group == ProviderGroup::Managed {
-                self.inner.health.mark_signed_out(scope, slug).await?;
+                if let Err(error) = self.inner.health.mark_signed_out(scope, slug).await {
+                    tracing::warn!(%slug, reason = %error.reason(), "could not record signed out");
+                }
                 return Err(HubError::SignedOut {
                     provider: slug.clone(),
                 });

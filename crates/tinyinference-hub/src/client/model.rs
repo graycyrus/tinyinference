@@ -10,7 +10,7 @@ use tinyinference_llm::model::{
     ChatModel, ModelProfile, ModelRequest, ModelResponse, ModelStream, ProviderError,
 };
 
-use crate::error::{HubError, ProviderFailure, ReasonCode, Retry};
+use crate::error::{HubError, ProviderFailure, ReasonCode};
 use crate::health::Outcome;
 use crate::hub::Hub;
 use crate::ids::ScopeKey;
@@ -58,28 +58,22 @@ impl HubModel {
     /// The model for this call: the credential chain is resolved **now**, and
     /// the underlying client is rebuilt only when the credential changed.
     async fn current(&self) -> Result<std::sync::Arc<dyn ChatModel<()>>> {
-        let record = crate::descriptor::ProviderRecord::new(
-            "turn",
-            self.turn.slug.clone(),
-            self.turn.slug.to_string(),
-            self.turn.kind.clone(),
-            self.turn.base_url.clone(),
-        );
         let resolved = self
             .hub
             .chain_for(&self.turn.kind)
             .resolve(&self.scope, &self.turn.slug)
             .await;
+        // The chain only ever fails as an unreadable source: not "no key", and not
+        // a reason to fall through to a call without one.
         let key = match resolved {
             Ok(found) => found.map(|(secret, _)| secret),
-            Err(HubError::StoreUnreadable { .. }) => {
+            Err(_) => {
                 return Err(self.provider_error(
                     "store_unreadable",
                     "the credential store could not be read",
                     true,
                 ));
             }
-            Err(_) => return Err(self.provider_error("credential", "no credential", false)),
         };
         let managed = self.turn.group == crate::taxonomy::ProviderGroup::Managed;
         if key.is_none() && managed {
@@ -91,7 +85,6 @@ impl HubModel {
                 .await;
             return Err(self.provider_error("signed_out", "signed out", false));
         }
-        let _ = record;
         {
             let held = self
                 .inner
@@ -258,6 +251,3 @@ impl fmt::Debug for HubModel {
             .finish_non_exhaustive()
     }
 }
-
-#[allow(dead_code)]
-fn _retry_is_used(_: Retry) {}

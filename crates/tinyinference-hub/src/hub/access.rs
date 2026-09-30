@@ -160,23 +160,31 @@ impl Hub {
         Ok((health, snapshot))
     }
 
+    /// Forgets a provider's health **after** the change that made it stale has
+    /// been committed.
+    ///
+    /// Best effort by design: the operation already succeeded, and health is
+    /// derived data. Reporting a failed operation because the health store had an
+    /// outage would leave the caller believing a committed change did not happen.
+    /// A health store that is down is reported by the reads that need it
+    /// (`health`, `status`).
+    pub(crate) async fn forget_health(&self, scope: &ScopeKey, slug: &Slug) {
+        if let Err(error) = self.inner.health.forget(scope, slug).await {
+            tracing::warn!(%slug, reason = %error.reason(), "could not forget a provider's health");
+        }
+    }
+
     /// The hooks every credential change runs: the provider's health is
     /// forgotten (what was learned about the old credential says nothing about
     /// the new one) and the scope's cached catalogs are dropped.
-    pub(crate) async fn after_key_change(
-        &self,
-        scope: &ScopeKey,
-        slug: &Slug,
-        present: bool,
-    ) -> Result<(), HubError> {
+    pub(crate) async fn after_key_change(&self, scope: &ScopeKey, slug: &Slug, present: bool) {
         self.inner.cache.evict_scope(scope);
-        self.inner.health.forget(scope, slug).await?;
+        self.forget_health(scope, slug).await;
         self.inner.events.emit(HubEvent::KeyChanged {
             scope: scope.clone(),
             slug: slug.clone(),
             present,
         });
-        Ok(())
     }
 
     /// A rejected credential: tell the source that supplied it so a host that

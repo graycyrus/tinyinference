@@ -94,7 +94,11 @@ impl Hub {
         let used = match committed {
             Ok(committed) => committed.value,
             Err(error) => {
-                if let Some(previous) = previous {
+                // A record somebody else removed while this ran took its key with
+                // it: putting the key back would leave a slot no record owns.
+                if !matches!(error, HubError::NotFound(_))
+                    && let Some(previous) = previous
+                {
                     self.restore_slot(scope, slug, Some(previous)).await?;
                 }
                 return Err(error);
@@ -102,7 +106,7 @@ impl Hub {
         };
         self.inner.cache.evict_endpoint(&record.base_url);
         self.inner.cache.evict_scope(scope);
-        self.inner.health.forget(scope, slug).await?;
+        self.forget_health(scope, slug).await;
         self.inner.events.emit(HubEvent::ProviderRemoved {
             scope: scope.clone(),
             slug: slug.clone(),
@@ -225,7 +229,7 @@ impl Hub {
             });
         }
         self.write_slot(scope, slug, key).await?;
-        self.after_key_change(scope, slug, true).await?;
+        self.after_key_change(scope, slug, true).await;
         let view = self.view(scope, &record, &config).await;
         Ok(Mutation {
             status: MutationStatus::Saved,
@@ -262,7 +266,7 @@ impl Hub {
         let had_key = self.read_slot(scope, slug).await?.is_some();
         if had_key {
             self.delete_slot(scope, slug).await?;
-            self.after_key_change(scope, slug, false).await?;
+            self.after_key_change(scope, slug, false).await;
         }
         let view = self.view(scope, &record, &config).await;
         Ok(Mutation {

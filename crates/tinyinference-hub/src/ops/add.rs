@@ -263,7 +263,7 @@ impl Hub {
             Ok(_) => {
                 let (record, became_default) = inserted.ok_or(HubError::Conflict)?;
                 if plan.key.is_some() {
-                    self.after_key_change(scope, &plan.slug, true).await?;
+                    self.after_key_change(scope, &plan.slug, true).await;
                 }
                 self.inner.events.emit(HubEvent::ProviderAdded {
                     scope: scope.clone(),
@@ -423,7 +423,7 @@ impl Hub {
             self.restore_slot(scope, &slug, previous).await?;
         }
         self.inner.cache.evict_scope(scope);
-        self.inner.health.forget(scope, &slug).await?;
+        self.forget_health(scope, &slug).await;
         removed.map(|_| ())
     }
 }

@@ -73,10 +73,9 @@ impl MemoryPorts {
     ///
     /// Never: every required port is set.
     pub fn hub(&self) -> Hub {
-        match self.builder().build() {
-            Ok(hub) => hub,
-            Err(error) => panic!("MemoryPorts::builder sets every required port: {error}"),
-        }
+        self.builder()
+            .build()
+            .expect("MemoryPorts::builder sets every required port")
     }
 }
 

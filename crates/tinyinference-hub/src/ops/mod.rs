@@ -21,5 +21,8 @@ mod guards_tests;
 #[path = "query_test.rs"]
 mod query_tests;
 #[cfg(test)]
+#[path = "race_test.rs"]
+mod race_tests;
+#[cfg(test)]
 #[path = "test.rs"]
 mod tests;

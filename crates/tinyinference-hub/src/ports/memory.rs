@@ -318,6 +318,12 @@ impl MemoryEvents {
         lock(&self.events).clone()
     }
 
+    /// Delivers an event as if the hub had emitted it (for tests of what
+    /// consumes events).
+    pub fn emit_test(&self, event: HubEvent) {
+        lock(&self.events).push(event);
+    }
+
     /// Takes everything received so far, leaving the sink empty.
     pub fn drain(&self) -> Vec<HubEvent> {
         std::mem::take(&mut *lock(&self.events))

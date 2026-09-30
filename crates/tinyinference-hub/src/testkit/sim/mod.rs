@@ -10,6 +10,9 @@
 
 mod action;
 mod invariants;
+#[cfg(test)]
+#[path = "test.rs"]
+mod tests;
 mod world;
 
 pub use action::{Action, StepResult};
@@ -185,9 +188,7 @@ impl ScenarioRunner {
                 )),
             )
             .build()
-            .unwrap_or_else(|error| {
-                panic!("the runner's hub builds from in-memory ports: {error}")
-            });
+            .expect("the runner's hub builds from in-memory ports");
         let mut runner = Self {
             seed,
             rng: Rng::new(seed),
